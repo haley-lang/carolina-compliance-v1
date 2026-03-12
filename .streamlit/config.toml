@@ -4,3 +4,4 @@ enableCORS = false
 enableXsrfProtection = false
 
 [global]
+entryPoint = "dashboard.py"
