@@ -1,0 +1,24 @@
+{
+  "document_type": "COI",
+  "named_insured": "SAMPLE VENDOR",
+  "certificate_date": null,
+  "contact_emails": [],
+  "policies": [
+    {
+      "policy_type": "COMMERCIAL GENERAL LIABILITY",
+      "policy_number": "CGL 123456",
+      "carrier": "INSURANCE COMPANY NAME",
+      "effective_date": "10/01/2020",
+      "expiration_date": "10/01/2021",
+      "coverage_limits": "$1,000,000 / $2,000,000"
+    },
+    {
+      "policy_type": "AUTOMOBILE LIABILITY",
+      "policy_number": "CAL 987654",
+      "carrier": "INSURANCE COMPANY NAME",
+      "effective_date": "10/01/2020",
+      "expiration_date": "10/01/2021",
+      "coverage_limits": "$1,000,000"
+    }
+  ]
+}

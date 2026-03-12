@@ -1,0 +1,21 @@
+{
+  "name": "Sample Client",
+  "requirements": [
+    {
+      "Policy Type": "General Liability",
+      "Required": true,
+      "Additional Insured Required": false,
+      "Waiver Required": true,
+      "Primary Noncontributory Required": false,
+      "Minimum Limit": "1000000"
+    },
+    {
+      "Policy Type": "Workers Comp",
+      "Required": true,
+      "Additional Insured Required": true,
+      "Waiver Required": false,
+      "Primary Noncontributory Required": true,
+      "Minimum Limit": "500000"
+    }
+  ]
+}
