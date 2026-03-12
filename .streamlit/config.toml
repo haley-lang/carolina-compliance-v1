@@ -1,8 +1,6 @@
 [server]
 headless = true
 enableCORS = false
-port = $PORT
 enableXsrfProtection = false
 
 [global]
-entryPoint = "dashboard.py"
