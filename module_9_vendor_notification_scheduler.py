@@ -15,16 +15,10 @@ API_KEY = os.getenv("AIRTABLE_API_KEY")
 BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 VENDORS_TABLE = 'Vendors'
 INSURANCE_POLICIES_TABLE = 'Insurance Policies'
-VENDOR_CLIENT_ASSIGNMENTS_TABLE = 'Vendor Client Assignments'
 
 def get_expiring_policies(api):
     table = api.table(BASE_ID, INSURANCE_POLICIES_TABLE)
-    formula = "OR({Expiration Status} = 'Expiring in 90 Days', {Expiration Status} = 'Expiring in 30 Days', {Expiration Status} = 'Expiring in 7 Days', {Expiration Status} = 'Expired')"
-    return table.all(formula=formula)
-
-def get_non_compliant_assignments(api):
-    table = api.table(BASE_ID, VENDOR_CLIENT_ASSIGNMENTS_TABLE)
-    formula = "OR({Compliance Status} = 'Missing Coverage', {Compliance Status} = 'Expired', {Compliance Status} = 'Needs Review')"
+    formula = "OR({Expiration Status} = 'Expiring in 30 Days', {Expiration Status} = 'Expired')"
     return table.all(formula=formula)
 
 def log_vendor_notifications(api):
@@ -47,13 +41,7 @@ def log_vendor_notifications(api):
         expiration_status = policy['fields'].get('Expiration Status')
         logging.info(f"Vendor needs expiration notice: {vendor_name} — {expiration_status}")
 
-    # Log non-compliant assignments
-    non_compliant_assignments = get_non_compliant_assignments(api)
-    for assignment in non_compliant_assignments:
-        vendor_id = assignment['fields'].get('Vendor', [None])[0] or assignment['fields'].get('Vendor Link', [None])[0]
-        vendor_name = get_vendor_name(api, vendor_id, "Vendor Client Assignments")
-        compliance_status = assignment['fields'].get('Compliance Status')
-        logging.info(f"Vendor needs compliance notice: {vendor_name} — {compliance_status}")
+    logging.info("Compliance/requirement-based reminder triggers are disabled.")
 
 def get_vendor_name(api, vendor_id, source):
     if isinstance(vendor_id, list):

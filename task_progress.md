@@ -1,0 +1,5 @@
+- [ ] Verify all admin pages and APIs work together end-to-end
+- [ ] Verify demo setup creates usable data
+- [ ] Verify a deadline can trigger notification flow and appear in audit logs
+- [ ] Verify weekly summary path works with existing seeded/demo data
+- [ ] Fix broken wiring, missing route registration, obvious data mismatch, or auth/org-scoping issues

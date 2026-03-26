@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audit Logs</title>
+</head>
+<body>
+    <h1>Audit Logs</h1>
+    <form method="GET" action="/admin/audit-logs">
+        <input type="text" name="filter" placeholder="Filter logs">
+        <button type="submit">Apply Filter</button>
+    </form>
+    <table>
+        <thead>
+            <tr>
+                <th>Timestamp</th>
+                <th>Action</th>
+                <th>User</th>
+                <th>Details</th>
+            </tr>
+        </thead>
+<tbody>
+    {% for log in audit_logs %}
+    <tr>
+        <td>{{ log.timestamp }}</td>
+        <td>{{ log.action }}</td>
+        <td>{{ log.user }}</td>
+        <td>{{ log.details }}</td>
+    </tr>
+    {% endfor %}
+</tbody>
+    </table>
+</body>
+</html>

@@ -2,13 +2,16 @@ import os
 import logging
 from pyairtable import Api
 from dotenv import load_dotenv
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 
 # Load environment variables
 load_dotenv()
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Reminder triggers are expiration-based only.
+REMINDER_EXPIRATION_STATUSES = {"Expired", "Expiring in 30 Days"}
 
 # Helper functions
 def get_env_var(var_name: str) -> str:
@@ -39,6 +42,11 @@ def log_vendor_reminder(vendor_name: str, vendor_email: str, reason: str) -> Non
     """Log the vendor reminder details."""
     logging.info(f"Vendor Reminder Required\nVendor: {vendor_name}\nEmail: {vendor_email}\nReason: {reason}")
 
+
+def policy_triggers_reminder(policy_fields: Dict[str, Any]) -> bool:
+    """Return True when a policy should generate a reminder."""
+    return policy_fields.get("Expiration Status") in REMINDER_EXPIRATION_STATUSES
+
 # Main function
 def get_vendors_needing_reminders() -> List[Dict[str, Any]]:
     logging.info("Vendor Reminder Engine start")
@@ -49,7 +57,6 @@ def get_vendors_needing_reminders() -> List[Dict[str, Any]]:
 
     # Connect to Airtable tables
     policies_table = connect_to_airtable(api_key, base_id, "Insurance Policies")
-    vendor_assignments_table = connect_to_airtable(api_key, base_id, "Vendor Client Assignments")
     vendors_table = connect_to_airtable(api_key, base_id, "Vendors")
 
     # Load insurance policies
@@ -58,14 +65,6 @@ def get_vendors_needing_reminders() -> List[Dict[str, Any]]:
         logging.info(f"Policies loaded: {len(policies)}")
     except Exception as e:
         logging.error(f"Failed to load insurance policies: {e}")
-        return []
-
-    # Load vendor client assignments
-    try:
-        vendor_assignments = vendor_assignments_table.all()
-        logging.info(f"Assignments loaded: {len(vendor_assignments)}")
-    except Exception as e:
-        logging.error(f"Failed to load vendor client assignments: {e}")
         return []
 
     # Load vendors
@@ -81,26 +80,20 @@ def get_vendors_needing_reminders() -> List[Dict[str, Any]]:
 
     # Initialize list to track vendors needing reminders
     vendors_needing_reminders = []
+    seen_vendor_ids = set()
 
     # Identify vendors needing reminders based on insurance policies
     for policy in policies:
         fields = policy['fields']
         expiration_status = fields.get("Expiration Status")
-        if expiration_status in ["Expired", "Expiring in 7 Days", "Expiring in 30 Days", "Expiring in 90 Days"]:
+        if policy_triggers_reminder(fields):
             vendor_id = extract_first_linked_id(fields.get("Vendor"))
             vendor = vendor_lookup.get(vendor_id)
-            if vendor and vendor_id not in vendors_needing_reminders:
+            if vendor and vendor_id not in seen_vendor_ids:
                 vendors_needing_reminders.append(vendor)
-
-    # Identify vendors needing reminders based on compliance status
-    for assignment in vendor_assignments:
-        fields = assignment['fields']
-        compliance_status = fields.get("Compliance Status")
-        if compliance_status in ["Missing Coverage", "Expired", "Needs Review"]:
-            vendor_id = extract_first_linked_id(fields.get("Vendor"))
-            vendor = vendor_lookup.get(vendor_id)
-            if vendor and vendor_id not in vendors_needing_reminders:
-                vendors_needing_reminders.append(vendor)
+                seen_vendor_ids.add(vendor_id)
+                vendor_name = vendor.get("fields", {}).get("Vendor Name", "Unknown Vendor")
+                log_vendor_reminder(vendor_name, vendor.get("fields", {}).get("Email", ""), expiration_status)
 
     # Log the number of reminders generated
     logging.info(f"Reminders generated: {len(vendors_needing_reminders)}")
@@ -109,4 +102,4 @@ def get_vendors_needing_reminders() -> List[Dict[str, Any]]:
     return vendors_needing_reminders
 
 if __name__ == "__main__":
-    run()
+    get_vendors_needing_reminders()

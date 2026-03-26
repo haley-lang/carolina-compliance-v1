@@ -20,16 +20,26 @@ def run_module(module_name, command):
 def main():
     logger.info("=== Starting Carolina Compliance Solutions Pipeline ===")
 
-    # Define the modules and their commands
+    # V1 simplified flow (execution only)
     modules = [
-        ("Module 1 Email Intake", "python email_monitor.py"),
-        ("Module 2 COI Extractor", "python extractor.py"),
-        ("Module 3 Airtable Importer", "python airtable_importer.py"),
-        ("Module 4 COI Processor", "python processor.py"),
-        ("Module 5 Compliance Checker", "python compliance_checker.py"),
-        ("Module 6 Renewal Task Creator", "python module_6_task_creator.py"),
-        ("Module 7B Requirement Validator", "python module_7b_requirement_validator.py"),
+        ("Module 1 Email Intake", "python3 email_monitor.py"),
+        ("Module 2 COI Extractor", "python3 extractor.py"),
+        ("Module 3 Airtable Importer", "python3 airtable_importer.py"),
+        ("Module 4 COI Processor", "python3 processor.py"),
+        ("Module 8 Policy Expiration Monitor", "python3 module_8_policy_expiration_monitor.py"),
+        ("Module 15 Email Queue Builder", "python3 module_15_email_queue_builder.py"),
+        ("Module 10 Vendor Email Sender", "python3 module_10_vendor_email_sender.py"),
     ]
+
+    # Explicitly disabled for simplified V1 pipeline (kept in codebase, not executed):
+    disabled_modules = [
+        "module_7a_client_setup_wizard.py",
+        "module_7b_requirement_validator.py",
+        "module_6_task_creator.py",
+        "module_11_task_generator.py",
+        "task_generator.py",
+    ]
+    logger.info("V1 disabled modules: %s", ", ".join(disabled_modules))
 
     # Run each module in sequence
     for module_name, command in modules:

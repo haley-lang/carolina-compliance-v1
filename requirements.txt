@@ -4,3 +4,4 @@ numpy
 pyairtable
 python-dotenv
 openai
+sendgrid

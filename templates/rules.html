@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rules</title>
+</head>
+<body>
+    <h1>Rules</h1>
+    <form method="POST" action="/admin/rules">
+        <input type="text" name="rule_name" placeholder="Rule Name" required>
+        <textarea name="rule_description" placeholder="Rule Description" required></textarea>
+        <button type="submit">Create/Update Rule</button>
+    </form>
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Description</th>
+                <th>Status</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+<tbody>
+    {% if rules %}
+        {% for rule in rules %}
+        <tr>
+            <td>{{ rule.name | default('', true) }}</td>
+            <td>{{ rule.description | default(rule.condition_json | default('', true), true) }}</td>
+            <td>{{ rule.status | default('Enabled' if (rule.enabled | default(false, true)) else 'Disabled', true) }}</td>
+            <td>
+                <form method="POST" action="/admin/rules">
+                    <input type="hidden" name="rule_name" value="{{ rule.name | default('', true) }}">
+                    <input type="hidden" name="rule_description" value="{{ rule.description | default(rule.condition_json | default('', true), true) }}">
+                    <button type="submit">Edit</button>
+                </form>
+                <form method="POST" action="/admin/rules/toggle">
+                    <input type="hidden" name="rule_name" value="{{ rule.name | default('', true) }}">
+                    <button type="submit">{{ 'Disable' if (rule.enabled | default(false, true)) else 'Enable' }}</button>
+                </form>
+                <form method="POST" action="/admin/rules/delete">
+                    <input type="hidden" name="rule_name" value="{{ rule.name | default('', true) }}">
+                    <button type="submit">Delete</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    {% else %}
+        <tr>
+            <td colspan="4">No rules created yet.</td>
+        </tr>
+    {% endif %}
+</tbody>
+    </table>
+</body>
+</html>

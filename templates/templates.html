@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Templates</title>
+</head>
+<body>
+    <h1>Templates</h1>
+    <form method="POST" action="/admin/templates">
+        <input type="text" name="template_name" placeholder="Template Name" required>
+        <textarea name="template_content" placeholder="Template Content" required></textarea>
+        <button type="submit">Create/Update Template</button>
+    </form>
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Content</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+<tbody>
+    {% if templates %}
+        {% for template in templates %}
+        <tr>
+            <td>{{ template.name }}</td>
+            <td>{{ template.subject }}<br>{{ template.body }}</td>
+            <td>
+                <form method="POST" action="/admin/templates">
+                    <input type="hidden" name="template_name" value="{{ template.name }}">
+                    <input type="hidden" name="template_subject" value="{{ template.subject }}">
+                    <input type="hidden" name="template_body" value="{{ template.body }}">
+                    <button type="submit">Edit</button>
+                </form>
+                <form method="POST" action="/admin/templates/delete">
+                    <input type="hidden" name="template_name" value="{{ template.name }}">
+                    <button type="submit">Delete</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    {% else %}
+        <tr>
+            <td colspan="3">No templates yet</td>
+        </tr>
+    {% endif %}
+</tbody>
+    </table>
+</body>
+</html>

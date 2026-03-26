@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Deadlines</title>
+    <style>
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+        }
+        th {
+            background-color: #f2f2f2;
+        }
+    </style>
+</head>
+<body>
+    <h1>Compliance Deadlines</h1>
+    <form id="deadline-form">
+        <input type="hidden" name="id" id="deadline-id">
+        <label for="entity_id">Entity ID:</label>
+        <input type="number" name="entity_id" id="entity-id" required>
+        <label for="entity_type">Entity Type:</label>
+        <input type="text" name="entity_type" id="entity-type" required>
+        <label for="deadline_type">Deadline Type:</label>
+        <input type="text" name="deadline_type" id="deadline-type" required>
+        <label for="due_date">Due Date:</label>
+        <input type="datetime-local" name="due_date" id="due-date" required>
+        <label for="status">Status:</label>
+        <select name="status" id="status">
+            <option value="PENDING">PENDING</option>
+            <option value="COMPLETED">COMPLETED</option>
+            <option value="OVERDUE">OVERDUE</option>
+        </select>
+        <button type="submit">Save</button>
+    </form>
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Entity ID</th>
+                <th>Entity Type</th>
+                <th>Deadline Type</th>
+                <th>Due Date</th>
+                <th>Status</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody id="deadlines-table-body">
+            <!-- Deadlines will be populated here -->
+        </tbody>
+    </table>
+    <script>
+        document.getElementById('deadline-form').addEventListener('submit', function(event) {
+            event.preventDefault();
+            const formData = new FormData(event.target);
+            const data = Object.fromEntries(formData.entries());
+            const method = data.id ? 'PUT' : 'POST';
+            const url = data.id ? `/api/deadlines/${data.id}` : '/api/deadlines';
+
+            fetch(url, {
+                method: method,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer valid-token' // Replace with actual token
+                },
+                body: JSON.stringify(data)
+            })
+            .then(response => response.json())
+            .then(data => {
+                alert('Deadline saved successfully');
+                fetchDeadlines();
+            })
+            .catch(error => console.error('Error:', error));
+        });
+
+        function fetchDeadlines() {
+            fetch('/api/deadlines', {
+                headers: {
+                    'Authorization': 'Bearer valid-token' // Replace with actual token
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                const tableBody = document.getElementById('deadlines-table-body');
+                tableBody.innerHTML = '';
+                data.forEach(deadline => {
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td>${deadline.id}</td>
+                        <td>${deadline.entity_id}</td>
+                        <td>${deadline.entity_type}</td>
+                        <td>${deadline.deadline_type}</td>
+                        <td>${new Date(deadline.due_date).toLocaleString()}</td>
+                        <td>${deadline.status}</td>
+                        <td>
+                            <button onclick="editDeadline(${deadline.id})">Edit</button>
+                            <button onclick="markAsCompleted(${deadline.id})">Mark as Completed</button>
+                        </td>
+                    `;
+                    tableBody.appendChild(row);
+                });
+            })
+            .catch(error => console.error('Error:', error));
+        }
+
+        function editDeadline(id) {
+            // Fetch deadline data and populate the form for editing
+        }
+
+        function markAsCompleted(id) {
+            fetch(`/api/deadlines/${id}`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer valid-token' // Replace with actual token
+                },
+                body: JSON.stringify({ status: 'COMPLETED' })
+            })
+            .then(response => response.json())
+            .then(data => {
+                alert('Deadline marked as completed');
+                fetchDeadlines();
+            })
+            .catch(error => console.error('Error:', error));
+        }
+
+        fetchDeadlines();
+    </script>
+</body>
+</html>

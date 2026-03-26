@@ -5,13 +5,19 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any
 import os
 from dotenv import load_dotenv
-from pyairtable import Table
+from pyairtable import Table, Api
 from module_12_vendor_reminder_engine import get_vendors_needing_reminders
-from module_17_recipient_resolver import resolve_recipients
-from airtable_client import Api
 
 # Initialize logging
 logging.basicConfig(level=logging.INFO)
+
+HARDCODED_EMAIL_SUBJECT = "Insurance Update Required"
+HARDCODED_EMAIL_BODY = (
+    "Dear Vendor,\n\n"
+    "Please provide an updated Certificate of Insurance (COI) at your earliest convenience.\n\n"
+    "Thank you,\n"
+    "Compliance Team"
+)
 
 def load_env_variables():
     # Load environment variables
@@ -24,6 +30,11 @@ def connect_to_airtable():
     # Connect to Airtable
     api_key, base_id = load_env_variables()
     return Table(api_key, base_id, "Email Queue")
+
+
+def connect_api() -> Api:
+    api_key, _ = load_env_variables()
+    return Api(api_key)
 
 def compute_next_send_window():
     # Compute the next valid send window
@@ -46,52 +57,30 @@ def compute_next_send_window():
     next_send_time = next_send_date.replace(hour=preferred_start_hour, minute=0, second=0, microsecond=0)
     return next_send_time
 
-def collect_reminder_reasons(vendor_id: str) -> List[str]:
-    # Collect reminder reasons for a vendor
-    # Placeholder logic to collect reminder reasons
-    # This should interact with module_12_vendor_reminder_engine
-    return ["Expired Policy", "Needs Review"]
-
-def generate_email_subject(reasons: List[str]) -> str:
-    # Generate email subject based on reasons
-    if "Expired Policy" in reasons:
-        return f"Insurance Update Required – {reasons[0]}"
-    return "Action Required – Compliance Update Needed"
-
-def generate_email_body(vendor_name: str, reasons: List[str]) -> str:
-    # Generate email body
-    reasons_list = "\n".join(reasons)
-    return (
-        f"Dear {vendor_name},\n\n"
-        f"We have identified the following reasons requiring your attention:\n"
-        f"{reasons_list}\n\n"
-        "Please provide an updated Certificate of Insurance (COI) at your earliest convenience.\n\n"
-        "Thank you,\n"
-        "Compliance Team"
-    )
-
 def create_email_queue_record(vendor: Dict[str, Any], subject: str, body: str):
     # Create a record in the Email Queue table
     table = connect_to_airtable()
+    vendor_name = vendor.get("fields", {}).get("Vendor Name") or vendor.get("fields", {}).get("Name") or "Unknown Vendor"
+    primary_email = vendor.get("fields", {}).get("Email", "")
     record = {
-        "Vendor": vendor["name"],
-        "Primary Email": vendor["primary_email"],
-        "CC Emails": vendor.get("cc_emails", []),
+        "Vendor": vendor_name,
+        "Primary Email": primary_email,
+        "CC Emails": [],
         "Subject": subject,
         "Body": body,
-        "Reminder Reasons": vendor["reasons"],
+        "Reminder Reasons": [],
         "Reminder Status": "Queued",
         "Send After": vendor["send_after"].isoformat(),
         "Follow-Up Count": 0,
         "Created At": datetime.now().isoformat()
     }
     table.create(record)
-    logging.info(f"Queue record created for vendor: {vendor['name']}")
+    logging.info(f"Queue record created for vendor: {vendor_name}")
 
-def detect_duplicates(vendor_id: str, send_after: datetime) -> bool:
+def detect_duplicates(vendor_name: str, send_after: datetime) -> bool:
     # Detect duplicate email queue records
     table = connect_to_airtable()
-    records = table.all(formula=f"AND(Vendor = '{vendor_id}', Reminder Status = 'Queued', Send After = '{send_after.isoformat()}')")
+    records = table.all(formula=f"AND(Vendor = '{vendor_name}', Reminder Status = 'Queued', Send After = '{send_after.isoformat()}')")
     return len(records) > 0
 
 def run():
@@ -105,34 +94,25 @@ def run():
     logging.info(f"Vendors loaded: {len(vendors)}")
 
     for vendor in vendors:
-        try:
-            recipients = resolve_recipients(vendor["id"])
-        except Exception as e:
-            logging.error(f"Error resolving recipients for vendor {vendor['name']}: {e}")
+        vendor_name = vendor.get("fields", {}).get("Vendor Name") or vendor.get("fields", {}).get("Name") or "Unknown Vendor"
+        primary_email = vendor.get("fields", {}).get("Email", "")
+        if not primary_email:
+            logging.warning(f"Skipping vendor {vendor_name}: missing primary email")
             continue
-        vendor["primary_email"] = recipients["primary_email"]
-        vendor["cc_emails"] = recipients.get("cc_emails", [])
 
-        try:
-            vendor["reasons"] = collect_reminder_reasons(vendor["id"])
-        except Exception as e:
-            logging.error(f"Error collecting reminder reasons for vendor {vendor['name']}: {e}")
-            continue
-        subject = generate_email_subject(vendor["reasons"])
-        body = generate_email_body(vendor["name"], vendor["reasons"])
+        subject = HARDCODED_EMAIL_SUBJECT
+        body = HARDCODED_EMAIL_BODY
 
         send_after = compute_next_send_window()
         vendor["send_after"] = send_after
 
         try:
-            if not detect_duplicates(vendor["id"], send_after):
+            if not detect_duplicates(vendor_name, send_after):
                 create_email_queue_record(vendor, subject, body)
             else:
-                logging.info(f"Duplicate skipped for vendor: {vendor['name']}")
+                logging.info(f"Duplicate skipped for vendor: {vendor_name}")
         except Exception as e:
-            logging.error(f"Error processing vendor {vendor['name']}: {e}")
-        else:
-            logging.info(f"Duplicate skipped for vendor: {vendor['name']}")
+            logging.error(f"Error processing vendor {vendor_name}: {e}")
 
     logging.info("Module complete")
 

@@ -100,6 +100,12 @@ def set_processing_status(incoming_table, record_id: str, status: str) -> None:
     logger.info("Incoming Extraction %s → Processing Status = '%s'", record_id, status)
 
 
+def set_vendor_expired_status(vendors_table, vendor_id: str) -> None:
+    """Mark vendor as expired for basic cancellation notice handling."""
+    vendors_table.update(vendor_id, {"Compliance Status": "expired"})
+    logger.info("Vendor %s → Compliance Status = 'expired'", vendor_id)
+
+
 # ── Policy type normalisation ─────────────────────────────────────────────────
 
 _POLICY_TYPE_MAP = {
@@ -247,7 +253,9 @@ def run():
 
     policies         = raw_data.get("policies") or []
     certificate_date = raw_data.get("certificate_date") or ""
+    document_type    = (raw_data.get("document_type") or "").strip().lower()
     logger.info("Policies in JSON : %d", len(policies))
+    logger.info("Document Type    : %s", document_type or "(blank)")
 
     # ── Step 3: match Vendor ──────────────────────────────────────────────────
     logger.info("Step 3 — Looking up Vendor for Named Insured: '%s'...", named_insured)
@@ -265,6 +273,11 @@ def run():
     vendor_id   = vendor["id"]
     vendor_name = vendor["fields"].get("Vendor Name", "")
     logger.info("Vendor matched — ID: %s  Name: '%s'", vendor_id, vendor_name)
+
+    # Basic cancellation handling: mark vendor as expired.
+    if document_type == "cancellation_notice":
+        logger.info("Cancellation notice detected. Marking vendor as expired.")
+        set_vendor_expired_status(tables[TABLE_VENDORS], vendor_id)
 
     # ── Step 4: create Insurance Policy records ────────────────────────────────
     logger.info("Step 4 — Creating Insurance Policy records...")

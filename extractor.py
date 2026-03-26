@@ -33,6 +33,12 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+CANCELLATION_KEYWORDS = (
+    "notice of cancellation",
+    "cancellation",
+    "cancelled",
+)
+
 # ── Extraction prompt ─────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """You are a document analysis assistant specializing in insurance documents.
@@ -143,6 +149,28 @@ def build_message_content(file_path: Path) -> list[dict]:
     return content
 
 
+def detect_cancellation_notice(*text_chunks: str) -> bool:
+    """Return True when cancellation keywords are present in any provided text."""
+    combined_text = " ".join(str(chunk or "") for chunk in text_chunks).lower()
+    return any(keyword in combined_text for keyword in CANCELLATION_KEYWORDS)
+
+
+def apply_simple_document_classification(data: dict, source_file: Path) -> dict:
+    """Apply lightweight keyword-based document classification."""
+    searchable = [
+        source_file.name,
+        data.get("document_type") or "",
+        data.get("named_insured") or "",
+        json.dumps(data, ensure_ascii=False),
+    ]
+
+    if detect_cancellation_notice(*searchable):
+        data["document_type"] = "cancellation_notice"
+        log.info("Keyword match found. document_type overridden to 'cancellation_notice'.")
+
+    return data
+
+
 # ── Core extraction ───────────────────────────────────────────────────────────
 
 def extract_document(file_path: Path) -> dict:
@@ -205,6 +233,7 @@ def run():
     try:
         file_path = get_newest_file(UPLOAD_DIR)
         data = extract_document(file_path)
+        data = apply_simple_document_classification(data, file_path)
         out_path = save_extraction(data, file_path)
 
         log.info("Extraction complete.")
