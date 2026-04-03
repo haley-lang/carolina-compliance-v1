@@ -15,6 +15,7 @@ HARDCODED_EMAIL_SUBJECT = "Insurance Update Required"
 HARDCODED_EMAIL_BODY = (
     "Dear Vendor,\n\n"
     "Please provide an updated Certificate of Insurance (COI) at your earliest convenience.\n\n"
+    "Please reply to this email with your updated certificate of insurance attached, or send it to coi@carolinacompliancesolutions.com.\n\n"
     "Thank you,\n"
     "Compliance Team"
 )
@@ -70,6 +71,7 @@ def create_email_queue_record(vendor: Dict[str, Any], subject: str, body: str):
         "Body": body,
         "Reminder Reasons": [],
         "Reminder Status": "Queued",
+        "Record Status": "Active",
         "Send After": vendor["send_after"].isoformat(),
         "Follow-Up Count": 0,
         "Created At": datetime.now().isoformat()

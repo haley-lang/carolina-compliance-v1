@@ -1,13 +1,18 @@
 import os
 import email
 import logging
+import traceback
 from pathlib import Path
 from imapclient import IMAPClient
 from email.header import decode_header
+from dotenv import load_dotenv
+
+load_dotenv()
 
 import config
 from utils import safe_filename, parse_email_date
-
+from airtable_client import create_document_record
+print("EMAIL MONITOR STARTED")
 logger = logging.getLogger(__name__)
 
 
@@ -25,11 +30,16 @@ def decode_mime_words(value: str) -> str:
 
 def connect_imap() -> IMAPClient:
     """Connect and authenticate to the IMAP server."""
-    logger.info("Connecting to %s:%s as %s", config.IMAP_HOST, config.IMAP_PORT, config.EMAIL_ADDRESS)
-    server = IMAPClient(config.IMAP_HOST, port=config.IMAP_PORT, ssl=True)
-    server.login(config.EMAIL_ADDRESS, config.EMAIL_PASSWORD)
-    logger.info("Authenticated successfully.")
-    return server
+    try:
+        logger.info("Connecting to %s:%s as %s", config.IMAP_HOST, config.IMAP_PORT, config.EMAIL_ADDRESS)
+        print("[email_monitor] Login starting...")
+        server = IMAPClient(config.IMAP_HOST, port=config.IMAP_PORT, ssl=True)
+        server.login(config.EMAIL_ADDRESS, config.EMAIL_PASSWORD)
+        logger.info("Authenticated successfully.")
+        return server
+    except Exception as e:
+        print(f"[email_monitor] Exception during IMAP login: {e}")
+        raise
 
 
 def fetch_unread_emails(server: IMAPClient) -> list[dict]:
@@ -39,8 +49,21 @@ def fetch_unread_emails(server: IMAPClient) -> list[dict]:
     Returns a list of dicts with keys:
         sender, subject, date_received, attachments (list of saved file paths)
     """
-    server.select_folder("INBOX")
-    message_ids = server.search(["UNSEEN"])
+    try:
+        server.select_folder("INBOX")
+        print("[email_monitor] INBOX connection succeeded: True")
+    except Exception as e:
+        print("[email_monitor] INBOX connection succeeded: False")
+        print(f"[email_monitor] Exception selecting INBOX: {e}")
+        raise
+
+    try:
+        message_ids = server.search(["UNSEEN"])
+    except Exception as e:
+        print(f"[email_monitor] Exception searching unread emails: {e}")
+        raise
+
+    print(f"[email_monitor] Unread emails found: {len(message_ids)}")
 
     if not message_ids:
         logger.info("No unread emails found.")
@@ -53,57 +76,145 @@ def fetch_unread_emails(server: IMAPClient) -> list[dict]:
     results = []
 
     for msg_id in message_ids:
-        raw = server.fetch([msg_id], ["RFC822"])
-        msg = email.message_from_bytes(raw[msg_id][b"RFC822"])
+        try:
+            raw = server.fetch([msg_id], ["RFC822"])
+            msg = email.message_from_bytes(raw[msg_id][b"RFC822"])
 
-        sender = decode_mime_words(msg.get("From", ""))
-        subject = decode_mime_words(msg.get("Subject", "(no subject)"))
-        date_str = msg.get("Date", "")
-        date_received = parse_email_date(date_str)
+            sender = decode_mime_words(msg.get("From", ""))
+            subject = decode_mime_words(msg.get("Subject", "(no subject)"))
+            date_str = msg.get("Date", "")
+            date_received = parse_email_date(date_str)
 
-        logger.info("Processing email — From: %s | Subject: %s | Date: %s", sender, subject, date_received)
+            logger.info("Processing email — From: %s | Subject: %s | Date: %s", sender, subject, date_received)
+            print(f"[email_monitor] Checking email subject: {subject}")
 
-        saved_files = []
+            saved_files = []
+            found_attachment = False
+            staging_status = "Pending Review"
+            save_error = None
 
-        for part in msg.walk():
-            content_disposition = part.get_content_disposition() or ""
-            if "attachment" not in content_disposition:
-                continue
+            for part in msg.walk():
+                content_disposition = part.get_content_disposition() or ""
+                if "attachment" not in content_disposition:
+                    continue
 
-            filename = part.get_filename()
-            if not filename:
-                continue
+                found_attachment = True
+                print("[email_monitor] Attachment found: True")
 
-            filename = decode_mime_words(filename)
-            ext = Path(filename).suffix.lower()
+                filename = part.get_filename()
+                if not filename:
+                    continue
 
-            if ext not in config.ALLOWED_EXTENSIONS:
-                logger.debug("Skipping non-COI attachment: %s", filename)
-                continue
+                filename = decode_mime_words(filename)
+                print(f"[email_monitor] Attachment filename: {filename}")
+                ext = Path(filename).suffix.lower()
 
-            safe_name = safe_filename(filename)
-            dest = upload_dir / safe_name
+                if ext not in config.ALLOWED_EXTENSIONS:
+                    logger.debug("Skipping non-COI attachment: %s", filename)
+                    continue
 
-            # Avoid overwriting — append a counter if needed
-            counter = 1
-            while dest.exists():
-                dest = upload_dir / f"{dest.stem}_{counter}{ext}"
-                counter += 1
+                safe_name = safe_filename(filename)
+                dest = upload_dir / safe_name
 
-            dest.write_bytes(part.get_payload(decode=True))
-            logger.info("Saved attachment: %s", dest)
-            saved_files.append(str(dest))
+                # Avoid overwriting — append a counter if needed
+                counter = 1
+                while dest.exists():
+                    dest = upload_dir / f"{dest.stem}_{counter}{ext}"
+                    counter += 1
 
-        if saved_files:
-            results.append(
-                {
-                    "sender": sender,
-                    "subject": subject,
-                    "date_received": date_received,
-                    "attachments": saved_files,
-                }
-            )
-        else:
-            logger.info("No qualifying attachments in this email — skipping Airtable record.")
+                try:
+                    dest.write_bytes(part.get_payload(decode=True))
+                    print(f"[email_monitor] Attachment saved: True ({dest})")
+                    logger.info("Saved attachment: %s", dest)
+                    saved_files.append(str(dest))
+                except Exception as e:
+                    staging_status = "Failed"
+                    save_error = str(e)
+                    print(f"[email_monitor] Attachment saved: False ({dest})")
+                    logger.exception("Failed to save attachment: %s", dest)
+
+            if not found_attachment:
+                print("[email_monitor] Attachment found: False")
+
+            if saved_files or staging_status == "Failed":
+                print("[email_monitor] Airtable Incoming Documents create queued: True")
+                results.append(
+                    {
+                        "sender": sender,
+                        "subject": subject,
+                        "date_received": date_received,
+                        "attachments": saved_files,
+                        "status": staging_status,
+                        "save_error": save_error,
+                    }
+                )
+            else:
+                print("[email_monitor] No qualifying attachment found")
+                print("[email_monitor] Airtable Incoming Documents create queued: False")
+                logger.info("No qualifying attachments in this email — skipping Airtable record.")
+
+        except Exception as e:
+            print(f"[email_monitor] Exception processing email id {msg_id}: {e}")
+            raise
 
     return results
+
+
+if __name__ == "__main__":
+    server = None
+    try:
+        print("[email_monitor] Entrypoint: starting connect_imap()")
+        server = connect_imap()
+        print("[email_monitor] Entrypoint: finished connect_imap()")
+
+        print("[email_monitor] Entrypoint: starting fetch_unread_emails(server)")
+        results = fetch_unread_emails(server)
+        print("[email_monitor] Entrypoint: finished fetch_unread_emails(server)")
+
+        for entry in results:
+            staging_status = entry["status"]
+            payload = {
+                "Sender Email": entry["sender"],
+                "Subject": entry["subject"],
+                "Date Received": entry["date_received"],
+                "File Names": ", ".join(entry["attachments"]),
+                "Status": staging_status,
+            }
+            print(
+                f"[email_monitor][airtable] create target: base={config.AIRTABLE_BASE_ID} table={config.AIRTABLE_TABLE_NAME}"
+            )
+            print(f"[email_monitor][airtable] create payload: {payload}")
+            if entry.get("save_error"):
+                print(f"[email_monitor] Attachment save error: {entry['save_error']}")
+            try:
+                record = create_document_record(
+                    sender=entry["sender"],
+                    subject=entry["subject"],
+                    date_received=entry["date_received"],
+                    attachment_paths=entry["attachments"],
+                    status=staging_status,
+                )
+                print("[email_monitor] Airtable Incoming Documents record created: True")
+                print(f"[email_monitor][airtable] create response: {record}")
+                print(f"[email_monitor][airtable] created record id: {record.get('id')}")
+            except Exception as e:
+                print("[email_monitor] Airtable Incoming Documents record created: False")
+                print(
+                    f"[email_monitor][airtable] create exception type: {type(e).__module__}.{type(e).__name__}"
+                )
+                print(f"[email_monitor][airtable] create exception message: {e}")
+                raise
+
+        print(f"[email_monitor] Entrypoint: results count = {len(results)}")
+    except Exception:
+        print("[email_monitor] Entrypoint: exception occurred")
+        print(traceback.format_exc())
+    finally:
+        if server is not None:
+            print("[email_monitor] Entrypoint: starting IMAP logout")
+            try:
+                server.logout()
+                print("[email_monitor] Entrypoint: finished IMAP logout")
+            except Exception:
+                print("[email_monitor] Entrypoint: IMAP logout failed")
+                print(traceback.format_exc())

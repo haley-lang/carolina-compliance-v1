@@ -1,0 +1,26 @@
+{
+  "document_type": "COI",
+  "named_insured": "Clean COI test 4",
+  "certificate_date": null,
+  "contact_emails": [
+    "haleycamponoca@gmail.com"
+  ],
+  "policies": [
+    {
+      "policy_type": "COMMERCIAL GENERAL LIABILITY",
+      "policy_number": "AHAJDNB672681",
+      "carrier": "test",
+      "effective_date": "1/1/25",
+      "expiration_date": "1/1/26",
+      "coverage_limits": "$1000000.00"
+    },
+    {
+      "policy_type": "AUTOMOBILE LIABILITY",
+      "policy_number": "HGIAHF76979",
+      "carrier": "test",
+      "effective_date": "1/1/26",
+      "expiration_date": "1/1/27",
+      "coverage_limits": "$1,000,000.00"
+    }
+  ]
+}

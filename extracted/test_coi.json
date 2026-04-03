@@ -1,0 +1,49 @@
+{
+  "document_type": "COI",
+  "named_insured": "ACME Insurance LLC",
+  "certificate_holder": "Test Property LLC",
+  "certificate_date": null,
+  "contact_emails": [],
+  "policies": [
+    {
+      "policy_type": "COMMERCIAL GENERAL LIABILITY",
+      "policy_number": null,
+      "carrier": null,
+      "effective_date": null,
+      "expiration_date": null,
+      "coverage_limits": "EACH OCCURRENCE $, DAMAGE TO RENTED PREMISES (Ea occurrence) $, MED EXP (Any one person) $, PERSONAL & ADV INJURY $, GENERAL AGGREGATE $, PRODUCTS - COMP/OP AGG $"
+    },
+    {
+      "policy_type": "AUTOMOBILE LIABILITY",
+      "policy_number": null,
+      "carrier": null,
+      "effective_date": null,
+      "expiration_date": null,
+      "coverage_limits": "COMBINED SINGLE LIMIT (Ea accident) $, BODILY INJURY (Per person) $, BODILY INJURY (Per accident) $, PROPERTY DAMAGE (Per accident) $"
+    },
+    {
+      "policy_type": "UMBRELLA LIAB",
+      "policy_number": null,
+      "carrier": null,
+      "effective_date": null,
+      "expiration_date": null,
+      "coverage_limits": "EACH OCCURRENCE $, AGGREGATE $"
+    },
+    {
+      "policy_type": "EXCESS LIAB",
+      "policy_number": null,
+      "carrier": null,
+      "effective_date": null,
+      "expiration_date": null,
+      "coverage_limits": null
+    },
+    {
+      "policy_type": "WORKERS COMPENSATION AND EMPLOYERS' LIABILITY",
+      "policy_number": null,
+      "carrier": null,
+      "effective_date": null,
+      "expiration_date": null,
+      "coverage_limits": "PER STATUTE, OTH-ER, E.L. EACH ACCIDENT $, E.L. DISEASE - EA EMPLOYEE $, E.L. DISEASE - POLICY LIMIT $"
+    }
+  ]
+}

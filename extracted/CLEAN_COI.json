@@ -1,0 +1,27 @@
+{
+  "document_type": "COI",
+  "named_insured": "Clean COI",
+  "certificate_holder": "CCS",
+  "certificate_date": null,
+  "contact_emails": [
+    "haleycamponcca@gmail.com"
+  ],
+  "policies": [
+    {
+      "policy_type": "COMMERCIAL GENERAL LIABILITY",
+      "policy_number": "AHAJDNB672681",
+      "carrier": "test",
+      "effective_date": "2025-01-01",
+      "expiration_date": "2026-01-01",
+      "coverage_limits": "EACH OCCURRENCE $1000000.00"
+    },
+    {
+      "policy_type": "AUTOMOBILE LIABILITY",
+      "policy_number": "HGIAHF76979",
+      "carrier": "test",
+      "effective_date": "2026-01-01",
+      "expiration_date": "2027-01-01",
+      "coverage_limits": "COMBINED SINGLE LIMIT (Ea accident) $1,000,000.00"
+    }
+  ]
+}

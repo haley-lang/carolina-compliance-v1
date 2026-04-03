@@ -1,0 +1,25 @@
+{
+  "document_type": "COI",
+  "named_insured": "Blue Ridge Framing",
+  "certificate_holder": "Piedmont Builders",
+  "certificate_date": null,
+  "contact_emails": [],
+  "policies": [
+    {
+      "policy_type": "COMMERCIAL GENERAL LIABILITY",
+      "policy_number": "GL123456789",
+      "carrier": null,
+      "effective_date": "01/01/2025",
+      "expiration_date": "01/01/2026",
+      "coverage_limits": "EACH OCCURRENCE $1,000,000, GENERAL AGGREGATE $2,000,000"
+    },
+    {
+      "policy_type": "AUTOMOBILE LIABILITY",
+      "policy_number": "AUTO987654321",
+      "carrier": null,
+      "effective_date": "01/01/2025",
+      "expiration_date": "01/01/2027",
+      "coverage_limits": "COMBINED SINGLE LIMIT $1,000,000"
+    }
+  ]
+}

@@ -8,6 +8,7 @@ IMAP_HOST = os.getenv("IMAP_HOST", "imap.gmail.com")
 IMAP_PORT = int(os.getenv("IMAP_PORT", 993))
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+REQUIRED_IMAP_MAILBOX = "coi-intake@carolinacompliancesolutions.com"
 
 # Airtable
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
@@ -33,4 +34,17 @@ def validate_config():
         raise EnvironmentError(
             f"Missing required environment variables: {', '.join(missing)}\n"
             "Copy .env.example to .env and fill in your values."
+        )
+
+    if EMAIL_ADDRESS != REQUIRED_IMAP_MAILBOX:
+        raise EnvironmentError(
+            "EMAIL_ADDRESS must be the real IMAP mailbox: "
+            f"{REQUIRED_IMAP_MAILBOX}. Do not use alias addresses for IMAP login."
+        )
+
+    # Gmail app passwords are 16 characters (users may paste with spaces).
+    normalized_password = EMAIL_PASSWORD.replace(" ", "")
+    if len(normalized_password) != 16:
+        raise EnvironmentError(
+            "EMAIL_PASSWORD must be a Google App Password (16 characters, spaces optional)."
         )

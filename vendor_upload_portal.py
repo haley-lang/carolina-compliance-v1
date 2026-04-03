@@ -4,6 +4,7 @@ Vendor Upload Portal for Carolina Compliance Solutions
 This Streamlit app allows vendors to upload their Certificates of Insurance (COIs).
 """
 
+import os
 import streamlit as st
 from auth import authenticate_user
 
@@ -24,9 +25,13 @@ def main():
                 st.error("Invalid file type. Please upload a PDF or image file.")
                 return
 
+            # Sanitize filename to prevent path traversal
+            safe_name = os.path.basename(uploaded_file.name)
+            save_path = os.path.join("uploads", safe_name)
+
             # Save the uploaded file to the uploads directory
-        with open(f"uploads/{uploaded_file.name}", "wb") as f:
-            f.write(uploaded_file.getbuffer())
+            with open(save_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
             st.success("File uploaded successfully!")
         except Exception as e:
             st.error(f"An error occurred while uploading the file: {str(e)}")

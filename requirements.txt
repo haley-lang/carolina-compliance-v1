@@ -3,5 +3,7 @@ pandas
 numpy
 pyairtable
 python-dotenv
-openai
+anthropic
 sendgrid
+pdf2image
+Pillow

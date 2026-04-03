@@ -17,7 +17,13 @@ def get_table():
     return _table
 
 
-def create_document_record(sender: str, subject: str, date_received: str, attachment_paths: list[str]) -> dict:
+def create_document_record(
+    sender: str,
+    subject: str,
+    date_received: str,
+    attachment_paths: list[str],
+    status: str = "Pending Review",
+) -> dict:
     """
     Create a record in the Airtable 'Incoming Documents' table.
 
@@ -35,7 +41,7 @@ def create_document_record(sender: str, subject: str, date_received: str, attach
         "Subject": subject,
         "Date Received": date_received,
         "File Names": filenames,
-        "Status": "Pending Review",
+        "Status": status,
     }
 
     record = get_table().create(fields)

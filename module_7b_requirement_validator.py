@@ -141,61 +141,75 @@ def update_vendor_status(vendors_table, vendor_id, status):
         logger.error("Failed to update vendor status: %s", e)
 
 def evaluate_assignment(vendor, client_reqs, insurance_policies, assignment, assignments_table):
-    """Evaluate vendor against a specific client assignment and update status."""
     vendor_id = vendor["id"]
     vendor_name = vendor["fields"].get("Vendor Name", vendor_id)
     logger.info("Evaluating assignment for vendor: %s", vendor_name)
-
     compliance_status = STATUS_COMPLIANT
-
-    # Validate each requirement
+    failure_reasons = []
+    vendor_policies = [p for p in insurance_policies if p["fields"].get("Vendor Link", [None])[0] == vendor_id]
     for req in client_reqs:
         policy_type = req["fields"].get("Policy Type")
         required = req["fields"].get("Required", False)
-
-        # Check for required policy
-        vendor_policies = [p for p in insurance_policies if p["fields"].get("Vendor Link", [None])[0] == vendor_id]
-        matching_policies = [p for p in vendor_policies if p["fields"].get("Policy Type") == policy_type]
-        if required and not matching_policies:
-            logger.info("Missing required policy: %s", policy_type)
+        min_limit = parse_limit(req["fields"].get("Minimum Limit", "0"))
+        ai_required = req["fields"].get("Additional Insured Required", False)
+        waiver_required = req["fields"].get("Waiver Required", False)
+        pnc_required = req["fields"].get("Primary Noncontributory Required", False)
+        matching = [p for p in vendor_policies if p["fields"].get("Policy Type") == policy_type]
+        if required and not matching:
+            failure_reasons.append(f"Missing required {policy_type} policy")
             compliance_status = STATUS_MISSING_COVERAGE
-            break
-
-        # Check for expired policy
-        for policy in matching_policies:
-            expiry_date = policy["fields"].get("Expiration Date")
-            if expiry_date and date.fromisoformat(expiry_date) < date.today():
-                logger.info("Expired policy: %s", policy_type)
+            continue
+        for policy in matching:
+            expiry = policy["fields"].get("Expiration Date")
+            if expiry and date.fromisoformat(expiry) < date.today():
+                failure_reasons.append(f"{policy_type} expired on {expiry}")
                 compliance_status = STATUS_EXPIRED
-                compliance_status = STATUS_EXPIRED
-                break
-            if compliance_status == STATUS_EXPIRED:
-                break
-
-        if compliance_status != STATUS_EXPIRED:
-            # Check for endorsement requirements
-            for field in ["Additional Insured", "Waiver", "Primary Noncontributory"]:
-                if req["fields"].get(f"{field} Required", False) and not any(p["fields"].get(field) for p in matching_policies):
-                    logger.info("Missing endorsement: %s", field)
+            if min_limit > 0:
+                actual_limit = extract_limit_from_policy(policy)
+                if actual_limit < min_limit:
+                    failure_reasons.append(f"{policy_type} limit ${actual_limit:,.0f} below required ${min_limit:,.0f}")
+                    if compliance_status == STATUS_COMPLIANT:
+                        compliance_status = STATUS_NEEDS_REVIEW
+            if ai_required and not policy["fields"].get("Additional Insured"):
+                failure_reasons.append(f"{policy_type} missing Additional Insured endorsement")
+                if compliance_status == STATUS_COMPLIANT:
                     compliance_status = STATUS_NEEDS_REVIEW
-                    break
-            else:
-                continue
-            break
-        if compliance_status == STATUS_EXPIRED:
-            break
-    else:
-        compliance_status = STATUS_COMPLIANT
-
-    # Update assignment status
+            if waiver_required and not policy["fields"].get("Waiver"):
+                failure_reasons.append(f"{policy_type} missing Waiver of Subrogation")
+                if compliance_status == STATUS_COMPLIANT:
+                    compliance_status = STATUS_NEEDS_REVIEW
+            if pnc_required and not policy["fields"].get("Primary Noncontributory"):
+                failure_reasons.append(f"{policy_type} missing Primary & Noncontributory")
+                if compliance_status == STATUS_COMPLIANT:
+                    compliance_status = STATUS_NEEDS_REVIEW
     try:
         assignments_table.update(assignment["id"], {
             "Compliance Status": compliance_status,
             "Last Evaluated": date.today().isoformat()
         })
-        logger.info("Updated assignment for vendor %s to status: %s", vendor_name, compliance_status)
+        logger.info("Vendor %s → %s | Reasons: %s", vendor_name, compliance_status, failure_reasons or "None")
     except Exception as e:
-        logger.error("Failed to update assignment status: %s", e)
+        logger.error("Failed to update assignment: %s", e)
+
+def parse_limit(limit_str):
+    if not limit_str:
+        return 0.0
+    try:
+        return float(str(limit_str).replace(",", "").replace("$", "").strip())
+    except (ValueError, TypeError):
+        return 0.0
+
+def extract_limit_from_policy(policy):
+    import re
+    coverage_text = policy["fields"].get("Coverage Limits", "") or ""
+    numbers = re.findall(r"[\d,]+", coverage_text)
+    values = []
+    for n in numbers:
+        try:
+            values.append(float(n.replace(",", "")))
+        except ValueError:
+            pass
+    return max(values) if values else 0.0
 
 def run():
     logger.info("=== Module 7B: Requirement Validator starting ===")

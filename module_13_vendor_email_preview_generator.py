@@ -77,6 +77,7 @@ def run() -> None:
             "Reasons identified:\n"
             + "\n".join(f"- {reason}" for reason in reasons) +
             "\n\nPlease provide an updated certificate of insurance showing current coverage.\n\n"
+            "Please reply to this email with your updated certificate of insurance attached, or send it to coi@carolinacompliancesolutions.com.\n\n"
             "If you have already submitted an update, please disregard this message.\n\n"
             "Best regards\nCompliance Team\nCarolina Compliance Solutions"
         )
