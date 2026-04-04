@@ -167,12 +167,8 @@ def stripe_payment():
             for field in session.custom_fields:
                 if hasattr(field, 'text') and field.text:
                     business_name = field.text.value
-        plan = "unknown plan"
-        if session.metadata and hasattr(session.metadata, '__getitem__'):
-            try:
-                plan = session.metadata['plan']
-            except (KeyError, TypeError):
-                pass
+        amount_to_plan = {14900: "Crew", 24900: "Foreman", 39900: "General"}
+        plan = amount_to_plan.get(session.amount_total, "Unknown Plan")
         amount = session.amount_total / 100 if session.amount_total else 0
 
         logger.info("New customer: %s (%s) — %s — $%.2f/mo", customer_name, customer_email, plan, amount)
