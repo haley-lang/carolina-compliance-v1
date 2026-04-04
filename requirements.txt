@@ -8,3 +8,4 @@ sendgrid
 pdf2image
 Pillow
 stripe
+flask
