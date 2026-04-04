@@ -233,4 +233,5 @@ if __name__ == "__main__":
     logger.info("=== Module 16: Inbound COI Webhook starting ===")
     logger.info("PDF drop folder: %s", UPLOAD_DIR)
     logger.info("Business hours: Mon-Fri %dam-%dpm ET", BUSINESS_HOURS_START, BUSINESS_HOURS_END)
-    app.run(host="0.0.0.0", port=5051, debug=False)
+    port = int(os.environ.get("PORT", 5051))
+    app.run(host="0.0.0.0", port=port, debug=False)
