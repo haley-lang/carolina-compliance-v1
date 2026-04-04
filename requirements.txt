@@ -6,4 +6,5 @@ python-dotenv
 anthropic
 sendgrid
 pdf2image
-Pillowstripe
+Pillow
+stripe
