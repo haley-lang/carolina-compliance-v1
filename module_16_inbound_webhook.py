@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import stripe
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 
@@ -35,6 +36,10 @@ BUSINESS_HOURS_END = 18    # 6pm ET
 BUSINESS_DAYS = {0, 1, 2, 3, 4}  # Mon-Fri
 
 SENDGRID_WEBHOOK_SECRET = os.getenv("SENDGRID_WEBHOOK_SECRET", "")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "")
+OWNER_EMAIL = "haley@carolinacompliancesolutions.com"
+SENDER_EMAIL = "compliance@carolinacompliancesolutions.com"
 
 
 def is_business_hours():
@@ -137,6 +142,91 @@ def health():
         "business_hours": is_business_hours(),
         "time_et": datetime.now(EASTERN).strftime("%Y-%m-%d %H:%M:%S")
     }), 200
+
+
+@app.route("/webhook/stripe-payment", methods=["POST"])
+def stripe_payment():
+    payload = request.get_data()
+    sig_header = request.headers.get("Stripe-Signature", "")
+
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, STRIPE_WEBHOOK_SECRET
+        )
+    except stripe.error.SignatureVerificationError:
+        logger.warning("Invalid Stripe webhook signature")
+        return jsonify({"error": "Invalid signature"}), 400
+
+    if event["type"] == "checkout.session.completed":
+        session = event["data"]["object"]
+        customer_email = session.get("customer_details", {}).get("email", "unknown")
+        customer_name = session.get("customer_details", {}).get("name", "there")
+        customer_phone = session.get("customer_details", {}).get("phone", "not provided")
+        business_name = session.get("custom_fields", [{}])[0].get("text", {}).get("value", "not provided") if session.get("custom_fields") else "not provided"
+        plan = session.get("metadata", {}).get("plan", "unknown plan")
+        amount = session.get("amount_total", 0) / 100
+
+        logger.info("New customer: %s (%s) — %s — $%.2f/mo", customer_name, customer_email, plan, amount)
+        _send_owner_notification(customer_name, customer_email, customer_phone, business_name, plan, amount)
+        _send_welcome_email(customer_name, customer_email)
+
+    return jsonify({"status": "ok"}), 200
+
+
+def _send_owner_notification(name, email, phone, business, plan, amount):
+    import sendgrid
+    from sendgrid.helpers.mail import Mail
+    sg = sendgrid.SendGridAPIClient(api_key=SENDGRID_API_KEY)
+    message = Mail(
+        from_email=SENDER_EMAIL,
+        to_emails=OWNER_EMAIL,
+        subject=f"🎉 New Customer: {name} — {plan}",
+        html_content=f"""
+        <h2>New paying customer!</h2>
+        <p><strong>Name:</strong> {name}</p>
+        <p><strong>Business:</strong> {business}</p>
+        <p><strong>Email:</strong> {email}</p>
+        <p><strong>Phone:</strong> {phone}</p>
+        <p><strong>Plan:</strong> {plan}</p>
+        <p><strong>Amount:</strong> ${amount:.2f}/mo</p>
+        <hr>
+        <p>Next step: Add them manually in Softr at app.carolinacompliancesolutions.com</p>
+        """
+    )
+    sg.send(message)
+    logger.info("Owner notification sent for %s", email)
+
+
+def _send_welcome_email(name, email):
+    import sendgrid
+    from sendgrid.helpers.mail import Mail
+    sg = sendgrid.SendGridAPIClient(api_key=SENDGRID_API_KEY)
+    message = Mail(
+        from_email=SENDER_EMAIL,
+        to_emails=email,
+        subject="You're in. Let's get your subs in line. 🏗️",
+        html_content=f"""
+        <p>Hi {name},</p>
+        <p>Welcome to Carolina Compliance Solutions — and congratulations on officially retiring your COI spreadsheet. It had a good run. We'll take it from here.</p>
+        <p>Here's what happens next. Three steps. That's it.</p>
+        <p><strong>Step 1 — Send us your vendor list</strong><br>
+        Just reply to this email with your subcontractors — however you have them. A list, a spreadsheet, a napkin photo. We'll get them loaded in.</p>
+        <p><strong>Step 2 — Forward your existing COIs</strong><br>
+        Got certificates already on file? Forward them to coi@carolinacompliancesolutions.com. Our system reads and tracks them automatically.</p>
+        <p><strong>Step 3 — Log into your dashboard</strong><br>
+        Head to <a href="https://app.carolinacompliancesolutions.com">app.carolinacompliancesolutions.com</a>. Your compliance dashboard is ready.</p>
+        <p>That's it. No more chasing your electrician for his certificate. No more wondering if your framer's workers' comp lapsed mid-project. We track it so you don't have to.</p>
+        <p>Reply to this email anytime with questions.</p>
+        <p>Welcome aboard,<br>
+        <strong>The Carolina Compliance Team</strong><br>
+        carolinacompliancesolutions.com</p>
+        <p><em>P.S. Your electrician already needs a reminder. We're on it.</em></p>
+        <hr>
+        <p style="font-size:11px;color:#999;">Carolina Compliance Solutions is an administrative certificate tracking tool. We organize and extract data from certificates of insurance for your convenience. We do not verify policy authenticity, guarantee active coverage, or provide legal or insurance advice. Please consult a licensed insurance professional for compliance decisions.</p>
+        """
+    )
+    sg.send(message)
+    logger.info("Welcome email sent to %s", email)
 
 
 if __name__ == "__main__":
