@@ -159,12 +159,16 @@ def stripe_payment():
 
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
-        customer_email = session.get("customer_details", {}).get("email", "unknown")
-        customer_name = session.get("customer_details", {}).get("name", "there")
-        customer_phone = session.get("customer_details", {}).get("phone", "not provided")
-        business_name = session.get("custom_fields", [{}])[0].get("text", {}).get("value", "not provided") if session.get("custom_fields") else "not provided"
-        plan = session.get("metadata", {}).get("plan", "unknown plan")
-        amount = session.get("amount_total", 0) / 100
+        customer_email = session.customer_details.email if session.customer_details else "unknown"
+        customer_name = session.customer_details.name if session.customer_details else "there"
+        customer_phone = session.customer_details.phone if session.customer_details else "not provided"
+        business_name = "not provided"
+        if hasattr(session, 'custom_fields') and session.custom_fields:
+            for field in session.custom_fields:
+                if hasattr(field, 'text') and field.text:
+                    business_name = field.text.value
+        plan = session.metadata.get('plan', 'unknown plan') if session.metadata else 'unknown plan'
+        amount = session.amount_total / 100 if session.amount_total else 0
 
         logger.info("New customer: %s (%s) — %s — $%.2f/mo", customer_name, customer_email, plan, amount)
         _send_owner_notification(customer_name, customer_email, customer_phone, business_name, plan, amount)
