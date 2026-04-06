@@ -9,13 +9,14 @@ import os
 import json
 import logging
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import stripe
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
+from pyairtable import Api as AirtableApi
 
 load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=True)
 
@@ -38,6 +39,8 @@ BUSINESS_DAYS = {0, 1, 2, 3, 4}  # Mon-Fri
 SENDGRID_WEBHOOK_SECRET = os.getenv("SENDGRID_WEBHOOK_SECRET", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "")
+AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
+AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 OWNER_EMAIL = "haley@carolinacompliancesolutions.com"
 SENDER_EMAIL = "compliance@carolinacompliancesolutions.com"
 
@@ -75,6 +78,7 @@ def run_pipeline(pdf_path):
         "module_4_policy_processor.py",
         "module_7b_requirement_validator.py",
         "module_8_expiration_checker.py",
+        "module_8b.py",
         "module_15_email_queue_builder.py",
         "module_10_sendgrid_sender.py",
     ]
@@ -173,9 +177,49 @@ def stripe_payment():
 
         logger.info("New customer: %s (%s) — %s — $%.2f/mo", customer_name, customer_email, plan, amount)
         _send_owner_notification(customer_name, customer_email, customer_phone, business_name, plan, amount)
+        _create_airtable_client(customer_name, customer_email, business_name, amount)
         _send_welcome_email(customer_name, customer_email)
 
     return jsonify({"status": "ok"}), 200
+
+
+def _create_airtable_client(customer_name, customer_email, business_name, amount):
+    """Create a new client record in Airtable after Stripe checkout completes."""
+    try:
+        if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+            logger.error("Airtable API key or Base ID not configured — skipping Airtable creation")
+            return
+
+        api = AirtableApi(AIRTABLE_API_KEY)
+        clients_table = api.table(AIRTABLE_BASE_ID, "tbltnBIWke20IEI3K")
+
+        # Check if client already exists with this email
+        existing = clients_table.all(formula=f"{{fldmh1sYahgN5x6KQ}} = '{customer_email}'")
+        if existing:
+            logger.info("Client already exists for %s — skipping Airtable creation", customer_email)
+            return
+
+        # Determine client name: use business_name if provided, else customer_name
+        client_name = business_name if business_name and business_name != "not provided" else customer_name
+
+        today_str = datetime.now(EASTERN).strftime("%Y-%m-%d")
+
+        record_fields = {
+            "fldEZdqmIeahXDZHL": client_name,                        # Client Name
+            "fldmh1sYahgN5x6KQ": customer_email,                     # Primary Contact Email
+            "fldIWXSLRJYAVRs3P": customer_name,                      # Primary Contact Name
+            "fldj4bxH9JwOSnGK8": customer_email,                     # Portal Email
+            "fldlB9waYE5uPj1hI": amount,                             # Monthly Service Fee
+            "flduyJEcYbWgFqpgg": today_str,                          # Service Start Date
+            "fldCL7YwtBAG7slEd": "Active",                           # Client Status
+            "flde7mzXePBqKBjGx": "Pending — Awaiting Reply",        # Requirements Status
+        }
+
+        clients_table.create(record_fields)
+        logger.info("Created Airtable client record for %s", customer_email)
+
+    except Exception as e:
+        logger.error("Failed to create Airtable client record for %s: %s", customer_email, e)
 
 
 def _send_owner_notification(name, email, phone, business, plan, amount):
@@ -202,7 +246,42 @@ def _send_owner_notification(name, email, phone, business, plan, amount):
     logger.info("Owner notification sent for %s", email)
 
 
+WELCOME_EMAIL_LOG = Path(__file__).parent / "welcome_emails_sent.json"
+
+
+def _has_welcome_been_sent_recently(email: str, hours: int = 24) -> bool:
+    """Check if a welcome email was already sent to this address within the last `hours` hours."""
+    if not WELCOME_EMAIL_LOG.exists():
+        return False
+    try:
+        data = json.loads(WELCOME_EMAIL_LOG.read_text())
+    except (json.JSONDecodeError, OSError):
+        return False
+    last_sent = data.get(email)
+    if not last_sent:
+        return False
+    last_sent_dt = datetime.fromisoformat(last_sent)
+    return datetime.now() - last_sent_dt < timedelta(hours=hours)
+
+
+def _record_welcome_email_sent(email: str):
+    """Record that a welcome email was sent to this address."""
+    data = {}
+    if WELCOME_EMAIL_LOG.exists():
+        try:
+            data = json.loads(WELCOME_EMAIL_LOG.read_text())
+        except (json.JSONDecodeError, OSError):
+            data = {}
+    data[email] = datetime.now().isoformat()
+    WELCOME_EMAIL_LOG.write_text(json.dumps(data, indent=2))
+
+
 def _send_welcome_email(name, email):
+    # Idempotency check: skip if welcome email already sent in last 24 hours
+    if _has_welcome_been_sent_recently(email):
+        logger.info("Welcome email already sent to %s — skipping.", email)
+        return
+
     import sendgrid
     from sendgrid.helpers.mail import Mail
     sg = sendgrid.SendGridAPIClient(api_key=SENDGRID_API_KEY)
@@ -220,6 +299,16 @@ def _send_welcome_email(name, email):
         Got certificates already on file? Forward them to coi@carolinacompliancesolutions.com. Our system reads and tracks them automatically.</p>
         <p><strong>Step 3 — Log into your dashboard</strong><br>
         Head to <a href="https://app.carolinacompliancesolutions.com">app.carolinacompliancesolutions.com</a>. Your compliance dashboard is ready.</p>
+        <p><strong>Step 4 — Tell us your requirements</strong><br>
+        Reply to this email with the insurance minimums you require from your subcontractors:</p>
+        <ul>
+        <li>General Liability (GL) — required? If yes, minimum limit?</li>
+        <li>Auto Liability (AL) — required? If yes, minimum limit?</li>
+        <li>Workers Compensation (WC) — required yes or no?</li>
+        <li>Additional Insured (AI) — required yes or no?</li>
+        <li>Waiver of Subrogation (WOS) — required yes or no?</li>
+        </ul>
+        <p>We'll load your requirements into the system within 1 business day.</p>
         <p>That's it. No more chasing your electrician for his certificate. No more wondering if your framer's workers' comp lapsed mid-project. We track it so you don't have to.</p>
         <p>Reply to this email anytime with questions.</p>
         <p>Welcome aboard,<br>
@@ -231,6 +320,7 @@ def _send_welcome_email(name, email):
         """
     )
     sg.send(message)
+    _record_welcome_email_sent(email)
     logger.info("Welcome email sent to %s", email)
 
 
