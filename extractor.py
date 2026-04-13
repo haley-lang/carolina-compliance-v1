@@ -39,6 +39,10 @@ CANCELLATION_KEYWORDS = (
     "notice of cancellation",
     "cancellation",
     "cancelled",
+    "reinstatement",
+    "reinstated",
+    "notice of reinstatement",
+    "policy reinstated",
 )
 
 # ── Extraction prompt ─────────────────────────────────────────────────────────
@@ -66,28 +70,47 @@ Rules:
 - Do NOT copy policy_number or dates from a neighboring row (no row bleed).
 - If text is faint or split, combine obvious OCR fragments within the same cell (remove extra spaces only).
 - policy_number: return exact visible alphanumeric text (including hyphens/slashes).
+- If a policy number field contains 'TBD', 'tbd', 'to be determined', 'pending', or any variation indicating the policy number is not yet assigned, set policy_number to null and set policy_number_invalid to true. Do not treat TBD as a valid policy number under any circumstances.
 - effective_date and expiration_date: return visible date text; prefer MM/DD/YYYY when clear.
 - Only return null for these fields when the specific row cell is truly blank or unreadable.
 - Keep the policy row even if some fields are null.
 - coverage_limits should preserve labeled COI sublimits when shown in the document.
 - Prefer uppercase, comma-separated label/value pairs when labels are visible (e.g. "EACH OCCURRENCE $1,000,000, GENERAL AGGREGATE $2,000,000").
 - If only unlabeled numeric limits are visible, return the plain numeric text as shown (e.g. "$1,000,000 / $2,000,000").
+- CLAIMS-MADE vs OCCURRENCE:
+- Check if the ACORD form has the "CLAIMS-MADE" or "OCCUR" checkbox marked for each policy row.
+- Set policy_basis to "claims-made" if CLAIMS-MADE is checked, "occurrence" if OCCUR is checked, null if neither is clearly marked.
+- RETROACTIVE DATE: For claims-made policies, look for a retroactive date (often labeled "RETRO DATE" or "RET. DATE" near the claims-made checkbox). Return as retro_date in MM/DD/YYYY format. Return null if not visible.
+- TAIL COVERAGE: If the document mentions "extended reporting period", "tail coverage", "ERP", or similar language, set tail_coverage_evidenced to true. Otherwise set to false.
+- ENDORSEMENT CHECKBOXES: For each policy row on the ACORD form, check:
+  - additional_insured_checked: true if the "ADDL INSD" or "Additional Insured" checkbox/column is marked Y or checked for that row. false otherwise.
+  - waiver_of_subrogation_checked: true if the "SUBR WVD" or "Waiver of Subrogation" checkbox/column is marked Y or checked for that row. false otherwise.
+  - primary_noncontributory_checked: true if "Primary and Noncontributory" or "Primary/Non-Contributory" language appears in the description of operations referencing this policy type. false otherwise.
+- DESCRIPTION OF OPERATIONS: Extract the full text from the "DESCRIPTION OF OPERATIONS / LOCATIONS / VEHICLES" section at the bottom of the ACORD form. Return as description_of_operations at the top level. Return null if blank or not present.
 
 Return this exact JSON structure:
 {
-  "document_type": "<COI | cancellation_notice | endorsement | unknown>",
+  "document_type": "<COI | cancellation_notice | endorsement | reinstatement | unknown>",
   "named_insured": "<string or null>",
   "certificate_holder": "<string or null>",
   "certificate_date": "<string or null>",
   "contact_emails": ["<email>"],
+  "description_of_operations": "<string or null>",
   "policies": [
     {
       "policy_type": "<string or null>",
       "policy_number": "<string or null>",
+      "policy_number_invalid": false,
       "carrier": "<string or null>",
       "effective_date": "<string or null>",
       "expiration_date": "<string or null>",
-      "coverage_limits": "<string or null>"
+      "coverage_limits": "<string or null>",
+      "policy_basis": "<claims-made | occurrence | null>",
+      "retro_date": "<string or null>",
+      "tail_coverage_evidenced": false,
+      "additional_insured_checked": false,
+      "waiver_of_subrogation_checked": false,
+      "primary_noncontributory_checked": false
     }
   ]
 }"""
@@ -106,12 +129,14 @@ FOCUSED POLICY FIELD EXTRACTION:
 - Re-scan each row multiple times before returning null
 - Combine fragmented OCR text when needed
 - Return values even if slightly uncertain (do NOT default to null unless truly unreadable)
+- If a policy number field contains 'TBD', 'tbd', 'to be determined', 'pending', or any variation indicating the policy number is not yet assigned, set policy_number to null and set policy_number_invalid to true. Do not treat TBD as a valid policy number under any circumstances.
 
 Return this exact JSON structure:
 {
   "policies": [
     {
       "policy_number": "<string or null>",
+      "policy_number_invalid": false,
       "effective_date": "<string or null>",
       "expiration_date": "<string or null>"
     }
@@ -134,6 +159,7 @@ Rules:
 - Never borrow values from neighboring rows.
 - Return null only when a specific cell is truly unreadable.
 - Preserve visible text exactly for policy_number, effective_date, and expiration_date.
+- If a policy number field contains 'TBD', 'tbd', 'to be determined', 'pending', or any variation indicating the policy number is not yet assigned, set policy_number to null and set policy_number_invalid to true. Do not treat TBD as a valid policy number under any circumstances.
 
 Return this exact JSON structure:
 {
@@ -141,6 +167,7 @@ Return this exact JSON structure:
     {
       "policy_type": "<string or null>",
       "policy_number": "<string or null>",
+      "policy_number_invalid": false,
       "effective_date": "<string or null>",
       "expiration_date": "<string or null>",
       "coverage_limits": "<string or null>"
@@ -253,7 +280,14 @@ def apply_simple_document_classification(data: dict, source_file: Path) -> dict:
         json.dumps(data, ensure_ascii=False),
     ]
 
-    if detect_cancellation_notice(*searchable):
+    combined_text = " ".join(str(chunk or "") for chunk in searchable).lower()
+
+    # Check reinstatement FIRST — reinstatement keywords are a subset of
+    # CANCELLATION_KEYWORDS, so we must match the more specific type first.
+    if any(kw in combined_text for kw in ("reinstatement", "reinstated", "policy reinstated", "notice of reinstatement")):
+        data["document_type"] = "reinstatement"
+        log.info("Keyword match found. document_type overridden to 'reinstatement'.")
+    elif detect_cancellation_notice(*searchable):
         data["document_type"] = "cancellation_notice"
         log.info("Keyword match found. document_type overridden to 'cancellation_notice'.")
 

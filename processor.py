@@ -9,10 +9,10 @@ import json
 import logging
 import re
 from urllib.parse import urlencode
-from dataclasses import asdict
-from datetime import date, datetime
+from dataclasses import asdict, dataclass, field as dc_field
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 from dotenv import load_dotenv
 from pyairtable import Api
 import pytz
@@ -22,9 +22,30 @@ from incoming_extraction_matcher_slice import (
     apply_incoming_extraction_match_update,
     evaluate_vendor_match,
 )
-from returned_coi_compliance_evaluator import (
-    ReturnedCoiComplianceInput,
-    evaluate_returned_coi_compliance,
+# Minimal compliance result dataclasses (inlined from former returned_coi_compliance_evaluator.py)
+@dataclass
+class ComplianceFailureReason:
+    code: str
+    message: str
+    severity: Literal["info", "warning", "error"] = "warning"
+    field: Optional[str] = None
+    policy_id: Optional[str] = None
+    metadata: dict = dc_field(default_factory=dict)
+
+@dataclass
+class ReturnedCoiComplianceResult:
+    outcome: str
+    decision_summary: str
+    failure_reasons: list = dc_field(default_factory=list)
+    evaluator_version: str = "v2-module-7b"
+    should_queue_deficiency_email: bool = False
+    deficiency_email_payload: Optional[dict] = None
+    metadata: dict = dc_field(default_factory=dict)
+from module_7b_requirement_validator import (
+    fetch_requirements_for_client,
+    fetch_policies_for_vendor,
+    fetch_active_assignments_for_vendor,
+    evaluate_assignment,
 )
 
 # Load .env using an absolute path before importing config
@@ -58,6 +79,7 @@ TABLE_REQUIREMENTS = "Client Requirements"
 TABLE_CERTS      = "Insurance Certificates"
 TABLE_EMAIL_QUEUE = "Email Queue"
 TABLE_TEMPLATES  = "Templates"
+TABLE_ASSIGNMENTS = "Vendor Client Assignments"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -87,6 +109,7 @@ def get_tables(api: Api, base_id: str) -> dict:
             TABLE_CERTS,
             TABLE_EMAIL_QUEUE,
             TABLE_TEMPLATES,
+            TABLE_ASSIGNMENTS,
         )
     }
 
@@ -134,11 +157,11 @@ def _build_deficiency_reason_lines(failure_reasons: list) -> list[str]:
         )
 
         if code == "MISSING_REQUIRED_POLICY_TYPE":
-            lines.append(f"- {policy_type} coverage is missing")
+            lines.append(f"- {policy_type} certificate documentation is not on file")
         elif code == "REQUIRED_POLICY_EXPIRED":
             lines.append(f"- {policy_type} policy has expired and must be current")
         elif code == "REQUIRED_POLICY_LIMIT_BELOW_MINIMUM":
-            lines.append(f"- {policy_type} coverage does not meet the required limit")
+            lines.append(f"- {policy_type} limits shown on submitted certificate do not meet the required minimum")
         else:
             lines.append("- Please review policy requirement details and provide needed corrections")
     return lines
@@ -157,7 +180,7 @@ def _build_deficiency_email_body(
 
     return (
         f"Hi {safe_vendor_name},\n\n"
-        f"Your Certificate of Insurance for {client_name} has been reviewed and is currently not compliant with requirements.\n\n"
+        f"Your submitted Certificate of Insurance for {client_name} has been reviewed and documentation deficiencies have been identified.\n\n"
         "To proceed, please provide an updated COI addressing the following:\n\n"
         f"{reasons_block}\n\n"
         f"Please also ensure that {client_name} is listed as the certificate holder on the updated certificate.\n\n"
@@ -165,6 +188,11 @@ def _build_deficiency_email_body(
         "If you have any questions or need assistance, we’re happy to help.\n\n"
         "Best regards,  \n"
         "Carolina Compliance Solutions"
+        "\n\n---\n"
+        "This assessment is based solely on certificate of insurance documentation "
+        "submitted to Carolina Compliance Solutions. It does not constitute verification "
+        "of actual insurance coverage, policy terms, or carrier obligations. "
+        "Please consult your insurance advisor for coverage determinations."
     )
 
 
@@ -755,14 +783,31 @@ def fetch_newest_imported(table) -> Optional[dict]:
 
 
 def find_vendor(vendors_table, named_insured: str) -> Optional[dict]:
-    """Case-insensitive match of named_insured against Vendor Name field."""
+    """Case-insensitive exact match of named_insured against Vendor Name field.
+
+    If multiple records share the same name, returns the oldest (by createdTime)
+    and logs a warning about the duplicates.
+    """
     needle = named_insured.strip().lower()
+    if not needle:
+        return None
     all_vendors = vendors_table.all()
+    matches = []
     for vendor in all_vendors:
         vendor_name = vendor["fields"].get("Vendor Name", "").strip().lower()
         if vendor_name == needle:
-            return vendor
-    return None
+            matches.append(vendor)
+    if not matches:
+        return None
+    if len(matches) > 1:
+        matches.sort(key=lambda v: v.get("createdTime", ""))
+        logger.warning(
+            "Duplicate vendor records found for '%s' (count=%d). Using oldest record %s.",
+            named_insured,
+            len(matches),
+            matches[0]["id"],
+        )
+    return matches[0]
 
 
 def find_vendor_alias_matches(vendors_table, named_insured: str) -> list:
@@ -783,6 +828,25 @@ def find_vendor_alias_matches(vendors_table, named_insured: str) -> list:
             matches.append(vendor)
 
     return matches
+
+
+def named_insured_matches_client(clients_table, named_insured: str) -> bool:
+    """Return True if the named insured matches an existing Client Name."""
+    needle = named_insured.strip().lower()
+    if not needle:
+        return False
+    all_clients = clients_table.all()
+    for client in all_clients:
+        client_name = client["fields"].get("Client Name", "").strip().lower()
+        if client_name == needle:
+            logger.warning(
+                "Named insured '%s' matches Client '%s' (ID: %s) — not a vendor.",
+                named_insured,
+                client["fields"].get("Client Name", ""),
+                client["id"],
+            )
+            return True
+    return False
 
 
 def create_vendor(vendors_table, named_insured: str) -> dict:
@@ -820,9 +884,47 @@ def get_existing_policy_by_number(policies_table, policy_number: str) -> Optiona
     return policies_table.first(formula=formula)
 
 
+def get_existing_policies_by_vendor_and_type(
+    policies_table, vendor_record_id: str, policy_type: str
+) -> list:
+    """Return all policy records for a vendor + policy type combination.
+
+    Used for renewal detection: when a new COI arrives, we check if an older
+    policy of the same type already exists so we can mark it superseded.
+    """
+    safe_vendor = vendor_record_id.replace("'", "\\'")
+    safe_type = policy_type.replace("'", "\\'")
+    formula = (
+        f"AND("
+        f"FIND('{safe_vendor}', ARRAYJOIN({{Vendor Link}})), "
+        f"{{Policy Type}} = '{safe_type}', "
+        f"{{Status}} != 'Superseded'"
+        f")"
+    )
+    try:
+        return policies_table.all(formula=formula)
+    except Exception as exc:
+        logger.warning("Failed to query existing policies for vendor %s type %s: %s",
+                        vendor_record_id, policy_type, exc)
+        return []
+
+
+def _parse_date_safe(raw: str) -> Optional[date]:
+    """Try to parse a date string; return None on failure."""
+    cleaned = raw.strip() if raw else ""
+    if not cleaned:
+        return None
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%m/%d/%y"):
+        try:
+            return datetime.strptime(cleaned, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
 def set_processing_status(incoming_table, record_id: str, status: str) -> None:
     """Update the Processing Status field on an Incoming Extractions record."""
-    incoming_table.update(record_id, {"Processing Status": status})
+    incoming_table.update(record_id, {"Processing Status": status}, typecast=True)
     logger.info("Incoming Extraction %s → Processing Status = '%s'", record_id, status)
 
 
@@ -855,16 +957,31 @@ def is_cancellation_document(document_type: str) -> bool:
     }
 
 
+TBD_VALUES = {"tbd", "t.b.d", "to be determined", "pending",
+               "tba", "to be assigned", "not yet assigned", "n/a"}
+
+
+def is_invalid_policy_number(policy_number: str) -> bool:
+    """Return True if the policy number is missing, TBD, or otherwise invalid."""
+    if not policy_number:
+        return True
+    return str(policy_number).strip().lower() in TBD_VALUES
+
+
 def extract_policy_numbers(raw_data: dict) -> list:
-    """Extract candidate policy numbers from top-level and nested policy JSON."""
+    """Extract candidate policy numbers from top-level and nested policy JSON.
+
+    TBD / invalid policy numbers are excluded so they never feed into
+    policy-number matching logic.
+    """
     numbers = []
     top_level = (raw_data.get("policy_number") or "").strip()
-    if top_level:
+    if top_level and not is_invalid_policy_number(top_level):
         numbers.append(top_level)
 
     for policy in raw_data.get("policies") or []:
         number = (policy.get("policy_number") or "").strip()
-        if number:
+        if number and not is_invalid_policy_number(number):
             numbers.append(number)
 
     # Preserve order while removing duplicates
@@ -953,8 +1070,11 @@ _POLICY_TYPE_MAP = {
     "automobile liability":         "Auto Liability",
     "auto liability":               "Auto Liability",
     "auto liab":                    "Auto Liability",
+    "auto":                         "Auto Liability",
+    "cal":                          "Auto Liability",
     "commercial auto":              "Auto Liability",
     "commercial automobile":        "Auto Liability",
+    "commercial auto liability":    "Auto Liability",
     "business auto":                "Auto Liability",
     "hired and non-owned auto":     "Auto Liability",
     "hired and non owned auto":     "Auto Liability",
@@ -997,6 +1117,9 @@ def process_policies(
     vendor_record_id: str,
     certificate_record_id: str,
     source_filename: str,
+    incoming_table=None,
+    extraction_id: str = "",
+    certs_table=None,
 ) -> list:
     """
     Create an Insurance Policy record for each policy in the list.
@@ -1018,6 +1141,40 @@ def process_policies(
             expiration_raw or "(blank)",
             computed_status,
         )
+
+        if is_invalid_policy_number(policy_number):
+            logger.warning(
+                "Invalid policy number '%s' detected — marking extraction as Needs Review. "
+                "TBD/pending policy numbers are not accepted.",
+                policy_number or "(blank)",
+            )
+            if incoming_table and extraction_id:
+                set_processing_status(incoming_table, extraction_id, "Needs Review")
+            # Add failure reason to the Insurance Certificate record if one exists
+            if certs_table and certificate_record_id:
+                try:
+                    cert_record = certs_table.get(certificate_record_id)
+                    existing_reasons = cert_record.get("fields", {}).get("Compliance Failure Reasons", "") or ""
+                    tbd_reason = "TBD or invalid policy number — policy not yet bound"
+                    if tbd_reason not in existing_reasons:
+                        updated_reasons = (
+                            f"{existing_reasons}\n{tbd_reason}".strip()
+                            if existing_reasons
+                            else tbd_reason
+                        )
+                        certs_table.update(certificate_record_id, {
+                            "Compliance Failure Reasons": updated_reasons,
+                        })
+                        logger.info(
+                            "Added TBD failure reason to certificate %s",
+                            certificate_record_id,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to update compliance failure reasons on certificate %s: %s",
+                        certificate_record_id, exc,
+                    )
+            continue
 
         if not policy_number:
             logger.warning("Policy %d has no policy number.", idx)
@@ -1077,7 +1234,43 @@ def process_policies(
             touched_ids.append(existing_policy["id"])
             continue
 
+        # ── Renewal detection: check for existing policies of same type ──────
         effective_raw = (policy.get("effective_date") or "").strip()
+        new_effective = _parse_date_safe(effective_raw)
+
+        if policy_type and vendor_record_id:
+            same_type_policies = get_existing_policies_by_vendor_and_type(
+                policies_table, vendor_record_id, policy_type
+            )
+            if same_type_policies and new_effective:
+                # Check if this is a renewal (newer) or a duplicate (older/same)
+                is_duplicate = False
+                for existing in same_type_policies:
+                    existing_effective_raw = existing["fields"].get("Effective Date", "")
+                    existing_effective = _parse_date_safe(existing_effective_raw)
+                    if existing_effective and new_effective <= existing_effective:
+                        logger.info(
+                            "Policy %d (%s) effective %s is not newer than existing %s (ID: %s) — skipping as duplicate.",
+                            idx, policy_type, effective_raw, existing_effective_raw, existing["id"],
+                        )
+                        touched_ids.append(existing["id"])
+                        is_duplicate = True
+                        break
+                if is_duplicate:
+                    continue
+
+                # New policy is newer — mark all existing same-type policies as Superseded
+                for existing in same_type_policies:
+                    try:
+                        policies_table.update(existing["id"], {"Status": "Superseded"})
+                        logger.info(
+                            "Marked policy %s (%s %s) as Superseded — replaced by renewal.",
+                            existing["id"],
+                            policy_type,
+                            existing["fields"].get("Policy Number", ""),
+                        )
+                    except Exception as exc:
+                        logger.warning("Failed to mark policy %s as Superseded: %s", existing["id"], exc)
 
         fields = {
             "Policy Record":           f"{policy_type} — {policy_number}",
@@ -1094,6 +1287,17 @@ def process_policies(
             fields["Effective Date"] = effective_raw
         if expiration_raw:
             fields["Expiration Date"] = expiration_raw
+
+        # Claims-made fields from extraction
+        policy_basis = (policy.get("policy_basis") or "").strip().lower()
+        if policy_basis in ("claims-made", "occurrence", "unknown"):
+            fields["fldPMR5nVSExiH2h2"] = policy_basis  # Policy Basis
+        retro_date = (policy.get("retro_date") or "").strip()
+        if retro_date:
+            fields["fldHSPP6979xM7OC6"] = retro_date  # Retroactive Date
+        tail_coverage = policy.get("tail_coverage_evidenced")
+        if tail_coverage is True:
+            fields["fldZz5vGdz9vDaxz0"] = True  # Tail Coverage Evidenced
 
         logger.info(
             "Vendor link added on create — Policy %d (%s) Vendor ID: %s",
@@ -1118,6 +1322,93 @@ def process_policies(
     return touched_ids
 
 
+def upload_pdf_attachment(base_id: str, record_id: str, pdf_path: Path) -> bool:
+    """
+    Upload a local PDF file to the Certificate File attachment field in Airtable.
+    Uses the Airtable content upload API directly.
+
+    Returns True on success, False on failure (non-fatal — cert still gets created).
+    """
+    api_key = (config.AIRTABLE_API_KEY or "").strip()
+    if not api_key:
+        logger.warning("Cannot upload PDF — AIRTABLE_API_KEY not set")
+        return False
+
+    if not pdf_path.exists():
+        logger.warning("Cannot upload PDF — file not found: %s", pdf_path)
+        return False
+
+    field_id = "fld1bdbKmkZIQMWf4"  # Certificate File (multipleAttachments)
+    table_id = "tbl0IH6zQQsXBff3l"   # Insurance Certificates
+
+    url = (
+        f"https://content.airtable.com/v0/{base_id}"
+        f"/{table_id}/{record_id}/cells/{field_id}/uploadAttachment"
+    )
+
+    # Determine MIME type
+    suffix = pdf_path.suffix.lower()
+    mime_types = {
+        ".pdf": "application/pdf",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".tiff": "image/tiff",
+        ".tif": "image/tiff",
+    }
+    content_type = mime_types.get(suffix, "application/octet-stream")
+
+    try:
+        with open(pdf_path, "rb") as f:
+            resp = requests.post(
+                url,
+                headers={"Authorization": f"Bearer {api_key}"},
+                files={"file": (pdf_path.name, f, content_type)},
+                timeout=60,
+            )
+
+        if resp.status_code in (200, 201):
+            logger.info(
+                "Uploaded PDF attachment to cert %s — file: %s (%d bytes)",
+                record_id, pdf_path.name, pdf_path.stat().st_size,
+            )
+            return True
+        else:
+            logger.warning(
+                "PDF upload failed for cert %s — HTTP %d: %s",
+                record_id, resp.status_code, resp.text[:300],
+            )
+            return False
+    except Exception as exc:
+        logger.warning("PDF upload error for cert %s: %s", record_id, exc)
+        return False
+
+
+def resolve_pdf_path(source_filename: str) -> Optional[Path]:
+    """
+    Given a source_filename (e.g. 'hales.json'), find the original PDF
+    in the uploads/ directory. Tries exact stem match first, then
+    falls back to the incoming_pdfs/ directory.
+    """
+    if not source_filename:
+        return None
+
+    stem = Path(source_filename).stem  # 'hales.json' → 'hales'
+    upload_dir = Path(config.UPLOAD_DIR)
+    incoming_dir = Path(__file__).parent / "incoming_pdfs"
+
+    for directory in (upload_dir, incoming_dir):
+        if not directory.exists():
+            continue
+        for ext in (".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".tif"):
+            candidate = directory / f"{stem}{ext}"
+            if candidate.exists():
+                return candidate
+
+    logger.debug("No PDF found for source_filename '%s'", source_filename)
+    return None
+
+
 def create_certificate(
     certs_table,
     vendor_record_id: str,
@@ -1127,8 +1418,12 @@ def create_certificate(
     policy_record_ids: list,
     matched_request_id: Optional[str] = None,
     matched_client_id: Optional[str] = None,
+    base_id: Optional[str] = None,
 ) -> dict:
-    """Create one Insurance Certificate record linked to the Vendor."""
+    """Create one Insurance Certificate record linked to the Vendor.
+    If the original PDF is found on disk, uploads it to the Certificate File
+    attachment field.
+    """
     fields = {
         "Vendor Link":      [vendor_record_id],
         "Named Insured":    named_insured,
@@ -1146,6 +1441,15 @@ def create_certificate(
 
     record = certs_table.create(fields)
     logger.info("Created Insurance Certificate — ID: %s", record["id"])
+
+    # ── Upload the source PDF as an attachment ──
+    if base_id:
+        pdf_path = resolve_pdf_path(source_filename)
+        if pdf_path:
+            upload_pdf_attachment(base_id, record["id"], pdf_path)
+        else:
+            logger.info("No PDF file found for '%s' — Certificate File left empty", source_filename)
+
     return record
 
 
@@ -1299,10 +1603,32 @@ def run():
                 set_processing_status(tables[TABLE_INCOMING], extraction_id, "Needs Review")
                 return
 
-            vendor = create_vendor(tables[TABLE_VENDORS], named_insured)
-            logger.info(
-                "Pending Match vendor handling complete — vendor auto-created and processing will continue."
-            )
+            # Try to match an existing vendor before auto-creating
+            vendor = find_vendor(tables[TABLE_VENDORS], named_insured)
+            if vendor:
+                logger.info(
+                    "Pending Match resolved to existing vendor — ID: %s  Name: '%s'",
+                    vendor["id"],
+                    vendor["fields"].get("Vendor Name", ""),
+                )
+            else:
+                if named_insured_matches_client(tables[TABLE_CLIENTS], named_insured):
+                    set_processing_status(tables[TABLE_INCOMING], extraction_id, "Needs Review")
+                    logger.info("=== Module 4 complete (named insured matches client — needs manual review) ===")
+                    return
+
+                vendor = create_vendor(tables[TABLE_VENDORS], named_insured)
+                logger.info(
+                    "Pending Match vendor handling complete — vendor auto-created and processing will continue."
+                )
+    elif match_evaluation.match_status == "Unmatched":
+        logger.info(
+            "Match status is Unmatched — flagging for manual review. Named insured: '%s'",
+            named_insured,
+        )
+        set_processing_status(tables[TABLE_INCOMING], extraction_id, "Unmatched")
+        logger.info("=== Module 4 complete (unmatched — queued for manual review) ===")
+        return
     elif match_evaluation.match_status != "Matched":
         logger.info(
             "Skipping vendor resolution — match status is %s",
@@ -1342,6 +1668,11 @@ def run():
                 )
                 set_processing_status(tables[TABLE_INCOMING], extraction_id, "Needs Review")
                 logger.info("=== Module 4 complete (blank Named Insured) ===")
+                return
+
+            if named_insured_matches_client(tables[TABLE_CLIENTS], named_insured):
+                set_processing_status(tables[TABLE_INCOMING], extraction_id, "Needs Review")
+                logger.info("=== Module 4 complete (named insured matches client — needs manual review) ===")
                 return
 
             logger.warning(
@@ -1393,6 +1724,7 @@ def run():
         [],
         matched_request_id,
         matched_client_id,
+        base_id=base_id,
     )
     certificate_id = certificate_record["id"]
     if not matched_request_id:
@@ -1409,6 +1741,9 @@ def run():
         vendor_id,
         certificate_id,
         source_filename,
+        incoming_table=tables[TABLE_INCOMING],
+        extraction_id=extraction_id,
+        certs_table=tables[TABLE_CERTS],
     )
     if touched_policy_ids:
         tables[TABLE_CERTS].update(certificate_id, {"Insurance Policies": touched_policy_ids})
@@ -1423,6 +1758,119 @@ def run():
         len([pid for pid in touched_policy_ids if pid]),
         max(len(policies) - len(touched_policy_ids), 0),
     )
+
+    # ── Step 5b: Timing evaluation ──────────────────────────────────────────
+    try:
+        from policy_timing_evaluator import (
+            evaluate_certificate_timing,
+            write_timing_to_policy,
+            write_timing_to_certificate,
+        )
+        # Build list of new policy dicts from the raw data + touched IDs
+        new_policy_dicts = []
+        for i, policy in enumerate(policies):
+            if i < len(touched_policy_ids) and touched_policy_ids[i]:
+                new_policy_dicts.append({
+                    "id": touched_policy_ids[i],
+                    "fields": {
+                        "Policy Type": normalize_policy_type((policy.get("policy_type") or "").strip()),
+                        "Effective Date": (policy.get("effective_date") or "").strip(),
+                        "Expiration Date": (policy.get("expiration_date") or "").strip(),
+                        "Status": compute_policy_status(
+                            (policy.get("expiration_date") or "").strip(),
+                            (policy.get("policy_number") or "").strip(),
+                        ),
+                    },
+                })
+
+        # Fetch all existing policies for this vendor
+        all_vendor_policies = tables[TABLE_POLICIES].all(
+            formula=f"FIND('{vendor_id}', ARRAYJOIN({{Vendor Link}}))"
+        )
+
+        timing_result = evaluate_certificate_timing(new_policy_dicts, all_vendor_policies)
+
+        if timing_result.findings:
+            logger.info("Timing evaluation: %d findings for certificate %s",
+                        len(timing_result.findings), certificate_id)
+            for f in timing_result.findings:
+                logger.info("  [%s] %s: %s", f.severity.upper(), f.flag, f.message)
+
+            # Write timing flags to each new policy record
+            for pd in new_policy_dicts:
+                write_timing_to_policy(tables[TABLE_POLICIES], pd["id"], timing_result)
+
+            # Append timing summary to certificate
+            write_timing_to_certificate(tables[TABLE_CERTS], certificate_id, timing_result)
+        else:
+            logger.info("Timing evaluation: no issues for certificate %s", certificate_id)
+    except Exception as exc:
+        logger.warning("Timing evaluation failed (non-fatal): %s", exc)
+
+    # ── Step 5c: Mid-term change detection ──────────────────────────────────
+    try:
+        from midterm_change_detector import detect_midterm_changes, write_midterm_changes_to_certificate
+
+        # Fetch prior policies for this vendor (excluding ones just created)
+        prior_policies = [
+            p for p in all_vendor_policies
+            if p.get("id") not in touched_policy_ids
+        ] if 'all_vendor_policies' in dir() else []
+
+        if not prior_policies and vendor_id:
+            prior_policies = tables[TABLE_POLICIES].all(
+                formula=f"FIND('{vendor_id}', ARRAYJOIN({{Vendor Link}}))"
+            )
+            prior_policies = [p for p in prior_policies if p.get("id") not in touched_policy_ids]
+
+        if prior_policies:
+            # Build new policy dicts from raw extraction data
+            new_policy_dicts = []
+            for i, policy in enumerate(policies):
+                if i < len(touched_policy_ids) and touched_policy_ids[i]:
+                    new_policy_dicts.append({
+                        "fields": {
+                            "Policy Type": normalize_policy_type((policy.get("policy_type") or "").strip()),
+                            "Carrier": (policy.get("carrier") or "").strip(),
+                            "Coverage Limits": (policy.get("coverage_limits") or "").strip(),
+                            "Additional Insured": policy.get("additional_insured_checked", False),
+                            "Waiver": policy.get("waiver_of_subrogation_checked", False),
+                            "Primary Noncontributory": policy.get("primary_noncontributory_checked", False),
+                        },
+                    })
+
+            # Get prior named insured from the most recent prior certificate
+            prior_named_insured = ""
+            try:
+                vendor_certs = tables[TABLE_CERTS].all(
+                    formula=f"FIND('{vendor_id}', ARRAYJOIN({{Vendor Link}}))"
+                )
+                vendor_certs = [c for c in vendor_certs if c.get("id") != certificate_id]
+                if vendor_certs:
+                    vendor_certs.sort(key=lambda c: c.get("createdTime", ""), reverse=True)
+                    prior_named_insured = vendor_certs[0].get("fields", {}).get("Named Insured", "")
+            except Exception:
+                pass
+
+            midterm_result = detect_midterm_changes(
+                new_policies=new_policy_dicts,
+                prior_policies=prior_policies,
+                new_named_insured=named_insured,
+                prior_named_insured=prior_named_insured,
+            )
+
+            if midterm_result.findings:
+                logger.info("Mid-term changes detected for certificate %s: %d findings",
+                            certificate_id, len(midterm_result.findings))
+                for f in midterm_result.findings:
+                    logger.info("  [%s] %s: %s", f.severity.upper(), f.reason_code, f.message)
+                write_midterm_changes_to_certificate(tables[TABLE_CERTS], certificate_id, midterm_result)
+            else:
+                logger.info("No mid-term changes detected for certificate %s", certificate_id)
+        else:
+            logger.info("No prior policies for mid-term comparison — skipping")
+    except Exception as exc:
+        logger.warning("Mid-term change detection failed (non-fatal): %s", exc)
 
     # ── Step 6: evaluator stub integration + cert compliance writeback ───────
     logger.info("Step 6 — Running returned COI compliance evaluator stub...")
@@ -1451,19 +1899,76 @@ def run():
         else:
             logger.info("No requirement context found for compliance payload enrichment.")
 
-        compliance_payload = ReturnedCoiComplianceInput(
-            extraction_id=extraction_id,
-            vendor_id=vendor_id,
-            client_id=matched_client_id,
-            request_id=matched_request_id,
-            certificate_id=certificate_id,
-            policy_ids=touched_policy_ids,
-            document_type=document_type,
-            source_filename=source_filename,
-            named_insured=named_insured,
-            raw_data=evaluator_raw_data,
-        )
-        compliance_result = evaluate_returned_coi_compliance(compliance_payload)
+        # ── Module 7b full per-client requirement check ──────────────────────
+        if matched_client_id:
+            m7b_client_reqs = fetch_requirements_for_client(
+                matched_client_id, tables[TABLE_REQUIREMENTS]
+            )
+            m7b_vendor_policies = fetch_policies_for_vendor(
+                vendor_id, tables[TABLE_POLICIES]
+            )
+            m7b_assignments = fetch_active_assignments_for_vendor(
+                vendor_id, tables[TABLE_ASSIGNMENTS]
+            )
+            # Find the assignment for this specific client
+            m7b_assignment = next(
+                (a for a in m7b_assignments
+                 if (a["fields"].get("Client Link") or [None])[0] == matched_client_id),
+                None,
+            )
+            if m7b_assignment and m7b_client_reqs:
+                m7b_status, m7b_failure_reasons = evaluate_assignment(
+                    vendor, m7b_client_reqs, m7b_vendor_policies,
+                    m7b_assignment, tables[TABLE_ASSIGNMENTS],
+                )
+                logger.info(
+                    "Module 7b live compliance check — vendor=%s client=%s status=%s reasons=%s",
+                    vendor_name, matched_client_id, m7b_status, m7b_failure_reasons,
+                )
+                compliance_result = ReturnedCoiComplianceResult(
+                    outcome=m7b_status,
+                    decision_summary="; ".join(m7b_failure_reasons) if m7b_failure_reasons else "All requirements satisfied.",
+                    failure_reasons=[
+                        ComplianceFailureReason(
+                            code="REQUIREMENT_FAILURE",
+                            message=reason,
+                            severity="error",
+                        )
+                        for reason in m7b_failure_reasons
+                    ],
+                    evaluator_version="v2-module-7b",
+                    should_queue_deficiency_email=(m7b_status == "Non-Compliant"),
+                    metadata={
+                        "stub": False,
+                        "rule_version": "v2-module-7b",
+                        "required_policy_types": sorted({r["fields"].get("Policy Type", "") for r in m7b_client_reqs}),
+                        "requirement_source": "module_7b_requirement_validator",
+                    },
+                )
+            else:
+                logger.info(
+                    "Module 7b skipped — no matching assignment or no client requirements. "
+                    "assignment_found=%s client_reqs_count=%d",
+                    m7b_assignment is not None, len(m7b_client_reqs),
+                )
+                compliance_result = ReturnedCoiComplianceResult(
+                    outcome="Needs Review",
+                    decision_summary="No active assignment found for this vendor/client pair, or no client requirements configured.",
+                    failure_reasons=[],
+                    evaluator_version="v2-module-7b",
+                    metadata={"stub": False, "rule_version": "v2-module-7b-fallback",
+                              "required_policy_types": [], "requirement_source": "none"},
+                )
+        else:
+            logger.info("Module 7b skipped — no matched client for compliance check.")
+            compliance_result = ReturnedCoiComplianceResult(
+                outcome="Needs Review",
+                decision_summary="No client matched — cannot run per-client requirement check.",
+                failure_reasons=[],
+                evaluator_version="v2-module-7b",
+                metadata={"stub": False, "rule_version": "v2-module-7b-no-client",
+                          "required_policy_types": [], "requirement_source": "none"},
+            )
         evaluator_required_policy_types = compliance_result.metadata.get("required_policy_types", [])
         evaluator_requirement_source = compliance_result.metadata.get("requirement_source", "none")
         logger.info(
@@ -1473,11 +1978,10 @@ def run():
             evaluator_requirement_source,
         )
 
-        compliance_evaluated_at_utc_dt = datetime.utcnow().replace(microsecond=0)
-        compliance_evaluated_at_utc = compliance_evaluated_at_utc_dt.isoformat() + "Z"
+        compliance_evaluated_at_utc_dt = datetime.now(timezone.utc).replace(microsecond=0)
+        compliance_evaluated_at_utc = compliance_evaluated_at_utc_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
         compliance_evaluated_at_et = (
             compliance_evaluated_at_utc_dt
-            .replace(tzinfo=pytz.utc)
             .astimezone(eastern)
             .strftime("%Y-%m-%d %I:%M:%S %p ET")
         )

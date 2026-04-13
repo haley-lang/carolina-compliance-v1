@@ -1,10 +1,13 @@
-"""First matcher slice for Incoming Extractions.
+"""Incoming Extractions matcher — vendor/client/request resolution.
 
-This module is intentionally constrained to:
-- deterministic normalization
-- pure evaluation logic
-- write adapter that only patches Incoming Extractions fields
-- idempotent same-record updates
+Resolution order:
+1. Policy number exact match
+2. Named insured exact match (Vendor Name)
+3. Named insured alias match (Aliases field)
+4. Named insured DBA match (DBA Names field)
+5. Fuzzy name match (rapidfuzz against names + aliases + DBAs)
+6. Broker email match (sender email → Vendor.Broker Email)
+7. Unmatched → flag for manual review
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set
 
 MATCH_STATUS_MATCHED = "Matched"
 MATCH_STATUS_PENDING = "Pending Match"
+MATCH_STATUS_UNMATCHED = "Unmatched"
 MATCH_STATUS_ERROR = "Error"
 
 REASON_LOW_CONFIDENCE_EXTRACTION = "LOW_CONFIDENCE_EXTRACTION"
@@ -27,6 +31,21 @@ REASON_AMBIGUOUS_CLIENT = "AMBIGUOUS_CLIENT"
 REASON_AMBIGUOUS_REQUEST_CONTEXT = "AMBIGUOUS_REQUEST_CONTEXT"
 REASON_CONFLICTING_SIGNALS = "CONFLICTING_SIGNALS"
 REASON_INVALID_REFERENCED_ID = "INVALID_REFERENCED_ID"
+REASON_FUZZY_REVIEW = "FUZZY_MATCH_NEEDS_REVIEW"
+
+# ── Airtable field IDs for new match audit fields ────────────────────────────
+FLD_MATCH_METHOD     = "fldhAbg7pWH79R3I3"   # Incoming Extractions: Match Method
+FLD_MATCH_CONFIDENCE = "fldp9gN5g1LFi7ZNA"   # Incoming Extractions: Match Confidence
+FLD_PROCESSING_STATUS = "fld4KqSQEX32Zenut"  # Incoming Extractions: Processing Status
+FLD_NAMED_INSURED    = "fld4X90MLBQIqTNTn"   # Incoming Extractions: Named Insured
+FLD_MATCH_STATUS     = "fldLuIpTPVQvyLlqT"   # Incoming Extractions: Match Status
+FLD_MATCHED_VENDOR   = "fldOku9CPphnETmTA"   # Incoming Extractions: Matched Vendor
+
+# Vendor table field IDs
+FLD_V_DBA_NAMES      = "fldOsG2aLEFIG4oAC"   # Vendors: DBA Names
+FLD_V_BROKER_EMAIL   = "fldcvRY2tcEclVdWc"   # Vendors: Broker Email
+FLD_V_ALIASES        = "fldq07F1pGZjzefBk"   # Vendors: Aliases
+FLD_V_VENDOR_NAME    = "fldb0BUb3wggDMJMp"   # Vendors: Vendor Name
 
 ALLOWED_INCOMING_EXTRACTIONS_FIELDS: Set[str] = {
     "Match Status",
@@ -35,14 +54,23 @@ ALLOWED_INCOMING_EXTRACTIONS_FIELDS: Set[str] = {
     "Matched Vendor",
     "Matched Client",
     "Matched Client Request",
+    FLD_MATCH_METHOD,
+    FLD_MATCH_CONFIDENCE,
 }
 
 RULE_V1_POLICY_NUMBER_VENDOR_EXACT = "V1_POLICY_NUMBER_VENDOR_EXACT"
 RULE_V2_NAMED_INSURED_VENDOR_EXACT = "V2_NAMED_INSURED_VENDOR_EXACT"
+RULE_V3_DBA_NAME_MATCH = "V3_DBA_NAME_MATCH"
+RULE_V4_FUZZY_NAME_MATCH = "V4_FUZZY_NAME_MATCH"
+RULE_V5_BROKER_EMAIL_MATCH = "V5_BROKER_EMAIL_MATCH"
 RULE_C1_CERTIFICATE_HOLDER_CLIENT_EXACT = "C1_CERTIFICATE_HOLDER_CLIENT_EXACT"
 RULE_R1_SINGLE_OPEN_REQUEST = "R1_SINGLE_OPEN_REQUEST"
 
 HIGH_CONFIDENCE_THRESHOLD = 0.90
+
+# Fuzzy match thresholds
+FUZZY_AUTO_MATCH_THRESHOLD = 85
+FUZZY_REVIEW_THRESHOLD = 60
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +83,8 @@ class MatchEvaluation:
     matched_client_id: Optional[str]
     matched_request_id: Optional[str]
     applied_rule_id: Optional[str]
+    match_method: str = "unmatched"
+    match_confidence: int = 0
 
 
 def normalize_match_text(value: Any) -> str:
@@ -218,6 +248,7 @@ def _resolve_vendor_by_policy_number(
             matched_client_id=None,
             matched_request_id=None,
             applied_rule_id=RULE_V1_POLICY_NUMBER_VENDOR_EXACT,
+            match_method="exact", match_confidence=100,
         )
 
     if len(unique_vendor_ids) > 1:
@@ -272,11 +303,14 @@ def _resolve_vendor_by_named_insured(
         vendor_name = normalize_match_text(vendor_fields.get("Vendor Name"))
         aliases = _normalize_aliases(vendor_fields.get("Aliases"))
 
-        if named_insured == vendor_name or named_insured in aliases:
-            matched_vendor_ids.append(vendor_id)
+        if named_insured == vendor_name:
+            matched_vendor_ids.append((vendor_id, "exact"))
+        elif named_insured in aliases:
+            matched_vendor_ids.append((vendor_id, "alias"))
 
-    unique_ids = list(dict.fromkeys(matched_vendor_ids))
+    unique_ids = list(dict.fromkeys(vid for vid, _ in matched_vendor_ids))
     if len(unique_ids) == 1:
+        method = matched_vendor_ids[0][1]
         return MatchEvaluation(
             match_status=MATCH_STATUS_MATCHED,
             match_reason_code=None,
@@ -284,6 +318,7 @@ def _resolve_vendor_by_named_insured(
             matched_client_id=None,
             matched_request_id=None,
             applied_rule_id=RULE_V2_NAMED_INSURED_VENDOR_EXACT,
+            match_method=method, match_confidence=100,
         )
 
     if len(unique_ids) > 1:
@@ -303,6 +338,221 @@ def _resolve_vendor_by_named_insured(
         matched_client_id=None,
         matched_request_id=None,
         applied_rule_id=None,
+    )
+
+
+def _normalize_dba_names(dba_raw: Any) -> Set[str]:
+    """Parse comma-separated DBA Names field into normalized set."""
+    if not isinstance(dba_raw, str):
+        return set()
+    return {
+        normalize_match_text(part)
+        for part in dba_raw.split(",")
+        if normalize_match_text(part)
+    }
+
+
+def _resolve_vendor_by_dba(
+    extraction_fields: Dict[str, Any],
+    vendor_records: Iterable[Dict[str, Any]],
+) -> MatchEvaluation:
+    """Match named insured against DBA Names on vendor records."""
+    named_insured = normalize_match_text(extraction_fields.get("Named Insured"))
+    if not named_insured or not _is_non_partial_exact_value(named_insured):
+        return MatchEvaluation(
+            match_status=MATCH_STATUS_PENDING,
+            match_reason_code=REASON_NO_CANDIDATE_FOUND,
+            matched_vendor_id=None, matched_client_id=None,
+            matched_request_id=None, applied_rule_id=None,
+        )
+
+    matched_ids: List[str] = []
+    for vendor in vendor_records:
+        vendor_id = vendor.get("id")
+        vendor_fields = vendor.get("fields", {})
+        dba_names = _normalize_dba_names(
+            vendor_fields.get("DBA Names") or vendor_fields.get(FLD_V_DBA_NAMES)
+        )
+        if named_insured in dba_names:
+            matched_ids.append(vendor_id)
+
+    unique = list(dict.fromkeys(matched_ids))
+    if len(unique) == 1:
+        return MatchEvaluation(
+            match_status=MATCH_STATUS_MATCHED,
+            match_reason_code=None,
+            matched_vendor_id=unique[0], matched_client_id=None,
+            matched_request_id=None, applied_rule_id=RULE_V3_DBA_NAME_MATCH,
+            match_method="dba", match_confidence=100,
+        )
+    if len(unique) > 1:
+        return MatchEvaluation(
+            match_status=MATCH_STATUS_PENDING,
+            match_reason_code=REASON_AMBIGUOUS_VENDOR,
+            matched_vendor_id=None, matched_client_id=None,
+            matched_request_id=None, applied_rule_id=None,
+        )
+    return MatchEvaluation(
+        match_status=MATCH_STATUS_PENDING,
+        match_reason_code=REASON_NO_CANDIDATE_FOUND,
+        matched_vendor_id=None, matched_client_id=None,
+        matched_request_id=None, applied_rule_id=None,
+    )
+
+
+def _resolve_vendor_by_fuzzy(
+    extraction_fields: Dict[str, Any],
+    vendor_records: Iterable[Dict[str, Any]],
+) -> MatchEvaluation:
+    """Fuzzy match named insured against vendor names, aliases, and DBA names."""
+    try:
+        from rapidfuzz import fuzz
+    except ImportError:
+        logger.warning("rapidfuzz not installed — skipping fuzzy matching")
+        return MatchEvaluation(
+            match_status=MATCH_STATUS_PENDING,
+            match_reason_code=REASON_NO_CANDIDATE_FOUND,
+            matched_vendor_id=None, matched_client_id=None,
+            matched_request_id=None, applied_rule_id=None,
+        )
+
+    named_insured = normalize_match_text(extraction_fields.get("Named Insured"))
+    if not named_insured or not _is_non_partial_exact_value(named_insured):
+        return MatchEvaluation(
+            match_status=MATCH_STATUS_PENDING,
+            match_reason_code=REASON_MISSING_REQUIRED_FIELDS,
+            matched_vendor_id=None, matched_client_id=None,
+            matched_request_id=None, applied_rule_id=None,
+        )
+
+    best_score = 0
+    best_vendor_id = None
+    best_matched_name = ""
+
+    for vendor in vendor_records:
+        vendor_id = vendor.get("id")
+        vendor_fields = vendor.get("fields", {})
+
+        # Collect all names to compare against
+        candidates: List[str] = []
+        vendor_name = normalize_match_text(vendor_fields.get("Vendor Name"))
+        if vendor_name:
+            candidates.append(vendor_name)
+        candidates.extend(_normalize_aliases(
+            vendor_fields.get("Aliases") or vendor_fields.get(FLD_V_ALIASES)
+        ))
+        candidates.extend(_normalize_dba_names(
+            vendor_fields.get("DBA Names") or vendor_fields.get(FLD_V_DBA_NAMES)
+        ))
+
+        for candidate in candidates:
+            score = fuzz.ratio(named_insured, candidate)
+            if score > best_score:
+                best_score = score
+                best_vendor_id = vendor_id
+                best_matched_name = candidate
+
+    if best_score >= FUZZY_AUTO_MATCH_THRESHOLD and best_vendor_id:
+        logger.info(
+            "Fuzzy auto-match: '%s' → '%s' (score=%d, vendor=%s)",
+            named_insured, best_matched_name, best_score, best_vendor_id,
+        )
+        return MatchEvaluation(
+            match_status=MATCH_STATUS_MATCHED,
+            match_reason_code=None,
+            matched_vendor_id=best_vendor_id, matched_client_id=None,
+            matched_request_id=None, applied_rule_id=RULE_V4_FUZZY_NAME_MATCH,
+            match_method="fuzzy", match_confidence=int(best_score),
+        )
+
+    if best_score >= FUZZY_REVIEW_THRESHOLD and best_vendor_id:
+        logger.info(
+            "Fuzzy match needs review: '%s' → '%s' (score=%d, vendor=%s)",
+            named_insured, best_matched_name, best_score, best_vendor_id,
+        )
+        return MatchEvaluation(
+            match_status=MATCH_STATUS_PENDING,
+            match_reason_code=REASON_FUZZY_REVIEW,
+            matched_vendor_id=best_vendor_id, matched_client_id=None,
+            matched_request_id=None, applied_rule_id=RULE_V4_FUZZY_NAME_MATCH,
+            match_method="fuzzy", match_confidence=int(best_score),
+        )
+
+    return MatchEvaluation(
+        match_status=MATCH_STATUS_PENDING,
+        match_reason_code=REASON_NO_CANDIDATE_FOUND,
+        matched_vendor_id=None, matched_client_id=None,
+        matched_request_id=None, applied_rule_id=None,
+        match_method="unmatched", match_confidence=int(best_score) if best_score > 0 else 0,
+    )
+
+
+def _resolve_vendor_by_broker_email(
+    extraction_fields: Dict[str, Any],
+    vendor_records: Iterable[Dict[str, Any]],
+) -> MatchEvaluation:
+    """Match sender/contact email against Broker Email field on vendor records."""
+    # Collect all email addresses from the extraction
+    sender_emails: Set[str] = set()
+    contact_emails_raw = extraction_fields.get("Contact Emails") or ""
+    if isinstance(contact_emails_raw, str):
+        for part in re.split(r"[,;\s]+", contact_emails_raw):
+            cleaned = part.strip().lower()
+            if "@" in cleaned:
+                sender_emails.add(cleaned)
+    if isinstance(contact_emails_raw, list):
+        for email in contact_emails_raw:
+            if isinstance(email, str) and "@" in email:
+                sender_emails.add(email.strip().lower())
+
+    # Also check Sender Email if available
+    sender = extraction_fields.get("Sender Email") or ""
+    if isinstance(sender, str) and "@" in sender:
+        # Extract email from "Name <email>" format
+        email_match = re.search(r"[\w.+-]+@[\w-]+\.[\w.]+", sender.lower())
+        if email_match:
+            sender_emails.add(email_match.group())
+
+    if not sender_emails:
+        return MatchEvaluation(
+            match_status=MATCH_STATUS_PENDING,
+            match_reason_code=REASON_NO_CANDIDATE_FOUND,
+            matched_vendor_id=None, matched_client_id=None,
+            matched_request_id=None, applied_rule_id=None,
+        )
+
+    matched_ids: List[str] = []
+    for vendor in vendor_records:
+        vendor_id = vendor.get("id")
+        vendor_fields = vendor.get("fields", {})
+        broker_email = (
+            vendor_fields.get("Broker Email") or vendor_fields.get(FLD_V_BROKER_EMAIL) or ""
+        ).strip().lower()
+        if broker_email and broker_email in sender_emails:
+            matched_ids.append(vendor_id)
+
+    unique = list(dict.fromkeys(matched_ids))
+    if len(unique) == 1:
+        logger.info("Broker email match: %s → vendor %s", sender_emails, unique[0])
+        return MatchEvaluation(
+            match_status=MATCH_STATUS_MATCHED,
+            match_reason_code=None,
+            matched_vendor_id=unique[0], matched_client_id=None,
+            matched_request_id=None, applied_rule_id=RULE_V5_BROKER_EMAIL_MATCH,
+            match_method="broker_email", match_confidence=90,
+        )
+    if len(unique) > 1:
+        return MatchEvaluation(
+            match_status=MATCH_STATUS_PENDING,
+            match_reason_code=REASON_AMBIGUOUS_VENDOR,
+            matched_vendor_id=None, matched_client_id=None,
+            matched_request_id=None, applied_rule_id=None,
+        )
+    return MatchEvaluation(
+        match_status=MATCH_STATUS_PENDING,
+        match_reason_code=REASON_NO_CANDIDATE_FOUND,
+        matched_vendor_id=None, matched_client_id=None,
+        matched_request_id=None, applied_rule_id=None,
     )
 
 
@@ -502,15 +752,21 @@ def evaluate_vendor_match(
     client_records: Optional[Iterable[Dict[str, Any]]] = None,
     request_records: Optional[Iterable[Dict[str, Any]]] = None,
 ) -> MatchEvaluation:
-    """Pure evaluator: no side effects, no external calls."""
+    """Pure evaluator: no side effects, no external calls.
+
+    Resolution order:
+    1. Policy number exact → 2. Named insured exact/alias →
+    3. DBA name → 4. Fuzzy name → 5. Broker email → 6. Unmatched
+    """
     try:
+        vendor_list = list(vendor_records)  # materialize so we can iterate multiple times
+
+        # ── Step 1: Policy number exact match ────────────────────────────────
         vendor_eval = MatchEvaluation(
             match_status=MATCH_STATUS_PENDING,
             match_reason_code=REASON_NO_CANDIDATE_FOUND,
-            matched_vendor_id=None,
-            matched_client_id=None,
-            matched_request_id=None,
-            applied_rule_id=None,
+            matched_vendor_id=None, matched_client_id=None,
+            matched_request_id=None, applied_rule_id=None,
         )
 
         if policy_records is not None:
@@ -520,12 +776,44 @@ def evaluate_vendor_match(
             elif vendor_eval.match_reason_code == REASON_AMBIGUOUS_VENDOR:
                 return vendor_eval
             else:
-                vendor_eval = _resolve_vendor_by_named_insured(extraction_fields, vendor_records)
+                # ── Step 2: Named insured exact / alias match ────────────────
+                vendor_eval = _resolve_vendor_by_named_insured(extraction_fields, vendor_list)
         else:
-            vendor_eval = _resolve_vendor_by_named_insured(extraction_fields, vendor_records)
+            vendor_eval = _resolve_vendor_by_named_insured(extraction_fields, vendor_list)
 
+        # ── Step 3: DBA name match ───────────────────────────────────────────
         if vendor_eval.match_status != MATCH_STATUS_MATCHED or not vendor_eval.matched_vendor_id:
-            return vendor_eval
+            dba_eval = _resolve_vendor_by_dba(extraction_fields, vendor_list)
+            if dba_eval.match_status == MATCH_STATUS_MATCHED:
+                vendor_eval = dba_eval
+            elif dba_eval.match_reason_code == REASON_AMBIGUOUS_VENDOR:
+                return dba_eval
+
+        # ── Step 4: Fuzzy name match ─────────────────────────────────────────
+        if vendor_eval.match_status != MATCH_STATUS_MATCHED or not vendor_eval.matched_vendor_id:
+            fuzzy_eval = _resolve_vendor_by_fuzzy(extraction_fields, vendor_list)
+            if fuzzy_eval.match_status == MATCH_STATUS_MATCHED:
+                vendor_eval = fuzzy_eval
+            elif fuzzy_eval.match_reason_code == REASON_FUZZY_REVIEW:
+                # Fuzzy match below auto-threshold but above review threshold —
+                # return as Pending Match with the candidate vendor for human review
+                return fuzzy_eval
+
+        # ── Step 5: Broker email match ───────────────────────────────────────
+        if vendor_eval.match_status != MATCH_STATUS_MATCHED or not vendor_eval.matched_vendor_id:
+            broker_eval = _resolve_vendor_by_broker_email(extraction_fields, vendor_list)
+            if broker_eval.match_status == MATCH_STATUS_MATCHED:
+                vendor_eval = broker_eval
+
+        # ── Step 6: Unmatched ────────────────────────────────────────────────
+        if vendor_eval.match_status != MATCH_STATUS_MATCHED or not vendor_eval.matched_vendor_id:
+            return MatchEvaluation(
+                match_status=MATCH_STATUS_UNMATCHED,
+                match_reason_code=REASON_NO_CANDIDATE_FOUND,
+                matched_vendor_id=None, matched_client_id=None,
+                matched_request_id=None, applied_rule_id=None,
+                match_method="unmatched", match_confidence=0,
+            )
 
         final_eval = vendor_eval
 
@@ -548,6 +836,8 @@ def evaluate_vendor_match(
                     matched_client_id=client_eval.matched_client_id,
                     matched_request_id=None,
                     applied_rule_id=RULE_C1_CERTIFICATE_HOLDER_CLIENT_EXACT,
+                    match_method=vendor_eval.match_method,
+                    match_confidence=vendor_eval.match_confidence,
                 )
 
         if (
@@ -609,7 +899,9 @@ def build_match_decision_summary(evaluation: MatchEvaluation) -> str:
         f"vendor={_summary_value(evaluation.matched_vendor_id)}; "
         f"client={_summary_value(evaluation.matched_client_id)}; "
         f"request={_summary_value(evaluation.matched_request_id)}; "
-        f"rule={_summary_value(evaluation.applied_rule_id)}"
+        f"rule={_summary_value(evaluation.applied_rule_id)}; "
+        f"method={evaluation.match_method}; "
+        f"confidence={evaluation.match_confidence}"
     )
 
 
@@ -626,6 +918,8 @@ def build_incoming_extraction_patch(
         "Matched Vendor": _linked_record_value(evaluation.matched_vendor_id),
         "Matched Client": _linked_record_value(evaluation.matched_client_id),
         "Matched Client Request": _linked_record_value(evaluation.matched_request_id),
+        FLD_MATCH_METHOD: evaluation.match_method,
+        FLD_MATCH_CONFIDENCE: evaluation.match_confidence,
     }
 
     patch: Dict[str, Any] = {}
@@ -661,5 +955,5 @@ def apply_incoming_extraction_match_update(
     if not patch:
         return False
 
-    incoming_extractions_table.update(record_id, patch)
+    incoming_extractions_table.update(record_id, patch, typecast=True)
     return True

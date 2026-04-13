@@ -51,16 +51,6 @@ def _escape_formula_value(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
-def _build_existing_queue_formula() -> str:
-    return (
-        "AND("
-        f"{{{QUEUE_EMAIL_TYPE_FIELD}}}='{INITIAL_REQUEST_TYPE}',"
-        f"{{{QUEUE_RECORD_STATUS_FIELD}}}='{ACTIVE_STATUS}',"
-        f"NOT({{{QUEUE_EMAIL_STATUS_FIELD}}}='{SENT_STATUS}')"
-        ")"
-    )
-
-
 def _extract_first_linked_id(value: Any) -> Optional[str]:
     if isinstance(value, list) and value:
         first = value[0]
@@ -146,22 +136,15 @@ def _find_active_unsent_initial_request_record_id(
     email_queue_table,
     vendor_id: str,
 ) -> Optional[str]:
-    formula = _build_existing_queue_formula()
+    """Check for an existing active unsent Initial Request for this vendor.
+
+    Uses a server-side Airtable formula that includes the vendor record ID
+    so only matching records are fetched, instead of fetching the entire queue.
+    """
+    safe_vendor_id = _escape_formula_value(vendor_id)
+    formula = f"AND({{Email Type}}='Initial Request', {{Reminder Status}}='Queued', FIND('{safe_vendor_id}', ARRAYJOIN({{Vendor}}, ',')))"
     records = email_queue_table.all(formula=formula)
-
-    for record in records:
-        fields = record.get("fields", {})
-        linked_vendors = fields.get(QUEUE_VENDOR_LINK_FIELD) or []
-        if isinstance(linked_vendors, list):
-            normalized_vendor_ids = [
-                linked_vendor_id.strip()
-                for linked_vendor_id in linked_vendors
-                if isinstance(linked_vendor_id, str) and linked_vendor_id.strip()
-            ]
-            if vendor_id in normalized_vendor_ids:
-                return record.get("id")
-
-    return None
+    return records[0]["id"] if records else None
 
 
 def _create_queue_record(

@@ -9,3 +9,5 @@ pdf2image
 Pillow
 stripe
 flask
+gunicorn
+rapidfuzz

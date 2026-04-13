@@ -6,9 +6,7 @@ Outside business hours: saves to queue for 8am cron batch.
 """
 
 import os
-import json
 import logging
-import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -17,6 +15,7 @@ import stripe
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from pyairtable import Api as AirtableApi
+from email_template import build_email_html
 
 load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=True)
 
@@ -171,8 +170,19 @@ def stripe_payment():
             for field in session.custom_fields:
                 if hasattr(field, 'text') and field.text:
                     business_name = field.text.value
-        amount_to_plan = {14900: "Crew", 24900: "Foreman", 39900: "General"}
-        plan = amount_to_plan.get(session.amount_total, "Unknown Plan")
+        price_to_plan = {
+            # Update these Price IDs from your Stripe dashboard
+            "price_starter": "Starter",
+            "price_growth": "Growth",
+            "price_pro": "Pro",
+            "price_scale": "Scale",
+        }
+        price_id = session.get("line_items", {}).get("data", [{}])[0].get("price", {}).get("id", "")
+        plan = price_to_plan.get(price_id)
+        if not plan:
+            plan = {14900: "Starter", 39900: "Growth", 59900: "Pro", 79900: "Scale"}.get(session.amount_total, "Unknown Plan")
+            logger.warning("Plan detection fell back to amount-based matching. Amount: %s, Resolved: %s", session.amount_total, plan)
+
         amount = session.amount_total / 100 if session.amount_total else 0
 
         logger.info("New customer: %s (%s) — %s — $%.2f/mo", customer_name, customer_email, plan, amount)
@@ -246,38 +256,30 @@ def _send_owner_notification(name, email, phone, business, plan, amount):
     logger.info("Owner notification sent for %s", email)
 
 
-WELCOME_EMAIL_LOG = Path(__file__).parent / "welcome_emails_sent.json"
-
-
-def _has_welcome_been_sent_recently(email: str, hours: int = 24) -> bool:
-    """Check if a welcome email was already sent to this address within the last `hours` hours."""
-    if not WELCOME_EMAIL_LOG.exists():
-        return False
+def _has_welcome_been_sent_recently(email: str) -> bool:
     try:
-        data = json.loads(WELCOME_EMAIL_LOG.read_text())
-    except (json.JSONDecodeError, OSError):
+        clients_table = AirtableApi(AIRTABLE_API_KEY).table(AIRTABLE_BASE_ID, "tbltnBIWke20IEI3K")
+        formula = f"AND({{Portal Email}}='{email}', {{Welcome Sent}}=TRUE())"
+        records = clients_table.all(formula=formula)
+        return len(records) > 0
+    except Exception as e:
+        logger.warning("Welcome dedup check failed: %s", e)
         return False
-    last_sent = data.get(email)
-    if not last_sent:
-        return False
-    last_sent_dt = datetime.fromisoformat(last_sent)
-    return datetime.now() - last_sent_dt < timedelta(hours=hours)
 
 
-def _record_welcome_email_sent(email: str):
-    """Record that a welcome email was sent to this address."""
-    data = {}
-    if WELCOME_EMAIL_LOG.exists():
-        try:
-            data = json.loads(WELCOME_EMAIL_LOG.read_text())
-        except (json.JSONDecodeError, OSError):
-            data = {}
-    data[email] = datetime.now().isoformat()
-    WELCOME_EMAIL_LOG.write_text(json.dumps(data, indent=2))
+def _record_welcome_email_sent(email: str) -> None:
+    try:
+        clients_table = AirtableApi(AIRTABLE_API_KEY).table(AIRTABLE_BASE_ID, "tbltnBIWke20IEI3K")
+        formula = f"{{Portal Email}}='{email}'"
+        records = clients_table.all(formula=formula)
+        if records:
+            clients_table.update(records[0]["id"], {"Welcome Sent": True})
+    except Exception as e:
+        logger.warning("Failed to record welcome sent: %s", e)
 
 
 def _send_welcome_email(name, email):
-    # Idempotency check: skip if welcome email already sent in last 24 hours
+    # Idempotency check: skip if welcome email already sent (Airtable lookup)
     if _has_welcome_been_sent_recently(email):
         logger.info("Welcome email already sent to %s — skipping.", email)
         return
@@ -285,39 +287,56 @@ def _send_welcome_email(name, email):
     import sendgrid
     from sendgrid.helpers.mail import Mail
     sg = sendgrid.SendGridAPIClient(api_key=SENDGRID_API_KEY)
+
+    welcome_subject = "You're in. Let's get your subs in line. 🏗️"
+    welcome_body_html = (
+        f"<p>Hi {name},</p>"
+        "<p>Welcome to Carolina Compliance Solutions — and congratulations on "
+        "officially retiring your COI spreadsheet. It had a good run. "
+        "We'll take it from here.</p>"
+        "<p>Here's what happens next. Three steps. That's it.</p>"
+        "<p><strong>Step 1 — Send us your vendor list</strong><br>"
+        "Just reply to this email with your subcontractors — however you have "
+        "them. A list, a spreadsheet, a napkin photo. We'll get them loaded in.</p>"
+        "<p><strong>Step 2 — Forward your existing COIs</strong><br>"
+        "Got certificates already on file? Forward them to "
+        "coi@carolinacompliancesolutions.com. Our system reads and tracks them "
+        "automatically.</p>"
+        "<p><strong>Step 3 — Log into your dashboard</strong><br>"
+        'Head to <a href="https://app.carolinacompliancesolutions.com">'
+        "app.carolinacompliancesolutions.com</a>. Your compliance dashboard is ready.</p>"
+        "<p><strong>Step 4 — Tell us your requirements</strong><br>"
+        "Reply to this email with the insurance minimums you require from your "
+        "subcontractors:</p>"
+        "<ul>"
+        "<li>General Liability (GL) — required? If yes, minimum limit?</li>"
+        "<li>Auto Liability (AL) — required? If yes, minimum limit?</li>"
+        "<li>Workers Compensation (WC) — required yes or no?</li>"
+        "<li>Additional Insured (AI) — required yes or no?</li>"
+        "<li>Waiver of Subrogation (WOS) — required yes or no?</li>"
+        "</ul>"
+        "<p>We'll load your requirements into the system within 1 business day.</p>"
+        "<p>That's it. No more chasing your electrician for his certificate. "
+        "No more wondering if your framer's workers' comp lapsed mid-project. "
+        "We track it so you don't have to.</p>"
+        "<p>Reply to this email anytime with questions.</p>"
+        "<p>Welcome aboard,<br>"
+        "<strong>The Carolina Compliance Team</strong><br>"
+        "carolinacompliancesolutions.com</p>"
+        "<p><em>P.S. Your electrician already needs a reminder. We're on it.</em></p>"
+        '<hr><p style="font-size:11px;color:#999;">Carolina Compliance Solutions is '
+        "an administrative certificate tracking tool. We organize and extract data "
+        "from certificates of insurance for your convenience. We do not verify "
+        "policy authenticity, guarantee active coverage, or provide legal or "
+        "insurance advice. Please consult a licensed insurance professional for "
+        "compliance decisions.</p>"
+    )
+
     message = Mail(
         from_email=SENDER_EMAIL,
         to_emails=email,
-        subject="You're in. Let's get your subs in line. 🏗️",
-        html_content=f"""
-        <p>Hi {name},</p>
-        <p>Welcome to Carolina Compliance Solutions — and congratulations on officially retiring your COI spreadsheet. It had a good run. We'll take it from here.</p>
-        <p>Here's what happens next. Three steps. That's it.</p>
-        <p><strong>Step 1 — Send us your vendor list</strong><br>
-        Just reply to this email with your subcontractors — however you have them. A list, a spreadsheet, a napkin photo. We'll get them loaded in.</p>
-        <p><strong>Step 2 — Forward your existing COIs</strong><br>
-        Got certificates already on file? Forward them to coi@carolinacompliancesolutions.com. Our system reads and tracks them automatically.</p>
-        <p><strong>Step 3 — Log into your dashboard</strong><br>
-        Head to <a href="https://app.carolinacompliancesolutions.com">app.carolinacompliancesolutions.com</a>. Your compliance dashboard is ready.</p>
-        <p><strong>Step 4 — Tell us your requirements</strong><br>
-        Reply to this email with the insurance minimums you require from your subcontractors:</p>
-        <ul>
-        <li>General Liability (GL) — required? If yes, minimum limit?</li>
-        <li>Auto Liability (AL) — required? If yes, minimum limit?</li>
-        <li>Workers Compensation (WC) — required yes or no?</li>
-        <li>Additional Insured (AI) — required yes or no?</li>
-        <li>Waiver of Subrogation (WOS) — required yes or no?</li>
-        </ul>
-        <p>We'll load your requirements into the system within 1 business day.</p>
-        <p>That's it. No more chasing your electrician for his certificate. No more wondering if your framer's workers' comp lapsed mid-project. We track it so you don't have to.</p>
-        <p>Reply to this email anytime with questions.</p>
-        <p>Welcome aboard,<br>
-        <strong>The Carolina Compliance Team</strong><br>
-        carolinacompliancesolutions.com</p>
-        <p><em>P.S. Your electrician already needs a reminder. We're on it.</em></p>
-        <hr>
-        <p style="font-size:11px;color:#999;">Carolina Compliance Solutions is an administrative certificate tracking tool. We organize and extract data from certificates of insurance for your convenience. We do not verify policy authenticity, guarantee active coverage, or provide legal or insurance advice. Please consult a licensed insurance professional for compliance decisions.</p>
-        """
+        subject=welcome_subject,
+        html_content=build_email_html(welcome_subject, welcome_body_html),
     )
     sg.send(message)
     _record_welcome_email_sent(email)

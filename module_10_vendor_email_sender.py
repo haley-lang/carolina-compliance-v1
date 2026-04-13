@@ -15,7 +15,8 @@ API_KEY = os.getenv("AIRTABLE_API_KEY")
 BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 
 from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail, Email, To, Cc
+from sendgrid.helpers.mail import Mail, Email, To, Cc, Content
+from email_template import build_email_html
 
 def send_queued_emails(api):
     sg = SendGridAPIClient(api_key=os.getenv("SENDGRID_API_KEY"))
@@ -37,9 +38,22 @@ def send_queued_emails(api):
             to_email = To(fields['Primary Email'])
             cc_emails = [Cc(email) for email in fields.get('CC Emails', [])]
             subject = fields['Subject']
-            content = fields['Body']
+            raw_body = fields['Body']
 
-            mail = Mail(from_email, to_email, subject, content)
+            # If the body is already a full HTML email (from module_8b etc.),
+            # send as-is; otherwise wrap plain text in the branded template.
+            if raw_body.strip().startswith("<!DOCTYPE") or raw_body.strip().startswith("<html"):
+                html_body = raw_body
+            else:
+                body_html = "<p>" + raw_body.replace("\n\n", "</p><p>").replace("\n", "<br>") + "</p>"
+                html_body = build_email_html(subject, body_html)
+
+            mail = Mail(
+                from_email=from_email,
+                to_emails=to_email,
+                subject=subject,
+            )
+            mail.add_content(Content("text/html", html_body))
             if cc_emails:
                 mail.personalizations[0].add_cc(cc_emails)
 

@@ -1,6 +1,6 @@
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 from pyairtable import Api
@@ -18,6 +18,49 @@ AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 SENDGRID_FROM_EMAIL = os.getenv("SENDGRID_FROM_EMAIL")
+
+# --- Airtable table / field IDs for guard-clause and dedup lookups ---
+CLIENTS_TABLE_ID = "tbltnBIWke20IEI3K"
+FLD_REQUIREMENTS_STATUS = "flde7mzXePBqKBjGx"
+EMAIL_QUEUE_TABLE_ID = "tblCeRCf6RToTFkbL"
+FLD_EQ_VENDOR_LINK = "fldvEsppIZASymJjF"
+FLD_EQ_EMAIL_TYPE = "fldtVfbc7XNSVG1pT"
+FLD_EQ_CREATED_AT = "flduah8p5oIxULYHN"
+
+
+def _client_requirements_received(api: Api, client_record_id: str) -> bool:
+    """Return True only if the vendor's linked client has Requirements Status = 'Received'."""
+    if not client_record_id:
+        return False
+    try:
+        clients_table = api.table(AIRTABLE_BASE_ID, CLIENTS_TABLE_ID)
+        record = clients_table.get(client_record_id)
+        status = record.get("fields", {}).get("Requirements Status", "")
+        return status == "Received"
+    except Exception as exc:
+        logger.error("Failed to check client requirements status: %s", exc)
+        return False
+
+
+def _initial_request_sent_recently(api: Api, vendor_record_id: str) -> bool:
+    """Return True if an 'Initial Request' email was sent to this vendor in the last 30 days."""
+    if not vendor_record_id:
+        return False
+    try:
+        eq_table = api.table(AIRTABLE_BASE_ID, EMAIL_QUEUE_TABLE_ID)
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        formula = (
+            f"AND("
+            f"FIND(\"{vendor_record_id}\", ARRAYJOIN({{{FLD_EQ_VENDOR_LINK}}})),"
+            f"{{{FLD_EQ_EMAIL_TYPE}}}='Initial Request',"
+            f"IS_AFTER({{{FLD_EQ_CREATED_AT}}}, '{cutoff}')"
+            f")"
+        )
+        records = eq_table.all(formula=formula)
+        return len(records) > 0
+    except Exception as exc:
+        logger.error("Failed to check duplicate send for vendor %s: %s", vendor_record_id, exc)
+        return False
 
 
 def _coerce_client_name(raw_value) -> str:
@@ -65,12 +108,62 @@ def send_initial_vendor_requests() -> None:
         fields = queue_record.get("fields", {}) if isinstance(queue_record, dict) else {}
         recipient = fields.get("Primary Email")
         email_type = fields.get("Email Type")
+        vendor_name = fields.get("Vendor Name", "Vendor")
+        if isinstance(vendor_name, list):
+            vendor_name = vendor_name[0] if vendor_name else "Vendor"
+        gc_client_name = _coerce_client_name(fields.get("Client Name"))
+
+        # --- Guard clause: linked vendor record ID and client record ID ---
+        vendor_link_raw = fields.get("Vendor Link", [])
+        vendor_record_id = vendor_link_raw[0] if isinstance(vendor_link_raw, list) and vendor_link_raw else None
+        client_link_raw = fields.get("Client Link", [])
+        client_record_id = client_link_raw[0] if isinstance(client_link_raw, list) and client_link_raw else None
+
+        # --- GUARD: Client requirements must be confirmed ---
+        if email_type == "Initial Request" and not _client_requirements_received(api, client_record_id):
+            skipped += 1
+            logger.info("Skipping %s — client requirements not yet confirmed", vendor_name)
+            continue
+
+        # --- GUARD: Duplicate send prevention (Initial Request within 30 days) ---
+        if email_type == "Initial Request" and _initial_request_sent_recently(api, vendor_record_id):
+            skipped += 1
+            logger.info("Skipping %s — initial request already sent within 30 days", vendor_name)
+            continue
+
         try:
             cc_raw = fields.get("CC Emails", [])
             cc_values = cc_raw if isinstance(cc_raw, list) else [cc_raw]
             cc_values = [email for email in cc_values if isinstance(email, str) and email.strip()]
-            subject = fields.get("Subject", "")
-            body = fields.get("Body", "")
+
+            # --- Build subject and body ---
+            if email_type == "Initial Request":
+                subject = f"{gc_client_name} — Certificate of Insurance Request"
+                body = (
+                    f"Hi {vendor_name},\n\n"
+                    f"{gc_client_name} has asked us to collect a current Certificate "
+                    f"of Insurance for your company. They use Carolina Compliance "
+                    f"Solutions to manage subcontractor insurance compliance.\n\n"
+                    f"Please email your COI to:\n"
+                    f"coi@carolinacompliancesolutions.com\n\n"
+                    f"In the subject line, please include:\n"
+                    f"{gc_client_name} — {vendor_name}\n\n"
+                    f"Once we receive it, our system will process it automatically.\n\n"
+                    f"If anything is missing or doesn't meet requirements, we'll\n"
+                    f"follow up with you directly.\n\n"
+                    f"When your policy renews, just send the updated certificate to\n"
+                    f"the same address — no login or portal required.\n\n"
+                    f"Questions? Reply to this email.\n\n"
+                    f"Carolina Compliance Solutions\n"
+                    f"coi@carolinacompliancesolutions.com"
+                )
+            else:
+                subject = fields.get("Subject", "")
+                body = fields.get("Body", "")
+
+            # Append disclaimer to all email bodies
+            from legal_disclaimer import EMAIL_DISCLAIMER
+            body = body + EMAIL_DISCLAIMER if body else body
 
             if not recipient:
                 skipped += 1
