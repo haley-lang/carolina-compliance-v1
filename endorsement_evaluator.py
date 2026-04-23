@@ -99,11 +99,11 @@ def _matches_any(text: str, patterns: list) -> bool:
 
 
 def _normalize_holder(text: str) -> str:
-    """Normalize a certificate holder name for comparison."""
-    text = (text or "").strip().upper()
-    text = text.replace("&", " AND ").replace("'", "")
-    text = re.sub(r"[^A-Z0-9\s]", " ", text)
-    return " ".join(text.split())
+    """Normalize a certificate holder name for comparison.
+    Uses the shared normalize_holder_name from utils.py.
+    """
+    from utils import normalize_holder_name
+    return normalize_holder_name(text)
 
 
 # ── Finding dataclass ────────────────────────────────────────────────────────
@@ -375,22 +375,48 @@ def evaluate_endorsements(
                         severity="info",
                     ))
 
-    # ── Certificate holder mismatch ──────────────────────────────────────
+    # ── Certificate holder comparison (fuzzy) ────────────────────────────
     if certificate_holder_on_coi and expected_certificate_holder:
         coi_norm = _normalize_holder(certificate_holder_on_coi)
         expected_norm = _normalize_holder(expected_certificate_holder)
-        if coi_norm and expected_norm and coi_norm != expected_norm:
-            result.findings.append(EndorsementFinding(
-                reason_code=RC_HOLDER_MISMATCH,
-                message=(
-                    f"Certificate holder on submitted documentation "
-                    f"('{certificate_holder_on_coi}') does not match expected holder "
-                    f"('{expected_certificate_holder}'). Please verify this certificate "
-                    f"was issued for the correct project."
-                ),
-                severity="warning",
-            ))
-            result.needs_review = True
+
+        if coi_norm and expected_norm:
+            try:
+                from rapidfuzz import fuzz
+                score = fuzz.token_sort_ratio(coi_norm, expected_norm)
+            except ImportError:
+                # Fallback to exact match if rapidfuzz not available
+                score = 100.0 if coi_norm == expected_norm else 0.0
+
+            if score >= 95:
+                # Exact or near-exact match — pass silently
+                pass
+            elif score >= 80:
+                # Soft match — pass but note the near-match
+                result.findings.append(EndorsementFinding(
+                    reason_code="HOLDER_NEAR_MATCH",
+                    message=(
+                        f"Note: Certificate holder name is a near-match. "
+                        f"Printed on COI: '{certificate_holder_on_coi}'. "
+                        f"Expected: '{expected_certificate_holder}'. "
+                        f"Please verify if needed."
+                    ),
+                    severity="info",
+                ))
+            else:
+                # Below 80% — mismatch, flag for review
+                result.findings.append(EndorsementFinding(
+                    reason_code=RC_HOLDER_MISMATCH,
+                    message=(
+                        f"Certificate holder on submitted documentation "
+                        f"('{certificate_holder_on_coi}') does not closely match "
+                        f"the expected holder ('{expected_certificate_holder}'). "
+                        f"Please verify this certificate was issued for the "
+                        f"correct project."
+                    ),
+                    severity="warning",
+                ))
+                result.needs_review = True
 
     # ── Endorsement date mismatch ────────────────────────────────────────
     if endorsement_effective_date and policy_effective_date:

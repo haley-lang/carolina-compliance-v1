@@ -9,11 +9,15 @@ CSV format (with header row):
     vendor_name,contact_name,email,phone,trade
 """
 
+import os
 import sys
 import csv
 import logging
 from pyairtable import Api
+from dotenv import load_dotenv
 import config
+
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -36,7 +40,14 @@ def import_vendors(client_name, csv_path):
 
     client = get_client_record(api, client_name)
     client_id = client["id"]
-    logger.info("Found client: %s (ID: %s)", client_name, client_id)
+    client_portal_email = (
+        client["fields"].get("fldmh1sYahgN5x6KQ")  # Primary Contact Email
+        or client["fields"].get("Primary Contact Email")
+        or ""
+    ).strip()
+    if not client_portal_email:
+        logger.warning("Client %s has no Primary Contact Email — Softr portal filtering will not work", client_name)
+    logger.info("Found client: %s (ID: %s, Portal Email: %s)", client_name, client_id, client_portal_email or "MISSING")
 
     # Build set of existing vendor names for this client (via junction table)
     existing_junctions = client_vendors_table.all(
@@ -54,9 +65,9 @@ def import_vendors(client_name, csv_path):
         except Exception:
             pass
 
-    imported = 0
-    skipped = 0
-    errors = 0
+    imported_names = []
+    skipped_names = []
+    failed_names = []
 
     with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -66,21 +77,25 @@ def import_vendors(client_name, csv_path):
 
             if not vendor_name or not email:
                 logger.warning("Skipping row — missing vendor name or email: %s", row)
-                skipped += 1
+                skipped_names.append(vendor_name or "(blank)")
                 continue
 
             if vendor_name.strip().lower() in existing_vendor_names:
                 logger.info("Duplicate skipped: %s", vendor_name)
-                skipped += 1
+                skipped_names.append(vendor_name)
                 continue
 
             try:
-                vendor_record = vendors_table.create({
+                vendor_fields = {
                     "Vendor Name": vendor_name,
                     "Vendor Email": email,
                     "Compliance Status": "Pending",
                     "Send Request": True,
-                })
+                }
+                # Write the client's portal email so Softr can filter vendors per GC
+                if client_portal_email:
+                    vendor_fields["fldxteHtQ5ITcx6Zw"] = client_portal_email
+                vendor_record = vendors_table.create(vendor_fields)
                 new_vendor_id = vendor_record["id"]
 
                 client_vendors_table.create({
@@ -98,12 +113,82 @@ def import_vendors(client_name, csv_path):
 
                 logger.info("Imported: %s (%s)", vendor_name, email)
                 existing_vendor_names.add(vendor_name.strip().lower())
-                imported += 1
+                imported_names.append(vendor_name)
             except Exception as e:
                 logger.error("Error importing %s: %s", vendor_name, e)
-                errors += 1
+                failed_names.append(vendor_name)
 
-    logger.info("=== Import Complete === Imported: %d | Skipped: %d | Errors: %d", imported, skipped, errors)
+    logger.info(
+        "=== Import Complete === Imported: %d | Skipped: %d | Errors: %d",
+        len(imported_names), len(skipped_names), len(failed_names),
+    )
+
+    _send_import_summary(client_name, imported_names, skipped_names, failed_names)
+
+
+def _send_import_summary(client_name, imported_names, skipped_names, failed_names):
+    """Print summary to terminal and send an internal email to the owner."""
+    total = len(imported_names) + len(skipped_names) + len(failed_names)
+
+    imported_list = "\n".join(f"  - {n}" for n in imported_names) if imported_names else "  (none)"
+    skipped_list = "\n".join(f"  - {n}" for n in skipped_names) if skipped_names else "  (none)"
+    failed_list = "\n".join(f"  - {n}" for n in failed_names) if failed_names else "  (none)"
+
+    body = (
+        f"Vendor import for {client_name} is complete.\n\n"
+        f"Total rows processed: {total}\n"
+        f"Imported: {len(imported_names)}\n"
+        f"Skipped (duplicate or missing data): {len(skipped_names)}\n"
+        f"Failed: {len(failed_names)}\n\n"
+        f"Imported vendors:\n{imported_list}\n\n"
+    )
+    if skipped_names:
+        body += f"Skipped vendors:\n{skipped_list}\n\n"
+    if failed_names:
+        body += f"Failed vendors:\n{failed_list}\n\n"
+
+    body += (
+        f"REMINDER: Confirm that {client_name}'s Requirements Status is set to "
+        f"'Received' in Airtable. Initial COI requests will not send until "
+        f"requirements are confirmed.\n\n"
+        f"Carolina Compliance Solutions"
+    )
+
+    subject = f"Vendor Import Complete — {client_name} — {len(imported_names)} vendors added"
+
+    # Print to terminal
+    print(f"\n{'=' * 60}")
+    print(subject)
+    print('=' * 60)
+    print(body)
+    print('=' * 60)
+
+    # Send via SendGrid
+    sendgrid_api_key = os.getenv("SENDGRID_API_KEY")
+    from_email = config.FROM_EMAIL
+    to_email = config.OWNER_EMAIL
+
+    if not sendgrid_api_key or not from_email:
+        logger.warning("SendGrid not configured — import summary email not sent")
+        return
+
+    try:
+        from sendgrid import SendGridAPIClient
+        from sendgrid.helpers.mail import Mail, Email
+        from legal_disclaimer import EMAIL_DISCLAIMER
+
+        sg = SendGridAPIClient(api_key=sendgrid_api_key)
+        message = Mail(
+            from_email=Email(from_email, "Carolina Compliance Solutions"),
+            to_emails=to_email,
+            subject=subject,
+            plain_text_content=body + EMAIL_DISCLAIMER,
+        )
+        message.reply_to = Email(config.INBOUND_EMAIL)
+        sg.send(message)
+        logger.info("Import summary email sent to %s", to_email)
+    except Exception as e:
+        logger.error("Failed to send import summary email: %s", e)
 
 
 if __name__ == "__main__":

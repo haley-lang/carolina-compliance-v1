@@ -21,7 +21,10 @@ logger = logging.getLogger(__name__)
 # Airtable configuration
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
-HALEY_EMAIL = os.getenv("HALEY_EMAIL")
+import config as _cfg
+HALEY_EMAIL = _cfg.OWNER_EMAIL
+
+from legal_disclaimer import EMAIL_DISCLAIMER
 
 # Table / field IDs
 CLIENTS_TABLE_ID = "tbltnBIWke20IEI3K"
@@ -130,6 +133,7 @@ def queue_annual_review_email(api: Api, client_id: str, client_name: str, start_
         f"Reply with any updates and we'll adjust your account accordingly.'\n\n"
         f"After you follow up, no action needed in Airtable — this alert fires once "
         f"per year automatically."
+        f"{EMAIL_DISCLAIMER}"
     )
 
     record = {
@@ -151,7 +155,7 @@ def update_requirements_status(api: Api, client_id: str, new_status: str):
     """Update the Requirements Status field on a client record."""
     table = api.table(AIRTABLE_BASE_ID, CLIENTS_TABLE_ID)
     try:
-        table.update(client_id, {"Requirements Status": new_status})
+        table.update(client_id, {"Requirements Status": new_status}, typecast=True)
         logger.info("Updated client %s Requirements Status → %s", client_id, new_status)
     except Exception as e:
         logger.error("Failed to update Requirements Status for %s: %s", client_id, e)
@@ -188,6 +192,7 @@ def run():
                     f"before the next pipeline run evaluates their vendors.\n\n"
                     f"Update their Requirements Status to 'Followed Up' in Airtable "
                     f"after you reach out."
+                    f"{EMAIL_DISCLAIMER}"
                 )
                 queue_alert_email(api, client_name, start_date_str, subject, body)
                 update_requirements_status(api, client_id, "Followed Up")
@@ -207,6 +212,7 @@ def run():
                     f"This requires immediate attention. Please escalate or contact the client "
                     f"directly before the next pipeline run.\n\n"
                     f"Update their Requirements Status in Airtable after you reach out."
+                    f"{EMAIL_DISCLAIMER}"
                 )
                 queue_alert_email(api, client_name, start_date_str, subject, body)
                 update_requirements_status(api, client_id, "Escalated")

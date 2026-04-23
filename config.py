@@ -15,6 +15,11 @@ AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME", "Incoming Documents")
 
+# Email addresses
+OWNER_EMAIL = os.getenv("HALEY_EMAIL", "haley@carolinacompliancesolutions.com")
+FROM_EMAIL = os.getenv("SENDGRID_FROM_EMAIL", "compliance@carolinacompliancesolutions.com")
+INBOUND_EMAIL = os.getenv("INBOUND_EMAIL", "coi@carolinacompliancesolutions.com")
+
 # Local storage
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploads")
 

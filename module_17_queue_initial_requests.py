@@ -10,34 +10,48 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
 
-VENDORS_TABLE_NAME = "Vendors"
-EMAIL_QUEUE_TABLE_NAME = "Email Queue"
-CLIENTS_TABLE_NAME = "Clients"
-VENDOR_CLIENT_ASSIGNMENTS_TABLE_NAME = "Vendor Client Assignments"
+from airtable_constants import (
+    TBL_VENDORS, TBL_EMAIL_QUEUE, TBL_CLIENTS, TBL_VENDOR_CLIENT_ASSIGNMENTS,
+    V_VENDOR_NAME, V_VENDOR_EMAIL, V_SEND_REQUEST,
+    EQ_PRIMARY_EMAIL, EQ_SUBJECT, EQ_BODY, EQ_EMAIL_TYPE, EQ_EMAIL_STATUS,
+    EQ_RECORD_STATUS, EQ_VENDOR_LINK, EQ_REMINDER_STATUS, EQ_SEND_AFTER,
+    A_VENDOR_LINK, A_CLIENT_LINK, A_ACTIVE,
+    C_CLIENT_NAME, C_CLIENT_LINK,
+    STATUS_PENDING, STATUS_ACTIVE, STATUS_SENT,
+    EMAIL_TYPE_INITIAL_REQUEST,
+)
 
-VENDOR_NAME_FIELD = "Vendor Name"
-VENDOR_EMAIL_FIELD = "Vendor Email"
-SEND_REQUEST_FIELD = "Send Request"
+VENDORS_TABLE_NAME = TBL_VENDORS
+EMAIL_QUEUE_TABLE_NAME = TBL_EMAIL_QUEUE
+CLIENTS_TABLE_NAME = TBL_CLIENTS
+VENDOR_CLIENT_ASSIGNMENTS_TABLE_NAME = TBL_VENDOR_CLIENT_ASSIGNMENTS
 
-QUEUE_PRIMARY_EMAIL_FIELD = "Primary Email"
-QUEUE_SUBJECT_FIELD = "Subject"
-QUEUE_BODY_FIELD = "Body"
-QUEUE_EMAIL_TYPE_FIELD = "Email Type"
-QUEUE_EMAIL_STATUS_FIELD = "Email Status"
-QUEUE_RECORD_STATUS_FIELD = "Record Status"
-QUEUE_VENDOR_LINK_FIELD = "Vendor"
+VENDOR_NAME_FIELD = V_VENDOR_NAME
+VENDOR_EMAIL_FIELD = V_VENDOR_EMAIL
+SEND_REQUEST_FIELD = V_SEND_REQUEST
 
-VENDOR_CLIENT_LINK_FIELD = "Client Link"
-ASSIGNMENT_VENDOR_LINK_FIELD = "Vendor Link"
-ASSIGNMENT_CLIENT_LINK_FIELD = "Client Link"
-ASSIGNMENT_ACTIVE_FIELD = "Active"
-CLIENT_NAME_FIELD = "Client Name"
+QUEUE_PRIMARY_EMAIL_FIELD = EQ_PRIMARY_EMAIL
+QUEUE_SUBJECT_FIELD = EQ_SUBJECT
+QUEUE_BODY_FIELD = EQ_BODY
+QUEUE_EMAIL_TYPE_FIELD = EQ_EMAIL_TYPE
+QUEUE_EMAIL_STATUS_FIELD = EQ_EMAIL_STATUS
+QUEUE_RECORD_STATUS_FIELD = EQ_RECORD_STATUS
+QUEUE_VENDOR_LINK_FIELD = EQ_VENDOR_LINK
+
+VENDOR_CLIENT_LINK_FIELD = C_CLIENT_LINK
+ASSIGNMENT_VENDOR_LINK_FIELD = A_VENDOR_LINK
+ASSIGNMENT_CLIENT_LINK_FIELD = A_CLIENT_LINK
+ASSIGNMENT_ACTIVE_FIELD = A_ACTIVE
+CLIENT_NAME_FIELD = C_CLIENT_NAME
 CLIENT_PLACEHOLDER = "[Client Name]"
 
 INITIAL_REQUEST_TYPE = "Initial Request"
 PENDING_STATUS = "Pending"
 ACTIVE_STATUS = "Active"
 SENT_STATUS = "Sent"
+
+QUEUE_REMINDER_STATUS_FIELD = "Reminder Status"
+QUEUE_SEND_AFTER_FIELD = "Send After"
 
 
 def _require_airtable_config() -> None:
@@ -134,15 +148,15 @@ def _fetch_vendors_ready_for_initial_request(vendors_table) -> List[Dict[str, An
 
 def _find_active_unsent_initial_request_record_id(
     email_queue_table,
-    vendor_id: str,
+    vendor_name: str,
 ) -> Optional[str]:
     """Check for an existing active unsent Initial Request for this vendor.
 
-    Uses a server-side Airtable formula that includes the vendor record ID
-    so only matching records are fetched, instead of fetching the entire queue.
+    Uses vendor display name (not record ID) because ARRAYJOIN on linked
+    record fields returns display names in Airtable formulas.
     """
-    safe_vendor_id = _escape_formula_value(vendor_id)
-    formula = f"AND({{Email Type}}='Initial Request', {{Reminder Status}}='Queued', FIND('{safe_vendor_id}', ARRAYJOIN({{Vendor}}, ',')))"
+    safe_vendor_name = _escape_formula_value(vendor_name)
+    formula = f"AND({{Email Type}}='Initial Request', {{Reminder Status}}='Queued', FIND('{safe_vendor_name}', ARRAYJOIN({{Vendor}})))"
     records = email_queue_table.all(formula=formula)
     return records[0]["id"] if records else None
 
@@ -153,7 +167,15 @@ def _create_queue_record(
     vendor_name: str,
     vendor_email: str,
     client_name: str,
-) -> Dict[str, Any]:
+) -> Optional[Dict[str, Any]]:
+    # Guard: do not create orphaned queue records with no vendor
+    if not vendor_id or not vendor_id.strip():
+        logger.warning("Skipped queue record — no vendor ID for '%s'", vendor_name)
+        return None
+
+    from datetime import datetime, timezone
+    send_after = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
     fields = {
         QUEUE_PRIMARY_EMAIL_FIELD: vendor_email,
         QUEUE_SUBJECT_FIELD: _build_subject(client_name),
@@ -161,6 +183,8 @@ def _create_queue_record(
         QUEUE_EMAIL_TYPE_FIELD: INITIAL_REQUEST_TYPE,
         QUEUE_EMAIL_STATUS_FIELD: PENDING_STATUS,
         QUEUE_RECORD_STATUS_FIELD: ACTIVE_STATUS,
+        QUEUE_REMINDER_STATUS_FIELD: "Queued",
+        QUEUE_SEND_AFTER_FIELD: send_after,
         QUEUE_VENDOR_LINK_FIELD: [vendor_id],
     }
     return email_queue_table.create(fields)
@@ -229,7 +253,7 @@ def run() -> None:
         try:
             existing_queue_record_id = _find_active_unsent_initial_request_record_id(
                 email_queue_table,
-                vendor_id,
+                vendor_name,
             )
             if existing_queue_record_id:
                 logger.info(
@@ -256,6 +280,8 @@ def run() -> None:
                 vendor_email=vendor_email,
                 client_name=client_name,
             )
+            if not queue_record:
+                continue
             logger.info(
                 "queue created: vendor=%s (%s), queue_record=%s",
                 vendor_name,

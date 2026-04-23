@@ -87,6 +87,67 @@ class MatchEvaluation:
     match_confidence: int = 0
 
 
+# US state abbreviations for address line detection
+_US_STATES = {
+    "al","ak","az","ar","ca","co","ct","de","fl","ga","hi","id","il","in","ia",
+    "ks","ky","la","me","md","ma","mi","mn","ms","mo","mt","ne","nv","nh","nj",
+    "nm","ny","nc","nd","oh","ok","or","pa","ri","sc","sd","tn","tx","ut","vt",
+    "va","wa","wv","wi","wy","dc",
+}
+_STREET_WORDS = {
+    "st","street","ave","avenue","blvd","boulevard","rd","road","dr","drive",
+    "ln","lane","ct","court","way","pl","place","pkwy","parkway","hwy","highway",
+    "suite","ste","apt","unit","floor","fl","po box","p.o. box",
+}
+
+
+def _looks_like_address_line(line: str) -> bool:
+    """Return True if a line looks like a street address, city/state, or zip."""
+    stripped = line.strip().lower()
+    if not stripped:
+        return True  # blank lines between name and address
+    # Zip code pattern (5 digits or 5+4)
+    if re.search(r"\b\d{5}(?:-\d{4})?\b", stripped):
+        return True
+    # City, STATE pattern
+    words = stripped.replace(",", " ").split()
+    if len(words) >= 2 and words[-1] in _US_STATES:
+        return True
+    # Street address (starts with number + street word)
+    if re.match(r"^\d+\s", stripped):
+        for sw in _STREET_WORDS:
+            if sw in stripped:
+                return True
+    # Lines starting with suite/apt/unit/floor + number
+    if re.match(r"^(?:suite|ste|apt|unit|floor|fl)\s+\d", stripped):
+        return True
+    # PO Box
+    if "po box" in stripped or "p.o. box" in stripped:
+        return True
+    return False
+
+
+def clean_named_insured(raw: Any) -> str:
+    """Strip address lines from a named insured value.
+
+    The extractor sometimes returns "Company Name\\n123 Main St\\nCity, ST 12345".
+    This function returns only the company name (first non-address line).
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    lines = text.split("\n")
+    # Take lines from the top until we hit something that looks like an address
+    name_parts = []
+    for line in lines:
+        if _looks_like_address_line(line) and name_parts:
+            break
+        cleaned = line.strip()
+        if cleaned:
+            name_parts.append(cleaned)
+    return " ".join(name_parts) if name_parts else text
+
+
 def normalize_match_text(value: Any) -> str:
     """Deterministic normalization for exact matching only."""
     text = str(value or "")
@@ -760,6 +821,15 @@ def evaluate_vendor_match(
     """
     try:
         vendor_list = list(vendor_records)  # materialize so we can iterate multiple times
+
+        # Clean named insured — strip address lines if contaminated
+        raw_insured = extraction_fields.get("Named Insured")
+        if raw_insured and "\n" in str(raw_insured):
+            cleaned = clean_named_insured(raw_insured)
+            if cleaned != str(raw_insured).strip():
+                logger.info("Cleaned named insured: %r → %r", str(raw_insured)[:60], cleaned)
+                extraction_fields = dict(extraction_fields)
+                extraction_fields["Named Insured"] = cleaned
 
         # ── Step 1: Policy number exact match ────────────────────────────────
         vendor_eval = MatchEvaluation(

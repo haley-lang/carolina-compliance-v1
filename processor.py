@@ -230,16 +230,19 @@ def _apply_deficiency_template_placeholders(
 def _find_existing_active_unsent_deficiency_queue_record(
     email_queue_table,
     vendor_id: str,
+    vendor_name: str,
     certificate_id: str,
     source_filename: str,
 ) -> Optional[str]:
-    escaped_vendor_id = _escape_formula_value(vendor_id)
+    # ARRAYJOIN on linked record fields returns display names, not record IDs.
+    # Match on vendor name (the display value) instead.
+    escaped_vendor_name = _escape_formula_value(vendor_name)
     formula = (
         "AND("
         "{Email Type}='Deficiency Request',"
         "{Record Status}='Active',"
         "NOT({Email Status}='Sent'),"
-        f"FIND('{escaped_vendor_id}', ARRAYJOIN({{Vendor}}))"
+        f"FIND('{escaped_vendor_name}', ARRAYJOIN({{Vendor}}))"
         ")"
     )
 
@@ -299,6 +302,7 @@ def queue_deficiency_email_if_needed(
         existing_id = _find_existing_active_unsent_deficiency_queue_record(
             email_queue_table=email_queue_table,
             vendor_id=vendor_id,
+            vendor_name=vendor_name,
             certificate_id=certificate_id,
             source_filename=source_filename,
         )
@@ -319,7 +323,7 @@ def queue_deficiency_email_if_needed(
             existing_id,
         )
         try:
-            certs_table.update(certificate_id, {"Deficiency Email Queue Status": "Queued"})
+            certs_table.update(certificate_id, {"Deficiency Email Queue Status": "Queued"}, typecast=True)
         except Exception as exc:
             logger.info(
                 "Certificate deficiency queue status write skipped (field likely missing) — certificate_id=%s error=%s",
@@ -369,6 +373,9 @@ def queue_deficiency_email_if_needed(
             source_filename=source_filename,
         )
 
+    from datetime import datetime, timezone
+    send_after = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
     queue_fields = {
         "Primary Email": vendor_email,
         "Subject": subject,
@@ -376,6 +383,8 @@ def queue_deficiency_email_if_needed(
         "Email Type": "Deficiency Request",
         "Email Status": "Pending",
         "Record Status": "Active",
+        "Reminder Status": "Queued",
+        "Send After": send_after,
         "Vendor": [vendor_id],
     }
     if matched_client_id:
@@ -386,7 +395,7 @@ def queue_deficiency_email_if_needed(
         )
 
     try:
-        queue_record = email_queue_table.create(queue_fields)
+        queue_record = email_queue_table.create(queue_fields, typecast=True)
         logger.info(
             "Deficiency queue created — queue_id=%s vendor_id=%s certificate_id=%s",
             queue_record.get("id"),
@@ -403,7 +412,7 @@ def queue_deficiency_email_if_needed(
         return
 
     try:
-        certs_table.update(certificate_id, {"Deficiency Email Queue Status": "Queued"})
+        certs_table.update(certificate_id, {"Deficiency Email Queue Status": "Queued"}, typecast=True)
     except Exception as exc:
         logger.info(
             "Certificate deficiency queue status write skipped (field likely missing) — certificate_id=%s error=%s",
@@ -760,26 +769,23 @@ def fetch_requirement_context_for_evaluator(
     return {}
 
 
-def fetch_newest_imported(table) -> Optional[dict]:
-    """Return the most-recent Incoming Extraction with status 'Imported', or None.
+def fetch_all_pending_extractions(table) -> list:
+    """Return all Incoming Extractions with status 'Imported', sorted oldest-first.
 
-    Fetches all Imported records then sorts in Python, using:
-      1. "Extraction Processed At" field if present
-      2. Airtable's built-in createdTime as fallback
-    This avoids pyairtable version-specific sort= format issues.
+    Processes oldest records first (FIFO) so no extraction gets stuck behind newer ones.
     """
     records = table.all(formula="{Processing Status} = 'Imported'")
     if not records:
-        return None
+        return []
 
     def sort_key(record):
-        # Prefer the explicit timestamp field; fall back to Airtable createdTime
         ts = record["fields"].get("Extraction Processed At") or ""
         if not ts:
             ts = record.get("createdTime") or ""
         return ts
 
-    return max(records, key=sort_key)
+    records.sort(key=sort_key)
+    return records
 
 
 def find_vendor(vendors_table, named_insured: str) -> Optional[dict]:
@@ -857,7 +863,8 @@ def create_vendor(vendors_table, named_insured: str) -> dict:
             "Created By": "System",
             "Source": "COI Intake",
             "Status": "Unreviewed",
-        }
+        },
+        typecast=True,
     )
     logger.info(
         "Created Vendor — ID: %s  Name: '%s'",
@@ -891,13 +898,34 @@ def get_existing_policies_by_vendor_and_type(
 
     Used for renewal detection: when a new COI arrives, we check if an older
     policy of the same type already exists so we can mark it superseded.
+    Matches both normalized type (e.g. 'General Liability') and common raw
+    variants (e.g. 'Commercial General Liability').
     """
     safe_vendor = vendor_record_id.replace("'", "\\'")
     safe_type = policy_type.replace("'", "\\'")
+
+    # Build OR clause for type variants
+    type_variants = {safe_type}
+    _type_aliases = {
+        "General Liability": ["Commercial General Liability", "CGL"],
+        "Auto Liability": ["Automobile Liability", "Commercial Auto", "Commercial Automobile Liability"],
+        "Workers Comp": ["Workers Compensation", "Workers Compensation and Employers' Liability",
+                         "Workers Compensation And Employers' Liability"],
+        "Umbrella": ["Umbrella Liab", "Umbrella Liability", "Excess Liability", "Umbrella Liab/Excess Liab"],
+    }
+    for alias in _type_aliases.get(policy_type, []):
+        type_variants.add(alias.replace("'", "\\'"))
+
+    if len(type_variants) == 1:
+        type_clause = f"{{Policy Type}} = '{safe_type}'"
+    else:
+        type_parts = ", ".join(f"{{Policy Type}} = '{t}'" for t in type_variants)
+        type_clause = f"OR({type_parts})"
+
     formula = (
         f"AND("
         f"FIND('{safe_vendor}', ARRAYJOIN({{Vendor Link}})), "
-        f"{{Policy Type}} = '{safe_type}', "
+        f"{type_clause}, "
         f"{{Status}} != 'Superseded'"
         f")"
     )
@@ -922,6 +950,184 @@ def _parse_date_safe(raw: str) -> Optional[date]:
     return None
 
 
+# ── COI classification constants ──────────────────────────────────────────────
+COI_DUPLICATE = "DUPLICATE"
+COI_RENEWAL = "RENEWAL"
+COI_MID_TERM_UPDATE = "MID_TERM_UPDATE"
+COI_NEW_VENDOR = "NEW_VENDOR"
+
+
+def classify_incoming_coi(
+    new_policy: dict,
+    existing_policies: list,
+) -> tuple:
+    """Classify a single incoming policy line against existing policy records.
+
+    Args:
+        new_policy: dict with keys: policy_number, policy_type, effective_date,
+                    expiration_date, carrier, coverage_limits,
+                    additional_insured_checked, waiver_of_subrogation_checked
+        existing_policies: list of Airtable policy record dicts (with "fields" key)
+                          for this vendor, NOT superseded
+
+    Returns:
+        (classification, matched_existing_record_or_None) where classification is
+        one of COI_DUPLICATE, COI_RENEWAL, COI_MID_TERM_UPDATE, COI_NEW_VENDOR.
+    """
+    if not existing_policies:
+        return COI_NEW_VENDOR, None
+
+    new_number = (new_policy.get("policy_number") or "").strip().lower()
+    new_type = (new_policy.get("policy_type") or "").strip().lower()
+    new_carrier = (new_policy.get("carrier") or "").strip().lower()
+    new_effective = _parse_date_safe(new_policy.get("effective_date") or "")
+    new_limits = (new_policy.get("coverage_limits") or "").strip().lower()
+
+    # ── Step 1: Match by policy number ───────────────────────────────────
+    if new_number:
+        for existing in existing_policies:
+            ef = existing.get("fields", {})
+            ex_number = (ef.get("Policy Number") or "").strip().lower()
+            if not ex_number or ex_number != new_number:
+                continue
+
+            # Same policy number found — is it a duplicate or mid-term update?
+            ex_effective = _parse_date_safe(ef.get("Effective Date") or "")
+            ex_carrier = (ef.get("Carrier") or "").strip().lower()
+            ex_limits = (ef.get("Coverage Limits") or "").strip().lower()
+            ex_ai = bool(ef.get("Additional Insured"))
+            ex_wos = bool(ef.get("Waiver"))
+
+            new_ai = bool(new_policy.get("additional_insured_checked"))
+            new_wos = bool(new_policy.get("waiver_of_subrogation_checked"))
+
+            # True duplicate: same number + same effective + same carrier
+            same_effective = (
+                new_effective and ex_effective and new_effective == ex_effective
+            ) or (not new_effective and not ex_effective)
+            same_carrier = new_carrier == ex_carrier or not new_carrier or not ex_carrier
+
+            if same_effective and same_carrier:
+                # Check if limits/endorsements also match (true dup) or differ (mid-term)
+                limits_changed = new_limits and ex_limits and new_limits != ex_limits
+                endorsements_changed = (new_ai != ex_ai) or (new_wos != ex_wos)
+
+                if limits_changed or endorsements_changed:
+                    return COI_MID_TERM_UPDATE, existing
+                return COI_DUPLICATE, existing
+
+            # Same number but different effective or carrier → mid-term update
+            return COI_MID_TERM_UPDATE, existing
+
+    # ── Step 2: Match by type + carrier for renewal detection ────────────
+    normalized_new_type = normalize_policy_type(new_type) if new_type else ""
+    for existing in existing_policies:
+        ef = existing.get("fields", {})
+        ex_type_raw = (ef.get("Policy Type") or "").strip()
+        ex_type_normalized = normalize_policy_type(ex_type_raw.lower()) if ex_type_raw else ""
+        ex_carrier = (ef.get("Carrier") or "").strip().lower()
+        ex_expiration = _parse_date_safe(ef.get("Expiration Date") or "")
+
+        if ex_type_normalized != normalized_new_type and ex_type_raw != normalized_new_type:
+            continue
+
+        # Same type — check if this looks like a renewal
+        same_carrier = new_carrier == ex_carrier or not new_carrier or not ex_carrier
+
+        if same_carrier and new_effective and ex_expiration:
+            # New effective date is at or after old expiration → renewal
+            if new_effective >= ex_expiration:
+                return COI_RENEWAL, existing
+
+        # Same type, different carrier, new effective after old → also renewal (carrier switch)
+        if new_effective and ex_expiration and new_effective >= ex_expiration:
+            return COI_RENEWAL, existing
+
+    # ── Step 3: No match found ───────────────────────────────────────────
+    return COI_NEW_VENDOR, None
+
+
+# ── Carrier normalization for continuity checks ──────────────────────────────
+
+_CARRIER_STRIP_SUFFIXES = [
+    "insurance company", "insurance co.", "insurance co",
+    "ins. company", "ins. co.", "ins. co", "ins co",
+    "insurance", "ins",
+    "company", "co.", "co",
+    "incorporated", "inc.", "inc",
+    "corporation", "corp.", "corp",
+    "limited", "ltd.", "ltd",
+    "group", "llc", "l.l.c.",
+]
+
+
+def _normalize_carrier(name: str) -> str:
+    """Normalize a carrier name for comparison.
+
+    Iteratively strips common suffixes, punctuation, and whitespace so that
+    'Travelers Insurance Company' and 'Travelers Ins. Co.' compare equal.
+    """
+    text = (name or "").strip().lower()
+    text = text.replace(".", " ").replace(",", " ").replace("'", "")
+    text = " ".join(text.split())
+    # Strip suffixes iteratively — longest first, repeat until stable
+    changed = True
+    while changed:
+        changed = False
+        for suffix in sorted(_CARRIER_STRIP_SUFFIXES, key=len, reverse=True):
+            if text.endswith(suffix):
+                text = text[: -len(suffix)].strip()
+                changed = True
+                break
+    return " ".join(text.split())
+
+
+def check_carrier_continuity(
+    new_policy_data: dict,
+    existing_policy_record: dict,
+) -> dict:
+    """Check carrier and policy number continuity on a renewal.
+
+    Pure function — returns a dict of findings, does not write to Airtable.
+
+    Returns:
+        {
+            "carrier_changed": bool,
+            "old_carrier": str,
+            "new_carrier": str,
+            "policy_number_changed": bool,
+            "old_number": str,
+            "new_number": str,
+            "policy_type": str,
+        }
+    """
+    ef = existing_policy_record.get("fields", {})
+
+    old_carrier_raw = (ef.get("Carrier") or "").strip()
+    new_carrier_raw = (new_policy_data.get("carrier") or "").strip()
+    old_number = (ef.get("Policy Number") or "").strip()
+    new_number = (new_policy_data.get("policy_number") or "").strip()
+    policy_type = ef.get("Policy Type") or new_policy_data.get("policy_type") or ""
+
+    carrier_changed = False
+    if old_carrier_raw and new_carrier_raw:
+        carrier_changed = _normalize_carrier(old_carrier_raw) != _normalize_carrier(new_carrier_raw)
+
+    policy_number_changed = False
+    if old_number and new_number:
+        policy_number_changed = old_number.strip().lower() != new_number.strip().lower()
+
+    return {
+        "carrier_changed": carrier_changed,
+        "old_carrier": old_carrier_raw,
+        "new_carrier": new_carrier_raw,
+        "policy_number_changed": policy_number_changed,
+        "old_number": old_number,
+        "new_number": new_number,
+        "policy_type": policy_type,
+    }
+
+
 def set_processing_status(incoming_table, record_id: str, status: str) -> None:
     """Update the Processing Status field on an Incoming Extractions record."""
     incoming_table.update(record_id, {"Processing Status": status}, typecast=True)
@@ -930,13 +1136,13 @@ def set_processing_status(incoming_table, record_id: str, status: str) -> None:
 
 def set_vendor_expired_status(vendors_table, vendor_id: str) -> None:
     """Mark vendor as action needed for cancellation handling when policy is unknown."""
-    vendors_table.update(vendor_id, {"Status": "Action Needed"})
+    vendors_table.update(vendor_id, {"Status": "Action Needed"}, typecast=True)
     logger.info("Vendor %s → Status = 'Action Needed'", vendor_id)
 
 
 def set_policy_canceled_status(policies_table, policy_id: str) -> None:
     """Mark a policy as canceled for cancellation handling."""
-    policies_table.update(policy_id, {"Status": "Canceled"})
+    policies_table.update(policy_id, {"Status": "Canceled"}, typecast=True)
     logger.info("Policy %s → Status = 'Canceled'", policy_id)
 
 
@@ -1127,6 +1333,7 @@ def process_policies(
     Returns list of policy record IDs touched in this run.
     """
     touched_ids = []
+    new_records_created = 0
     logger.info("Insurance Policy vendor field in use: Vendor Link")
     for idx, policy in enumerate(policies, start=1):
         policy_number = (policy.get("policy_number") or "").strip()
@@ -1224,7 +1431,7 @@ def process_policies(
             if source_filename:
                 refreshed_fields["Certificate Source Filename"] = source_filename
 
-            policies_table.update(existing_policy["id"], refreshed_fields)
+            policies_table.update(existing_policy["id"], refreshed_fields, typecast=True)
             logger.info(
                 "Policy %d (%s) existing policy found — refreshed fields: %s",
                 idx,
@@ -1262,7 +1469,7 @@ def process_policies(
                 # New policy is newer — mark all existing same-type policies as Superseded
                 for existing in same_type_policies:
                     try:
-                        policies_table.update(existing["id"], {"Status": "Superseded"})
+                        policies_table.update(existing["id"], {"Status": "Superseded"}, typecast=True)
                         logger.info(
                             "Marked policy %s (%s %s) as Superseded — replaced by renewal.",
                             existing["id"],
@@ -1312,75 +1519,93 @@ def process_policies(
             certificate_record_id,
         )
 
-        record = policies_table.create(fields)
+        record = policies_table.create(fields, typecast=True)
+        new_records_created += 1
         logger.info(
             "Created Insurance Policy — ID: %s  Policy #: %s",
             record["id"], policy_number,
         )
         touched_ids.append(record["id"])
 
+        # ── Carrier continuity check on renewals ─────────────────────────
+        # same_type_policies is set above in the renewal detection block.
+        # If it exists and had records, this is a renewal — run the check.
+        if 'same_type_policies' in dir() and same_type_policies:
+            try:
+                # Pick the most recent superseded policy for comparison
+                superseded = sorted(
+                    same_type_policies,
+                    key=lambda p: p["fields"].get("Expiration Date") or "",
+                    reverse=True,
+                )[0]
+                continuity = check_carrier_continuity(policy, superseded)
+
+                if continuity["carrier_changed"]:
+                    # Write flag to new policy record
+                    try:
+                        policies_table.update(record["id"], {
+                            "fldeit6q3YlC68bDI": (  # Endorsement Flags
+                                f"CARRIER_CHANGED: Certificate documentation shows carrier changed "
+                                f"on {continuity['policy_type']} from '{continuity['old_carrier']}' "
+                                f"to '{continuity['new_carrier']}'."
+                            ),
+                        }, typecast=True)
+                    except Exception:
+                        pass
+                    logger.info(
+                        "Carrier change detected on renewal: %s → %s (%s)",
+                        continuity["old_carrier"], continuity["new_carrier"],
+                        continuity["policy_type"],
+                    )
+
+                if continuity["policy_number_changed"]:
+                    logger.info(
+                        "Policy number changed on renewal: %s → %s (%s)",
+                        continuity["old_number"], continuity["new_number"],
+                        continuity["policy_type"],
+                    )
+            except Exception as exc:
+                logger.warning("Carrier continuity check failed: %s", exc)
+
+    # ── Stamp extraction as Duplicate if all policies matched existing records ─
+    if policies and new_records_created == 0 and touched_ids and incoming_table and extraction_id:
+        # Every policy was either an existing-by-number refresh or an effective-date duplicate
+        duplicate_of_id = touched_ids[0] if touched_ids else ""
+        try:
+            incoming_table.update(extraction_id, {
+                "Processing Status": "Duplicate",
+                "fldYmU49onpvXabJi": f"{duplicate_of_id}",  # Duplicate Of
+            }, typecast=True)
+            logger.info(
+                "All %d policies matched existing records — extraction %s stamped as Duplicate (of %s)",
+                len(policies), extraction_id, duplicate_of_id,
+            )
+        except Exception as exc:
+            logger.warning("Failed to stamp extraction as Duplicate: %s", exc)
+
     return touched_ids
 
 
-def upload_pdf_attachment(base_id: str, record_id: str, pdf_path: Path) -> bool:
+def upload_pdf_attachment(pdf_path: Path, record_id: str, certs_table) -> bool:
     """
     Upload a local PDF file to the Certificate File attachment field in Airtable.
-    Uses the Airtable content upload API directly.
+    Uses pyairtable's built-in upload_attachment method.
 
     Returns True on success, False on failure (non-fatal — cert still gets created).
     """
-    api_key = (config.AIRTABLE_API_KEY or "").strip()
-    if not api_key:
-        logger.warning("Cannot upload PDF — AIRTABLE_API_KEY not set")
-        return False
-
     if not pdf_path.exists():
         logger.warning("Cannot upload PDF — file not found: %s", pdf_path)
         return False
 
-    field_id = "fld1bdbKmkZIQMWf4"  # Certificate File (multipleAttachments)
-    table_id = "tbl0IH6zQQsXBff3l"   # Insurance Certificates
-
-    url = (
-        f"https://content.airtable.com/v0/{base_id}"
-        f"/{table_id}/{record_id}/cells/{field_id}/uploadAttachment"
-    )
-
-    # Determine MIME type
-    suffix = pdf_path.suffix.lower()
-    mime_types = {
-        ".pdf": "application/pdf",
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".tiff": "image/tiff",
-        ".tif": "image/tiff",
-    }
-    content_type = mime_types.get(suffix, "application/octet-stream")
-
     try:
-        with open(pdf_path, "rb") as f:
-            resp = requests.post(
-                url,
-                headers={"Authorization": f"Bearer {api_key}"},
-                files={"file": (pdf_path.name, f, content_type)},
-                timeout=60,
-            )
-
-        if resp.status_code in (200, 201):
-            logger.info(
-                "Uploaded PDF attachment to cert %s — file: %s (%d bytes)",
-                record_id, pdf_path.name, pdf_path.stat().st_size,
-            )
-            return True
-        else:
-            logger.warning(
-                "PDF upload failed for cert %s — HTTP %d: %s",
-                record_id, resp.status_code, resp.text[:300],
-            )
-            return False
+        certs_table.upload_attachment(record_id, "Certificate File", str(pdf_path))
+        logger.info(
+            "Uploaded PDF attachment to cert %s — file: %s",
+            record_id, pdf_path.name,
+        )
+        return True
     except Exception as exc:
-        logger.warning("PDF upload error for cert %s: %s", record_id, exc)
+        logger.warning("PDF upload failed for cert %s: %s", record_id, exc)
         return False
 
 
@@ -1443,12 +1668,11 @@ def create_certificate(
     logger.info("Created Insurance Certificate — ID: %s", record["id"])
 
     # ── Upload the source PDF as an attachment ──
-    if base_id:
-        pdf_path = resolve_pdf_path(source_filename)
-        if pdf_path:
-            upload_pdf_attachment(base_id, record["id"], pdf_path)
-        else:
-            logger.info("No PDF file found for '%s' — Certificate File left empty", source_filename)
+    pdf_path = resolve_pdf_path(source_filename)
+    if pdf_path:
+        upload_pdf_attachment(pdf_path, record["id"], certs_table)
+    else:
+        logger.info("No PDF file found for '%s' — Certificate File left empty", source_filename)
 
     return record
 
@@ -1473,14 +1697,44 @@ def run():
     api    = Api(api_key)
     tables = get_tables(api, base_id)
 
-    # ── Step 1: fetch newest Imported extraction ───────────────────────────────
-    logger.info("Step 1 — Fetching newest 'Imported' record from '%s'...", TABLE_INCOMING)
-    extraction = fetch_newest_imported(tables[TABLE_INCOMING])
+    # ── Step 1: fetch all pending Imported extractions ──────────────────────────
+    logger.info("Step 1 — Fetching all 'Imported' records from '%s'...", TABLE_INCOMING)
+    pending_extractions = fetch_all_pending_extractions(tables[TABLE_INCOMING])
 
-    if not extraction:
+    if not pending_extractions:
         logger.info("No records with Processing Status = 'Imported' found. Nothing to do.")
         return
 
+    total = len(pending_extractions)
+    succeeded = 0
+    failed_ids = []
+    logger.info("Found %d pending extraction(s) to process", total)
+
+    for extract_idx, extraction in enumerate(pending_extractions, start=1):
+        extraction_id     = extraction["id"]
+        extraction_fields = extraction["fields"]
+        named_insured_preview = (extraction_fields.get("Named Insured") or extraction_fields.get("Source Filename") or "")[:50]
+        logger.info("Processing extraction %d of %d: %s (ID: %s)",
+                     extract_idx, total, named_insured_preview, extraction_id)
+        try:
+            _process_single_extraction(extraction, tables, base_id=base_id)
+            succeeded += 1
+        except Exception as exc:
+            logger.error(
+                "Processor failed on extraction %d of %d (ID: %s): %s",
+                extract_idx, total, extraction_id, exc,
+            )
+            failed_ids.append(extraction_id)
+
+    logger.info(
+        "=== Module 4 complete: %d of %d processed successfully%s ===",
+        succeeded, total,
+        f" (failed: {', '.join(failed_ids)})" if failed_ids else "",
+    )
+
+
+def _process_single_extraction(extraction, tables, base_id=""):
+    """Process a single Incoming Extraction record through the full pipeline."""
     extraction_id     = extraction["id"]
     extraction_fields = extraction["fields"]
     vendor = None
@@ -1488,10 +1742,6 @@ def run():
     named_insured     = (extraction_fields.get("Named Insured") or "").strip()
     source_filename   = (extraction_fields.get("Source Filename") or "").strip()
     raw_json_str      = extraction_fields.get("Raw JSON") or ""
-
-    logger.info("Found extraction ID : %s", extraction_id)
-    logger.info("Named Insured       : %s", named_insured)
-    logger.info("Source Filename     : %s", source_filename)
 
     # ── Matcher integration: evaluate and write Incoming Extractions match fields ──
     vendor_records = tables[TABLE_VENDORS].all()
@@ -1899,6 +2149,23 @@ def run():
         else:
             logger.info("No requirement context found for compliance payload enrichment.")
 
+        # ── Resolve client via assignments if matcher didn't find one ──────
+        if not matched_client_id and vendor_id:
+            try:
+                m7b_assignments_lookup = fetch_active_assignments_for_vendor(
+                    vendor_id, tables[TABLE_ASSIGNMENTS]
+                )
+                if m7b_assignments_lookup:
+                    resolved_client = (m7b_assignments_lookup[0]["fields"].get("Client Link") or [None])[0]
+                    if resolved_client:
+                        matched_client_id = resolved_client
+                        logger.info(
+                            "Client resolved via Vendor Client Assignments: %s",
+                            matched_client_id,
+                        )
+            except Exception as exc:
+                logger.warning("Assignment-based client resolution failed: %s", exc)
+
         # ── Module 7b full per-client requirement check ──────────────────────
         if matched_client_id:
             m7b_client_reqs = fetch_requirements_for_client(
@@ -1917,9 +2184,20 @@ def run():
                 None,
             )
             if m7b_assignment and m7b_client_reqs:
+                # Resolve certificate holder names for holder comparison
+                _coi_holder = raw_data.get("certificate_holder") or ""
+                _expected_holder = ""
+                try:
+                    _client_rec = tables[TABLE_CLIENTS].get(matched_client_id)
+                    _expected_holder = _client_rec.get("fields", {}).get("Certificate Holder") or ""
+                except Exception:
+                    pass
+
                 m7b_status, m7b_failure_reasons = evaluate_assignment(
                     vendor, m7b_client_reqs, m7b_vendor_policies,
                     m7b_assignment, tables[TABLE_ASSIGNMENTS],
+                    certificate_holder_on_coi=_coi_holder,
+                    expected_certificate_holder=_expected_holder,
                 )
                 logger.info(
                     "Module 7b live compliance check — vendor=%s client=%s status=%s reasons=%s",
@@ -1995,7 +2273,7 @@ def run():
                 compliance_result.failure_reasons
             ),
         }
-        tables[TABLE_CERTS].update(certificate_id, compliance_update_fields)
+        tables[TABLE_CERTS].update(certificate_id, compliance_update_fields, typecast=True)
         logger.info(
             "Certificate %s compliance stub result written to Insurance Certificates.",
             certificate_id,
@@ -2036,7 +2314,7 @@ def run():
     logger.info("Step 7 — Marking extraction as 'Processed'...")
     set_processing_status(tables[TABLE_INCOMING], extraction_id, "Processed")
 
-    logger.info("=== Module 4 complete ===")
+    logger.info("=== Extraction %s processed ===", extraction_id)
 
 
 if __name__ == "__main__":

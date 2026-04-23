@@ -10,6 +10,8 @@ from sendgrid.helpers.mail import Cc, Email, Mail
 
 load_dotenv(override=True)
 
+import config as _cfg
+
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
@@ -145,7 +147,7 @@ def send_initial_vendor_requests() -> None:
                     f"of Insurance for your company. They use Carolina Compliance "
                     f"Solutions to manage subcontractor insurance compliance.\n\n"
                     f"Please email your COI to:\n"
-                    f"coi@carolinacompliancesolutions.com\n\n"
+                    f"{_cfg.INBOUND_EMAIL}\n\n"
                     f"In the subject line, please include:\n"
                     f"{gc_client_name} — {vendor_name}\n\n"
                     f"Once we receive it, our system will process it automatically.\n\n"
@@ -155,7 +157,7 @@ def send_initial_vendor_requests() -> None:
                     f"the same address — no login or portal required.\n\n"
                     f"Questions? Reply to this email.\n\n"
                     f"Carolina Compliance Solutions\n"
-                    f"coi@carolinacompliancesolutions.com"
+                    f"{_cfg.INBOUND_EMAIL}"
                 )
             else:
                 subject = fields.get("Subject", "")
@@ -185,7 +187,7 @@ def send_initial_vendor_requests() -> None:
             )
             if cc_values:
                 message.personalizations[0].add_cc([Cc(email) for email in cc_values])
-            message.reply_to = Email("coi@carolinacompliancesolutions.com")
+            message.reply_to = Email(_cfg.INBOUND_EMAIL)
 
             response = sendgrid.send(message)
             if response.status_code == 202:

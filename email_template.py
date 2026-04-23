@@ -12,6 +12,9 @@ Usage:
 """
 
 
+import config as _cfg
+
+
 def build_email_html(subject: str, body_html: str, gc_company_name: str = None) -> str:
     """Return a complete HTML email string with CCS branding.
 
@@ -109,7 +112,7 @@ font-size:15px;line-height:1.6;color:#333333;">
 <td style="background-color:#FFFFFF;padding:20px 30px 25px;text-align:center;
 font-family:Arial,sans-serif;font-size:12px;color:#999999;font-style:italic;">
 carolinacompliancesolutions.com &nbsp;|&nbsp;
-coi@carolinacompliancesolutions.com &nbsp;|&nbsp;
+{_cfg.INBOUND_EMAIL} &nbsp;|&nbsp;
 Gaston County, NC
 </td>
 </tr>

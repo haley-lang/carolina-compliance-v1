@@ -14,8 +14,35 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import time
+
 from dotenv import load_dotenv
 import anthropic
+
+
+def call_claude_with_retry(func, *args, max_retries=3, retry_delay=10, **kwargs):
+    """Wrap a Claude API call with retry logic for 500/529 errors.
+
+    Retries up to max_retries times with retry_delay seconds between attempts.
+    Only retries on server errors (5xx) and overloaded (529). All other
+    exceptions propagate immediately.
+    """
+    last_exc = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            return func(*args, **kwargs)
+        except anthropic.APIStatusError as exc:
+            if exc.status_code in (500, 529):
+                last_exc = exc
+                if attempt < max_retries:
+                    logging.getLogger(__name__).warning(
+                        "Claude API %d error (attempt %d/%d) — retrying in %ds",
+                        exc.status_code, attempt, max_retries, retry_delay,
+                    )
+                    time.sleep(retry_delay)
+                    continue
+            raise
+    raise last_exc
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -61,6 +88,8 @@ Rules:
 - Do NOT confuse certificate_holder with named_insured.
 - Return certificate_holder as a plain string.
 - If certificate_holder is blank or not clearly present, return null.
+- named_insured should contain ONLY the company or person name — do not include street address, city, state, or zip code. If the insured name box shows "Smith Electrical LLC\n200 Trade St\nCharlotte, NC 28202", return only "Smith Electrical LLC" as named_insured.
+- The same rule applies to certificate_holder — name only, no address.
 - Do not infer or guess certificate_holder.
 - ACORD POLICY TABLE EXTRACTION (row-locked):
 - Identify each non-blank ACORD policy coverage row first (e.g., CGL, AUTO, UMBRELLA, WC).
@@ -234,6 +263,106 @@ def pdf_to_base64_images(pdf_path: Path) -> list[str]:
     return encoded
 
 
+# ── Page classification ──────────────────────────────────────────────────────
+
+PAGE_TYPE_ACORD_25 = "acord_25"
+PAGE_TYPE_ENDORSEMENT = "endorsement"
+PAGE_TYPE_ACORD_28 = "acord_28"
+PAGE_TYPE_OTHER = "other"
+
+_PAGE_CLASSIFY_PATTERNS = {
+    PAGE_TYPE_ACORD_25: [
+        "certificate of liability insurance",
+        "certificate of insurance",
+        "acord 25",
+        "acord\u2122 25",
+    ],
+    PAGE_TYPE_ENDORSEMENT: [
+        "endorsement",
+        "policy changes",
+        "cg 20 10", "cg 20 26", "cg 20 37",
+        "il 00 17", "il 00 21",
+        "wa 04 01", "wc 00 03",
+        "this endorsement modifies",
+        "additional insured",
+        "waiver of transfer of rights",
+    ],
+    PAGE_TYPE_ACORD_28: [
+        "evidence of property insurance",
+        "evidence of commercial property",
+        "acord 28",
+        "acord\u2122 28",
+    ],
+}
+
+
+def classify_pdf_pages(pdf_path: Path) -> dict:
+    """Classify each page of a PDF using text extraction.
+
+    Uses pdfplumber for fast text-based classification (no API call).
+    Returns a dict mapping page number (1-indexed) to page type.
+    """
+    try:
+        import pdfplumber
+    except ImportError:
+        log.warning("pdfplumber not installed — skipping page classification")
+        return {}
+
+    page_map = {}
+    try:
+        with pdfplumber.open(str(pdf_path)) as pdf:
+            for i, page in enumerate(pdf.pages, start=1):
+                text = (page.extract_text() or "").lower()
+
+                classified = PAGE_TYPE_OTHER
+                for page_type, patterns in _PAGE_CLASSIFY_PATTERNS.items():
+                    if any(p in text for p in patterns):
+                        classified = page_type
+                        break
+
+                page_map[i] = classified
+                log.info("Page %d classified as: %s", i, classified)
+    except Exception as exc:
+        log.warning("Page classification failed for %s: %s", pdf_path.name, exc)
+
+    return page_map
+
+
+def _build_page_guidance(page_map: dict) -> str:
+    """Build explicit page-by-page guidance text for the extraction prompt."""
+    if not page_map:
+        return ""
+
+    total = len(page_map)
+    lines = [f"This is a {total}-page PDF. Here is what each page contains:"]
+
+    for page_num in sorted(page_map.keys()):
+        page_type = page_map[page_num]
+        if page_type == PAGE_TYPE_ACORD_25:
+            lines.append(
+                f"Page {page_num}: ACORD 25 Certificate of Liability Insurance — "
+                f"extract the full policy table, named insured, certificate holder, "
+                f"and all coverage details from this page."
+            )
+        elif page_type == PAGE_TYPE_ENDORSEMENT:
+            lines.append(
+                f"Page {page_num}: Endorsement form — extract: endorsement form number, "
+                f"effective date, named insured, and what coverage it modifies."
+            )
+        elif page_type == PAGE_TYPE_ACORD_28:
+            lines.append(
+                f"Page {page_num}: ACORD 28 Evidence of Property Insurance — "
+                f"extract property coverage details if present."
+            )
+        else:
+            lines.append(
+                f"Page {page_num}: Supporting document — extract any relevant "
+                f"insurance information visible."
+            )
+
+    return "\n".join(lines)
+
+
 def image_to_base64(image_path: Path) -> str:
     """Read an image file and return its base64-encoded string."""
     log.info("Encoding image: %s", image_path.name)
@@ -241,10 +370,21 @@ def image_to_base64(image_path: Path) -> str:
         return base64.b64encode(f.read()).decode("utf-8")
 
 
-def build_message_content(file_path: Path) -> list[dict]:
-    """Build the content list for the Anthropic message (text + image blocks)."""
+def build_message_content(file_path: Path, page_map: dict = None) -> list[dict]:
+    """Build the content list for the Anthropic message (text + image blocks).
+
+    If page_map is provided, includes explicit per-page guidance in the instruction.
+    """
     ext = file_path.suffix.lower()
-    content = [{"type": "text", "text": "Extract the insurance document data from the image(s) below."}]
+
+    # Build instruction text with optional page guidance
+    instruction = "Extract the insurance document data from the image(s) below."
+    if page_map:
+        guidance = _build_page_guidance(page_map)
+        if guidance:
+            instruction = f"{guidance}\n\n{instruction}"
+
+    content = [{"type": "text", "text": instruction}]
 
     if ext == ".pdf":
         pages = pdf_to_base64_images(file_path)
@@ -398,7 +538,8 @@ def _parse_json_response(raw: str) -> dict:
 
 
 def _run_second_pass_policy_extraction(client: anthropic.Anthropic, content: list[dict]) -> dict:
-    response = client.messages.create(
+    response = call_claude_with_retry(
+        client.messages.create,
         model="claude-opus-4-5",
         system=SECOND_PASS_POLICY_PROMPT,
         messages=[{"role": "user", "content": content}],
@@ -411,7 +552,8 @@ def _run_second_pass_policy_extraction(client: anthropic.Anthropic, content: lis
 
 
 def _run_dedicated_acord_policy_table_reader(client: anthropic.Anthropic, content: list[dict]) -> dict:
-    response = client.messages.create(
+    response = call_claude_with_retry(
+        client.messages.create,
         model="claude-opus-4-5",
         system=DEDICATED_ACORD_POLICY_TABLE_PROMPT,
         messages=[{"role": "user", "content": content}],
@@ -467,16 +609,20 @@ def _merge_dedicated_policy_table_fields(primary_data: dict, secondary_data: dic
 
 # ── Core extraction ───────────────────────────────────────────────────────────
 
-def extract_document(file_path: Path) -> dict:
-    """Send the document to Anthropic Claude and return parsed JSON."""
+def extract_document(file_path: Path, page_map: dict = None) -> dict:
+    """Send the document to Anthropic Claude and return parsed JSON.
+
+    If page_map is provided, includes per-page guidance in the prompt.
+    """
     if not ANTHROPIC_API_KEY:
         raise EnvironmentError("ANTHROPIC_API_KEY is not set in your .env file.")
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    content = build_message_content(file_path)
+    content = build_message_content(file_path, page_map=page_map)
 
     log.info("Sending request to Anthropic (model: claude-opus-4-5)…")
-    response = client.messages.create(
+    response = call_claude_with_retry(
+        client.messages.create,
         model="claude-opus-4-5",
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": content}],
@@ -524,10 +670,46 @@ def save_extraction(data: dict, source_file: Path) -> Path:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def _process_single_file(file_path: Path) -> dict:
-    """Extract, classify, normalize dates, and save results for a single file."""
-    data = extract_document(file_path)
+    """Extract, classify, normalize dates, and save results for a single file.
+
+    Runs page classification first for PDFs. If no ACORD 25 page is found,
+    saves a minimal extraction with confidence=0 for triage routing.
+    """
+    # Page classification for PDFs
+    page_map = {}
+    if file_path.suffix.lower() == ".pdf":
+        page_map = classify_pdf_pages(file_path)
+        if page_map:
+            has_acord_25 = any(v == PAGE_TYPE_ACORD_25 for v in page_map.values())
+            has_endorsement = any(v == PAGE_TYPE_ENDORSEMENT for v in page_map.values())
+
+            if not has_acord_25:
+                log.warning(
+                    "No ACORD 25 page found in %s (pages: %s) — routing to triage",
+                    file_path.name, page_map,
+                )
+                # Save minimal extraction for triage
+                triage_data = {
+                    "document_type": "endorsement" if has_endorsement else "unknown",
+                    "named_insured": None,
+                    "certificate_holder": None,
+                    "certificate_date": None,
+                    "contact_emails": [],
+                    "description_of_operations": None,
+                    "policies": [],
+                    "_page_map": page_map,
+                    "_extraction_confidence": 0,
+                    "_triage_reason": "No ACORD 25 certificate page identified in document",
+                }
+                save_extraction(triage_data, file_path)
+                log.info("Triage extraction saved for %s", file_path.name)
+                return triage_data
+
+    data = extract_document(file_path, page_map=page_map)
     data = normalize_policy_dates(data)
     data = apply_simple_document_classification(data, file_path)
+    if page_map:
+        data["_page_map"] = page_map
     out_path = save_extraction(data, file_path)
 
     log.info("Extraction complete for %s", file_path.name)

@@ -11,3 +11,4 @@ stripe
 flask
 gunicorn
 rapidfuzz
+pdfplumber

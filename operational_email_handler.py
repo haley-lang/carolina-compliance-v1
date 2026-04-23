@@ -74,7 +74,8 @@ SUPPORTED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".tif"}
 DUPLICATE_WINDOW_DAYS = 30
 MIN_EXTRACTION_CONFIDENCE = 60
 
-OWNER_EMAIL = os.getenv("HALEY_EMAIL", "haley@carolinacompliancesolutions.com")
+import config as _cfg
+OWNER_EMAIL = _cfg.OWNER_EMAIL
 
 CLOUD_LINK_PATTERNS = [
     r"(https?://drive\.google\.com/\S+)",
@@ -265,6 +266,38 @@ def handle_bounce(
         ),
         email_type="Bounce Alert",
     )
+
+
+# ── 1b. No attachment handling ────────────────────────────────────────────────
+
+def handle_no_attachment(
+    doc_table, doc_record_id: str,
+    sender_email: str,
+    email_queue_table,
+):
+    """When an email arrives with no attachment, set status and alert the GC owner."""
+    try:
+        doc_table.update(doc_record_id, {
+            FLD_DOC_STATUS: "No Attachment",
+            FLD_DOC_SKIP_REASON: "Email received with no qualifying attachment.",
+        }, typecast=True)
+    except Exception as exc:
+        logger.error("Failed to set No Attachment status on %s: %s", doc_record_id, exc)
+
+    _queue_internal_alert(
+        email_queue_table,
+        subject=f"Email Received With No Attachment — {sender_email}",
+        body=(
+            f"An email was received with no certificate attachment.\n\n"
+            f"From: {sender_email}\n\n"
+            f"If this was a COI submission, please ask the vendor to resend "
+            f"with the certificate attached as a PDF.\n\n"
+            f"Carolina Compliance Solutions"
+            f"{EMAIL_DISCLAIMER}"
+        ),
+        email_type="No Attachment Alert",
+    )
+    logger.info("No attachment handler: record %s from %s", doc_record_id, sender_email[:50])
 
 
 # ── 2. Duplicate submission detection ────────────────────────────────────────

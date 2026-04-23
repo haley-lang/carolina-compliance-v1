@@ -122,10 +122,10 @@ def process_expiration_dates(records, table):
                     if current_status != new_status:
                         update_fields[FLD_EXPIRATION_STATUS] = new_status
 
-                    # Track threshold for reminder dedup
+                    # Threshold tracking for reminder dedup is handled by module_15
+                    # after the reminder email is actually queued.
                     if new_threshold and new_threshold != last_threshold:
-                        update_fields[FLD_LAST_REMINDER_THRESHOLD] = new_threshold
-                        logger.info("Policy %s crossed %s-day threshold → %s",
+                        logger.info("Policy %s crossed %s-day threshold → %s (reminder pending)",
                                     policy_id, new_threshold, new_status)
 
         if update_fields:

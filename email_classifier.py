@@ -335,7 +335,9 @@ def classify_with_llm(
             attachments=attachments_str,
         )
 
-        response = client.messages.create(
+        from extractor import call_claude_with_retry
+        response = call_claude_with_retry(
+            client.messages.create,
             model="claude-haiku-4-5-20251001",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=100,
@@ -427,7 +429,7 @@ def write_classification_to_airtable(table, record_id: str, result: Classificati
         fields[FLD_STATUS] = "Skipped"
 
     try:
-        table.update(record_id, fields)
+        table.update(record_id, fields, typecast=True)
         logger.info("Classification written to Airtable: record=%s event_type=%s confidence=%d method=%s skip=%s",
                      record_id, result.event_type, result.confidence, result.method, result.should_skip)
     except Exception as exc:

@@ -224,20 +224,21 @@ def check_expiring_exceptions(overrides_table, email_queue_table, clients_table=
             except Exception as exc:
                 logger.error("Failed to update exception status %s: %s", record_id, exc)
 
-            # Resolve client email for the alert
-            gc_email = _resolve_gc_email(clients_table, client_links)
-            if gc_email:
-                days_left = (exp_date - today).days
-                _queue_exception_expiry_alert(
-                    email_queue_table,
-                    gc_email=gc_email,
-                    vendor_links=vendor_links,
-                    client_links=client_links,
-                    policy_type=policy_type,
-                    expiry_date=exp_date.isoformat(),
-                    days_left=days_left,
-                )
-                expiring_count += 1
+            # Exception system disabled — post-launch feature, too complex for early clients
+            # gc_email = _resolve_gc_email(clients_table, client_links)
+            # if gc_email:
+            #     days_left = (exp_date - today).days
+            #     _queue_exception_expiry_alert(
+            #         email_queue_table,
+            #         gc_email=gc_email,
+            #         vendor_links=vendor_links,
+            #         client_links=client_links,
+            #         policy_type=policy_type,
+            #         expiry_date=exp_date.isoformat(),
+            #         days_left=days_left,
+            #     )
+            #     expiring_count += 1
+            pass
 
     logger.info("Exception expiry check: %d expired, %d expiring soon", expired_count, expiring_count)
 
@@ -295,38 +296,9 @@ def queue_deficiency_alert(
     client_name: str, client_id: str,
     policy_type: str, deficiency_reasons: List[str],
 ):
-    """Queue an email to the GC when a vendor has a deficiency and no exception on file."""
-    reasons_text = "\n".join(f"  - {r}" for r in deficiency_reasons[:10])
-
-    fields = {
-        FLD_EQ_PRIMARY_EMAIL: gc_email,
-        FLD_EQ_SUBJECT: f"Action Required: {vendor_name} — {policy_type} documentation deficiency",
-        FLD_EQ_BODY: (
-            f"A documentation deficiency has been identified for one of your subcontractors.\n\n"
-            f"Subcontractor: {vendor_name}\n"
-            f"Policy line: {policy_type}\n\n"
-            f"Findings:\n{reasons_text}\n\n"
-            f"Please review and either:\n"
-            f"  1. Request updated documentation from the subcontractor, or\n"
-            f"  2. Log an approved exception in your compliance portal if you wish to "
-            f"allow the subcontractor to continue working while documentation is pending.\n\n"
-            f"Carolina Compliance Solutions"
-            f"{EMAIL_DISCLAIMER}"
-        ),
-        FLD_EQ_EMAIL_TYPE: "Deficiency Alert",
-        FLD_EQ_REMINDER_STATUS: "Queued",
-        FLD_EQ_SEND_AFTER: datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
-    }
-    if vendor_id:
-        fields[FLD_EQ_VENDOR] = [vendor_id]
-    if client_id:
-        fields[FLD_EQ_CLIENT] = [client_id]
-
-    try:
-        email_queue_table.create(fields, typecast=True)
-        logger.info("Deficiency alert queued for %s re: %s / %s", gc_email, vendor_name, policy_type)
-    except Exception as exc:
-        logger.error("Failed to queue deficiency alert: %s", exc)
+    # Disabled — GC views deficiencies in Softr portal, email noise at this stage
+    logger.info("Deficiency alert SKIPPED (disabled) for %s re: %s / %s", gc_email, vendor_name, policy_type)
+    return
 
 
 # ── Human override audit trail ───────────────────────────────────────────────

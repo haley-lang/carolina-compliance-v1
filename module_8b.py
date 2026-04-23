@@ -35,7 +35,8 @@ logger = logging.getLogger(__name__)
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 
-HALEY_EMAIL = os.getenv("HALEY_EMAIL", "haley@carolinacompliancesolutions.com")
+import config as _cfg
+HALEY_EMAIL = _cfg.OWNER_EMAIL
 
 
 def _plain_to_html(text: str) -> str:
@@ -475,9 +476,9 @@ def handle_cancellation(extraction, vendor, client, email_queue_table,
                 f"Please advise on the status of this policy at your earliest convenience.\n\n"
                 f"If the policy has been reinstated or replaced, please send an updated "
                 f"Certificate of Insurance to:\n"
-                f"coi@carolinacompliancesolutions.com\n\n"
+                f"{_cfg.INBOUND_EMAIL}\n\n"
                 f"Carolina Compliance Solutions\n"
-                f"coi@carolinacompliancesolutions.com"
+                f"{_cfg.INBOUND_EMAIL}"
             ),
             email_type="Reinstatement Request",
             cc_emails=cc_notify,
@@ -499,7 +500,7 @@ def handle_cancellation(extraction, vendor, client, email_queue_table,
                 f"We have contacted the vendor and their agency to request updated "
                 f"certificate documentation.\n\n"
                 f"Carolina Compliance Solutions\n"
-                f"coi@carolinacompliancesolutions.com"
+                f"{_cfg.INBOUND_EMAIL}"
             )
         else:
             gc_body = (
@@ -511,7 +512,7 @@ def handle_cancellation(extraction, vendor, client, email_queue_table,
                 f"for resolution. We will update you if the situation is not resolved "
                 f"before the effective date.\n\n"
                 f"Carolina Compliance Solutions\n"
-                f"coi@carolinacompliancesolutions.com"
+                f"{_cfg.INBOUND_EMAIL}"
             )
 
         queue_email(
@@ -588,7 +589,7 @@ def check_cancellation_monitoring(extractions_table, email_queue_table, clients_
                     f"Cancellation effective date: {eff_raw}\n\n"
                     f"Please review accordingly and consult your insurance advisor.\n\n"
                     f"Carolina Compliance Solutions\n"
-                    f"coi@carolinacompliancesolutions.com"
+                    f"{_cfg.INBOUND_EMAIL}"
                 ),
                 email_type="Cancellation Alert",
             )

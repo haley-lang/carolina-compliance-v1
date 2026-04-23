@@ -32,6 +32,40 @@ def parse_email_date(date_str: str) -> str:
         return date_str
 
 
+# ── Holder name normalization ─────────────────────────────────────────────────
+
+_HOLDER_STRIP_SUFFIXES = {
+    "llc", "inc", "corp", "co", "ltd", "dba", "d/b/a",
+    "company", "companies", "group", "holdings", "enterprises",
+    "solutions", "services", "construction", "contracting",
+    "builders", "building",
+}
+
+
+def normalize_holder_name(raw_name) -> str:
+    """Normalize a certificate holder / company name for fuzzy comparison.
+
+    Pure function, no external dependencies.
+    Steps: lowercase → strip → remove punctuation except spaces →
+    collapse spaces → remove legal/industry suffixes as whole words.
+    """
+    text = str(raw_name) if raw_name else ""
+    text = text.lower().strip()
+    # Remove all punctuation except spaces
+    text = re.sub(r"[^\w\s]", " ", text)
+    # Collapse multiple spaces
+    text = " ".join(text.split())
+    # Remove known suffixes as whole words (iteratively)
+    words = text.split()
+    changed = True
+    while changed and words:
+        changed = False
+        if words[-1] in _HOLDER_STRIP_SUFFIXES:
+            words.pop()
+            changed = True
+    return " ".join(words)
+
+
 def setup_logging(level: int = logging.INFO) -> None:
     """Configure root logger with a timestamped console handler."""
     logging.basicConfig(
