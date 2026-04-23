@@ -1,6 +1,8 @@
 .env
 uploads/*
 !uploads/.gitkeep
+extracted/*.json
+!extracted/.gitkeep
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -8,5 +10,10 @@ dist/
 build/
 .venv/
 venv/
+.test-venv/
+.venv-sandbox/
 *.log
+backups/
 .DS_Store
+tests/edge_case_report.html
+tests/edge_case_results.xml
