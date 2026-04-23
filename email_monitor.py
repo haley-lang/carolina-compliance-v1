@@ -17,8 +17,8 @@ from email_classifier import (
     EVENT_BOUNCE, EVENT_AUTO_REPLY, EVENT_CLOUD_LINK, _extract_body_text,
 )
 from operational_email_handler import (
-    handle_bounce, handle_cloud_link, gate_oversize_attachment,
-    gate_unsupported_type, check_attachment_size,
+    handle_bounce, handle_cloud_link, handle_no_attachment,
+    gate_oversize_attachment, gate_unsupported_type, check_attachment_size,
 )
 print("EMAIL MONITOR STARTED")
 logger = logging.getLogger(__name__)
@@ -224,6 +224,30 @@ if __name__ == "__main__":
                 if record_id:
                     write_classification_to_airtable(get_table(), record_id, classification)
 
+                # ── Follow-up ladder: passive response detection ────────
+                # Runs on EVERY inbound email. If the sender and body match
+                # an Active ladder's named insured, that ladder is halted.
+                try:
+                    _body_text_for_ladder = _extract_body_text(entry["msg"]) or ""
+                    from module_22_followup_ladder import (
+                        check_response_match, terminate_ladder,
+                        STAGE_RESPONDED,
+                    )
+                    _matched_ladder = check_response_match(
+                        inbound_sender=entry["sender"],
+                        inbound_subject=entry["subject"],
+                        inbound_body=_body_text_for_ladder,
+                    )
+                    if _matched_ladder:
+                        terminate_ladder(
+                            _matched_ladder,
+                            new_stage=STAGE_RESPONDED,
+                            reason=f"Reply from {entry['sender']} referenced named insured",
+                        )
+                        print(f"[email_monitor] Ladder {_matched_ladder} halted by response from {entry['sender']}")
+                except Exception as _exc:
+                    print(f"[email_monitor] Ladder response check failed: {_exc}")
+
                 if classification.should_skip:
                     print(f"[email_monitor] Email classified as {classification.event_type} — skipping extraction")
 
@@ -238,6 +262,16 @@ if __name__ == "__main__":
                             handle_bounce(get_table(), record_id, entry["sender"], _vendors, _eq)
                         except Exception as _exc:
                             print(f"[email_monitor] Bounce handler failed: {_exc}")
+
+                        # Follow-up ladder bounce handling (retry to PDF
+                        # contact or escalate, depending on Bounce Count).
+                        try:
+                            from module_22_followup_ladder import (
+                                handle_bounce as ladder_handle_bounce,
+                            )
+                            ladder_handle_bounce(bounced_address=entry["sender"])
+                        except Exception as _exc:
+                            print(f"[email_monitor] Ladder bounce handler failed: {_exc}")
 
                     continue
 
@@ -256,8 +290,22 @@ if __name__ == "__main__":
                     except Exception as _exc:
                         print(f"[email_monitor] Cloud link handler failed: {_exc}")
 
-                # ── Attachment size and type gating ───────────────────────
-                gated = False
+                # ── No attachment check ───────────────────────────────
+                if not entry.get("has_attachments") and record_id:
+                    try:
+                        from pyairtable import Api
+                        import config as _cfg
+                        _api = Api(_cfg.AIRTABLE_API_KEY)
+                        _eq = _api.table(_cfg.AIRTABLE_BASE_ID, "Email Queue")
+                        handle_no_attachment(get_table(), record_id, entry["sender"], _eq)
+                    except Exception as _exc:
+                        print(f"[email_monitor] No attachment handler failed: {_exc}")
+                    continue
+
+                # ── Per-attachment size and type gating ───────────────
+                # Each attachment checked independently — failure on one
+                # does not block the others from processing.
+                passing_attachments = []
                 if entry.get("attachments") and record_id:
                     try:
                         from pyairtable import Api
@@ -266,27 +314,29 @@ if __name__ == "__main__":
                         _eq = _api.table(_cfg.AIRTABLE_BASE_ID, "Email Queue")
 
                         for att_path in entry["attachments"]:
-                            # Unsupported type check
                             if gate_unsupported_type(
                                 get_table(), record_id, att_path, entry["sender"], _eq
                             ):
-                                gated = True
-                                print(f"[email_monitor] Unsupported file type: {att_path}")
-                                break
+                                print(f"[email_monitor] Unsupported file type (skipped): {att_path}")
+                                continue
 
-                            # Size check
                             size_mb = check_attachment_size(att_path)
                             if gate_oversize_attachment(
                                 get_table(), record_id, att_path, size_mb, entry["sender"], _eq
                             ):
-                                gated = True
-                                print(f"[email_monitor] Oversized attachment: {att_path} ({size_mb:.1f}MB)")
-                                break
+                                print(f"[email_monitor] Oversized attachment (skipped): {att_path} ({size_mb:.1f}MB)")
+                                continue
+
+                            passing_attachments.append(att_path)
                     except Exception as _exc:
                         print(f"[email_monitor] Attachment gating failed: {_exc}")
+                        passing_attachments = entry["attachments"]
 
-                if gated:
+                if not passing_attachments:
+                    print("[email_monitor] All attachments failed gating — skipping email")
                     continue
+
+                entry["attachments"] = passing_attachments
 
                 # Only pass actionable emails downstream
                 entry["event_type"] = classification.event_type

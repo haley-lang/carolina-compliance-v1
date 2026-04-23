@@ -17,12 +17,25 @@ BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail, Email, To, Cc, Content
 from email_template import build_email_html
+from airtable_constants import (
+    TBL_EMAIL_QUEUE, EQ_PRIMARY_EMAIL, EQ_SUBJECT, EQ_BODY, EQ_CC_EMAILS,
+    EQ_REMINDER_STATUS, EQ_SEND_AFTER, STATUS_QUEUED, STATUS_SENT, STATUS_FAILED,
+)
+
+# Email Queue Email Type values that belong to a follow-up ladder. Module_10
+# reads Email Type + Reminder Reason ("LADDER:<record_id>") after a successful
+# send and calls module_22.record_send_success to stamp Day N Sent At.
+LADDER_EQ_TYPES = {
+    "Ladder Day 0", "Ladder Day 0 Retry",
+    "Ladder Day 2", "Ladder Day 4",
+    "Ladder Day 6 Approval Request",
+}
 
 def send_queued_emails(api):
     sg = SendGridAPIClient(api_key=os.getenv("SENDGRID_API_KEY"))
-    from_email = Email(os.getenv("SENDGRID_FROM_EMAIL"))
-    table = api.table(BASE_ID, "Email Queue")
-    records = table.all(formula="AND({Reminder Status} = 'Queued', {Send After} <= NOW())")
+    from_email = Email(os.getenv("SENDGRID_FROM_EMAIL"), "Carolina Compliance Solutions")
+    table = api.table(BASE_ID, TBL_EMAIL_QUEUE)
+    records = table.all(formula=f"AND({{{EQ_REMINDER_STATUS}}} = '{STATUS_QUEUED}', {{{EQ_SEND_AFTER}}} <= NOW())")
     record_count = len(records)
     logging.info(f"Found {record_count} queued email record(s).")
     if record_count == 0:
@@ -30,15 +43,15 @@ def send_queued_emails(api):
         
     for record in records:
         fields = record['fields']
-        missing_fields = [field for field in ['Primary Email', 'Subject', 'Body'] if field not in fields]
+        missing_fields = [field for field in [EQ_PRIMARY_EMAIL, EQ_SUBJECT, EQ_BODY] if field not in fields]
         if missing_fields:
             logging.error(f"Record ID {record['id']} is missing required fields: {', '.join(missing_fields)}")
             continue
         try:
-            to_email = To(fields['Primary Email'])
-            cc_emails = [Cc(email) for email in fields.get('CC Emails', [])]
-            subject = fields['Subject']
-            raw_body = fields['Body']
+            to_email = To(fields[EQ_PRIMARY_EMAIL])
+            cc_emails = [Cc(email) for email in fields.get(EQ_CC_EMAILS, [])]
+            subject = fields[EQ_SUBJECT]
+            raw_body = fields[EQ_BODY]
 
             # If the body is already a full HTML email (from module_8b etc.),
             # send as-is; otherwise wrap plain text in the branded template.
@@ -59,17 +72,37 @@ def send_queued_emails(api):
 
             response = sg.send(mail)
             if response.status_code == 202:
-                update_email_status(api, record['id'], "Sent")
+                update_email_status(api, record['id'], STATUS_SENT)
+                _maybe_stamp_ladder(api, fields)
             else:
-                logging.error(f"Failed to send email to {fields['Primary Email']}: {response.body}")
-                update_email_status(api, record['id'], "Failed")
+                logging.error(f"Failed to send email to {fields[EQ_PRIMARY_EMAIL]}: {response.body}")
+                update_email_status(api, record['id'], STATUS_FAILED)
         except Exception as e:
-            logging.error(f"Failed to send email to {fields['Primary Email']}: {e}")
-            update_email_status(api, record['id'], "Failed")
+            logging.error(f"Failed to send email to {fields[EQ_PRIMARY_EMAIL]}: {e}")
+            update_email_status(api, record['id'], STATUS_FAILED)
+
+
+def _maybe_stamp_ladder(api, fields):
+    """If this Email Queue row belongs to a follow-up ladder, stamp the
+    Day N Sent At field on the ladder record. Never raises."""
+    eq_type = fields.get("Email Type") or ""
+    if eq_type not in LADDER_EQ_TYPES:
+        return
+    reason = fields.get("Reminder Reason") or ""
+    if not reason.startswith("LADDER:"):
+        return
+    ladder_record_id = reason[len("LADDER:"):].strip()
+    if not ladder_record_id:
+        return
+    try:
+        from module_22_followup_ladder import record_send_success
+        record_send_success(ladder_record_id, eq_type, api=api)
+    except Exception as exc:
+        logging.warning("Failed to stamp ladder %s after send: %s", ladder_record_id, exc)
 
 def update_email_status(api, record_id, status):
-    table = api.table(BASE_ID, "Email Queue")
-    table.update(record_id, {"Reminder Status": status})
+    table = api.table(BASE_ID, TBL_EMAIL_QUEUE)
+    table.update(record_id, {EQ_REMINDER_STATUS: status})
 
 def run():
     if not API_KEY or not BASE_ID:

@@ -566,7 +566,8 @@ def _evaluate_line(req_fields, matching_policies, grace_days, insurance_policies
 # ── Main evaluation function ─────────────────────────────────────────────────
 
 def evaluate_assignment(vendor, client_reqs, insurance_policies, assignment, assignments_table,
-                        insurance_policies_table=None, overrides_table=None, client_id=""):
+                        insurance_policies_table=None, overrides_table=None, client_id="",
+                        certificate_holder_on_coi="", expected_certificate_holder=""):
     """Evaluate vendor compliance per-line and produce overall status + structured reasons."""
     vendor_id = vendor["id"]
     vendor_name = vendor["fields"].get("Vendor Name", vendor_id)
@@ -613,6 +614,24 @@ def evaluate_assignment(vendor, client_reqs, insurance_policies, assignment, ass
         else:
             logger.info("  %s → %s", policy_type, line_status)
 
+    # ── Certificate holder comparison (once per assignment, not per line) ──
+    if certificate_holder_on_coi and expected_certificate_holder:
+        try:
+            from endorsement_evaluator import evaluate_endorsements
+            holder_result = evaluate_endorsements(
+                policy_fields={"Policy Type": "Certificate"},
+                requirement_fields={},
+                certificate_holder_on_coi=certificate_holder_on_coi,
+                expected_certificate_holder=expected_certificate_holder,
+            )
+            for finding in holder_result.findings:
+                all_reasons.append(f"{finding.reason_code}: {finding.message}")
+            if holder_result.needs_review:
+                if _STATUS_PRIORITY.get(STATUS_NEEDS_REVIEW, 0) > _STATUS_PRIORITY.get(overall_status, 0):
+                    overall_status = STATUS_NEEDS_REVIEW
+        except Exception as exc:
+            logger.warning("Holder comparison failed: %s", exc)
+
     # Write to assignment record
     try:
         assignments_table.update(assignment["id"], {
@@ -626,6 +645,120 @@ def evaluate_assignment(vendor, client_reqs, insurance_policies, assignment, ass
     return overall_status, all_reasons
 
 COMPLIANCE_LOG_TABLE_ID = "tblxdt7DT6V3JCQcW"
+
+# Table IDs used to resolve the most recent cert + vendor email for ladder wiring
+INSURANCE_CERTS_TABLE_ID = "tbl0IH6zQQsXBff3l"
+VENDORS_TABLE_ID_FOR_LADDER = "tblsOphSd5DKSZEro"
+
+NONCOMPLIANT_DECISIONS = {"Non-Compliant", "Needs Review", "Missing Coverage"}
+
+
+def _find_most_recent_cert_id_for_vendor(certs_table, vendor_id: str, client_id: str):
+    """Find the most recent Insurance Certificate for this vendor (optionally
+    filtered to the given client). Returns record id or None."""
+    if not vendor_id:
+        return None
+    try:
+        safe_v = vendor_id.replace("'", "\\'")
+        formula = f"FIND('{safe_v}', ARRAYJOIN({{Vendor Link}}))"
+        rows = certs_table.all(formula=formula)
+    except Exception as exc:
+        logger.warning("Cert lookup failed for vendor %s: %s", vendor_id, exc)
+        return None
+    if not rows:
+        return None
+    # Prefer certs linked to the same client when client_id is known
+    if client_id:
+        scoped = [r for r in rows if client_id in (r.get("fields", {}).get("Client Link") or [])]
+        if scoped:
+            rows = scoped
+    rows.sort(
+        key=lambda r: r.get("fields", {}).get("Certificate Date") or r.get("createdTime") or "",
+        reverse=True,
+    )
+    return rows[0]["id"]
+
+
+def _lookup_vendor_email(vendors_table, vendor_id: str) -> str:
+    try:
+        row = vendors_table.get(vendor_id)
+        return (row.get("fields", {}).get("Vendor Email") or "").strip()
+    except Exception:
+        return ""
+
+
+def trigger_post_evaluation_hooks(
+    api, vendor_id, vendor_name, client_id, client_name,
+    new_decision, previous_decision, failure_reasons,
+):
+    """After every compliance decision, run the three ladder-related hooks:
+      1. Start a Noncompliance Return ladder if the new decision is noncompliant.
+      2. Halt active ladders for this vendor if we just moved noncompliant → compliant.
+      3. Run the short-dated check on the most recent cert.
+
+    Failures are logged but never raised — compliance evaluation is the
+    primary side effect and must not be rolled back by a downstream issue.
+    """
+    if not api or not vendor_id:
+        return
+
+    try:
+        certs_table = api.table(AIRTABLE_BASE_ID, INSURANCE_CERTS_TABLE_ID)
+        cert_id = _find_most_recent_cert_id_for_vendor(certs_table, vendor_id, client_id)
+    except Exception as exc:
+        logger.warning("trigger_post_evaluation_hooks: cert table access failed: %s", exc)
+        cert_id = None
+
+    # 1. Noncompliance Return ladder
+    if new_decision in NONCOMPLIANT_DECISIONS:
+        try:
+            from module_22_followup_ladder import create_ladder, LADDER_TYPE_NONCOMPLIANCE
+            from module_15_email_queue_builder import build_deficiency_email_body
+
+            vendors_table = api.table(AIRTABLE_BASE_ID, VENDORS_TABLE_ID_FOR_LADDER)
+            vendor_email = _lookup_vendor_email(vendors_table, vendor_id)
+
+            if vendor_email:
+                subject = f"Documentation Update Needed: {vendor_name} — {client_name}"
+                body = build_deficiency_email_body(vendor_name, client_name or "your client", failure_reasons or [])
+                create_ladder(
+                    cert_id=cert_id,
+                    ladder_type=LADDER_TYPE_NONCOMPLIANCE,
+                    email_subject=subject,
+                    email_body=body,
+                    original_sender=vendor_email,
+                    vendor_id=vendor_id,
+                    client_id=client_id,
+                    named_insured=vendor_name,
+                    trigger_context=f"Compliance decision: {new_decision}",
+                    api=api,
+                )
+            else:
+                logger.info(
+                    "Ladder trigger skipped for vendor %s (%s) — no Vendor Email on file",
+                    vendor_name, vendor_id,
+                )
+        except Exception as exc:
+            logger.warning("Noncompliance ladder trigger failed for %s: %s", vendor_name, exc)
+
+    # 2. Halt ladders when transitioning to Compliant
+    elif (
+        new_decision == STATUS_COMPLIANT
+        and previous_decision in NONCOMPLIANT_DECISIONS
+    ):
+        try:
+            from module_22_followup_ladder import halt_ladders_for_vendor
+            halt_ladders_for_vendor(vendor_id, reason="New compliant cert received", api=api)
+        except Exception as exc:
+            logger.warning("halt_ladders_for_vendor failed for %s: %s", vendor_name, exc)
+
+    # 3. Short-dated check (independent of compliance decision)
+    if cert_id:
+        try:
+            from module_20_short_dated_check import check_and_trigger_short_dated
+            check_and_trigger_short_dated(cert_id, api=api)
+        except Exception as exc:
+            logger.warning("Short-dated check failed for cert %s: %s", cert_id, exc)
 
 
 def write_compliance_log(vendor_id, vendor_name, client_id, client_name,
@@ -722,11 +855,15 @@ def run():
                 # Capture previous decision before evaluating
                 previous_decision = assignment["fields"].get("Compliance Status", "")
 
+                # Resolve expected certificate holder from client record
+                expected_holder = client_record["fields"].get("Certificate Holder") or ""
+
                 # Evaluate assignment
                 new_decision, failure_reasons = evaluate_assignment(
                     vendor, client_reqs, vendor_policies, assignment, assignments_table,
                     insurance_policies_table=insurance_policies_table,
                     overrides_table=overrides_table, client_id=client_id,
+                    expected_certificate_holder=expected_holder,
                 )
 
                 # Update vendor-level Expiration Status rollup
@@ -745,6 +882,18 @@ def run():
                     previous_decision=previous_decision,
                     failure_reasons=failure_reasons,
                     compliance_log_table=compliance_log_table,
+                )
+
+                # Ladder + short-dated hooks (module 20/22)
+                trigger_post_evaluation_hooks(
+                    api=api,
+                    vendor_id=vendor_id,
+                    vendor_name=vendor_name,
+                    client_id=client_id,
+                    client_name=client_name,
+                    new_decision=new_decision,
+                    previous_decision=previous_decision,
+                    failure_reasons=failure_reasons,
                 )
         else:
             # Use legacy path
@@ -782,6 +931,18 @@ def run():
                 previous_decision=previous_decision_legacy,
                 failure_reasons=[],  # Legacy path does not produce granular reasons
                 compliance_log_table=compliance_log_table,
+            )
+
+            # Ladder + short-dated hooks (legacy path — no structured reasons)
+            trigger_post_evaluation_hooks(
+                api=api,
+                vendor_id=vendor_id,
+                vendor_name=vendor_name,
+                client_id=client_id_legacy or "",
+                client_name=legacy_client_name,
+                new_decision=status,
+                previous_decision=previous_decision_legacy,
+                failure_reasons=[],
             )
 
     logger.info("=== Requirement validation complete ===")

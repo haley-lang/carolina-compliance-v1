@@ -9,13 +9,21 @@ import os
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import stripe
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from pyairtable import Api as AirtableApi
 from email_template import build_email_html
+
+# Single source of truth for business hours — see module_21_business_hours.
+from module_21_business_hours import (
+    ET as EASTERN,
+    BUSINESS_HOURS_START,
+    BUSINESS_HOURS_END,
+    BUSINESS_DAYS,
+    is_business_hours as _is_business_hours_impl,
+)
 
 load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=True)
 
@@ -30,26 +38,19 @@ app = Flask(__name__)
 UPLOAD_DIR = Path(__file__).parent / "incoming_pdfs"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
-EASTERN = ZoneInfo("America/New_York")
-BUSINESS_HOURS_START = 8   # 8am ET
-BUSINESS_HOURS_END = 18    # 6pm ET
-BUSINESS_DAYS = {0, 1, 2, 3, 4}  # Mon-Fri
-
 SENDGRID_WEBHOOK_SECRET = os.getenv("SENDGRID_WEBHOOK_SECRET", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "")
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
-OWNER_EMAIL = "haley@carolinacompliancesolutions.com"
-SENDER_EMAIL = "compliance@carolinacompliancesolutions.com"
+import config as _cfg
+OWNER_EMAIL = _cfg.OWNER_EMAIL
+SENDER_EMAIL = _cfg.FROM_EMAIL
 
 
 def is_business_hours():
-    now = datetime.now(EASTERN)
-    return (
-        now.weekday() in BUSINESS_DAYS
-        and BUSINESS_HOURS_START <= now.hour < BUSINESS_HOURS_END
-    )
+    # Delegates to module_21_business_hours (shared source of truth).
+    return _is_business_hours_impl()
 
 
 def save_pdf(filename, data):
@@ -189,6 +190,7 @@ def stripe_payment():
         _send_owner_notification(customer_name, customer_email, customer_phone, business_name, plan, amount)
         _create_airtable_client(customer_name, customer_email, business_name, amount)
         _send_welcome_email(customer_name, customer_email)
+        _send_onboarding_email(customer_name, customer_email)
 
     return jsonify({"status": "ok"}), 200
 
@@ -300,7 +302,7 @@ def _send_welcome_email(name, email):
         "them. A list, a spreadsheet, a napkin photo. We'll get them loaded in.</p>"
         "<p><strong>Step 2 — Forward your existing COIs</strong><br>"
         "Got certificates already on file? Forward them to "
-        "coi@carolinacompliancesolutions.com. Our system reads and tracks them "
+        f"{_cfg.INBOUND_EMAIL}. Our system reads and tracks them "
         "automatically.</p>"
         "<p><strong>Step 3 — Log into your dashboard</strong><br>"
         'Head to <a href="https://app.carolinacompliancesolutions.com">'
@@ -341,6 +343,48 @@ def _send_welcome_email(name, email):
     sg.send(message)
     _record_welcome_email_sent(email)
     logger.info("Welcome email sent to %s", email)
+
+
+def _send_onboarding_email(name, email):
+    """Send the 'what happens next' onboarding email immediately after welcome."""
+    import sendgrid
+    from sendgrid.helpers.mail import Mail, Email as SGEmail
+    from legal_disclaimer import EMAIL_DISCLAIMER_HTML
+
+    sg = sendgrid.SendGridAPIClient(api_key=SENDGRID_API_KEY)
+
+    onboarding_subject = "What happens next — Carolina Compliance Solutions"
+    onboarding_body_html = (
+        f"<p>Hi {name},</p>"
+        "<p>Welcome to Carolina Compliance Solutions. Here's what happens next:</p>"
+        "<p><strong>1.</strong> We'll reach out within 24 hours to collect your "
+        "subcontractor insurance requirements — things like coverage types, minimum "
+        "limits, and any endorsements your contracts require.</p>"
+        "<p><strong>2.</strong> Once we have your requirements confirmed, we'll contact "
+        "your subcontractors automatically and start collecting their certificates.</p>"
+        "<p><strong>3.</strong> You can log into your compliance portal any time to see "
+        "the status of every subcontractor:<br>"
+        '<a href="https://app.carolinacompliancesolutions.com">'
+        "app.carolinacompliancesolutions.com</a></p>"
+        "<p>If you have questions in the meantime, just reply to this email.</p>"
+        "<p>Carolina Compliance Solutions<br>"
+        f"{_cfg.INBOUND_EMAIL}</p>"
+        f"{EMAIL_DISCLAIMER_HTML}"
+    )
+
+    message = Mail(
+        from_email=SGEmail(email=SENDER_EMAIL, name="Carolina Compliance Solutions"),
+        to_emails=email,
+        subject=onboarding_subject,
+        html_content=build_email_html(onboarding_subject, onboarding_body_html),
+    )
+    message.reply_to = SGEmail(_cfg.INBOUND_EMAIL)
+
+    try:
+        sg.send(message)
+        logger.info("Onboarding email sent to %s", email)
+    except Exception as e:
+        logger.error("Failed to send onboarding email to %s: %s", email, e)
 
 
 if __name__ == "__main__":
