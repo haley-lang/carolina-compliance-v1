@@ -10,15 +10,15 @@ IMMEDIATE-SEND (Day 0 initial sends, bounce retries):
   - Else (after 6pm or on a weekend) → return next business day at 8am.
 
 CADENCE-SEND (Day 2, Day 4, Day 6):
-  - target = day_0_sent + N calendar days, locked to 08:00 ET.
-  - If target lands on a weekend, snap forward to the next business day at 8am.
+  - add_business_days(start, N) steps N weekday-only days forward from start
+    and locks the result to 08:00 ET. Weekends do not count.
 
-Note on `add_business_days`: the build brief's prose says "N business days",
-but the worked examples ("Cert processes Fri 5pm → Day 0 sends Fri 5pm;
-Day 2 target Sun → Mon 8am") use calendar-day arithmetic with weekend
-snap-forward. The brief explicitly calls the worked examples "the contract",
-so calendar-days-with-weekend-snap is the implemented behavior. The name is
-preserved to match the brief's function signature.
+  Worked examples (Mon–Fri Day 0 → Day 2 / Day 4 / Day 6):
+    Day 0 Mon → Wed, Fri, Tue (next week)
+    Day 0 Tue → Thu, Mon (next week), Wed (next week)
+    Day 0 Wed → Fri, Tue (next week), Thu (next week)
+    Day 0 Thu → Mon (next week), Wed (next week), Fri (next week)
+    Day 0 Fri → Tue (next week), Thu (next week), Mon (week after)
 
 No federal holiday handling in v1.
 """
@@ -76,15 +76,19 @@ def send_now_or_defer(target_dt: datetime = None) -> datetime:
 
 
 def add_business_days(start: datetime, n: int) -> datetime:
-    """Cadence rule — returns start.date() + N calendar days at 08:00 ET.
-    If the resulting date is a weekend, snaps forward to next Monday at 08:00 ET.
+    """Cadence rule — step N weekday-only days forward from start, lock to 08:00 ET.
+
+    Weekends do not count toward N. The start datetime's time-of-day is
+    discarded; only the date is used as the anchor.
     """
     start = _ensure_et(start)
-    target_date = start.date() + timedelta(days=n)
-    target = datetime(
+    target_date = start.date()
+    days_added = 0
+    while days_added < n:
+        target_date = target_date + timedelta(days=1)
+        if target_date.weekday() in BUSINESS_DAYS:
+            days_added += 1
+    return datetime(
         target_date.year, target_date.month, target_date.day,
         BUSINESS_HOURS_START, 0, 0, tzinfo=ET,
     )
-    while target.weekday() not in BUSINESS_DAYS:
-        target = target + timedelta(days=1)
-    return target

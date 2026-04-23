@@ -104,20 +104,87 @@ class TestSendNowOrDefer:
 # ── Cadence (Day 2, Day 4, Day 6) ────────────────────────────────────────────
 
 class TestAddBusinessDays:
-    def test_day_0_mon_8am_day_2_wed_8am(self):
-        # "Day 0 sends Mon 8am → Day 2 = Wed 8am"
-        day_0 = _et(2025, 3, 3, 8)
-        assert add_business_days(day_0, 2) == _et(2025, 3, 5, 8)
+    """True business-day arithmetic: weekends do not count toward N.
 
-    def test_day_4_thu_8am_day_6_snaps_sat_to_mon_8am(self):
-        # "Day 4 sends Thu 8am → Day 6 target Sat → Mon 8am"
-        day_4 = _et(2025, 3, 6, 8)   # Thu
-        assert add_business_days(day_4, 2) == _et(2025, 3, 10, 8)   # Mon
+    Reference week: Mon 2025-03-03 through Fri 2025-03-07 — clean week, no
+    federal holidays. Day N targets land in the following week(s) per the
+    table below.
 
-    def test_day_0_fri_5pm_day_2_snaps_sun_to_mon_8am(self):
-        # "Cert processes Fri 5pm → Day 0 sends Fri 5pm; Day 2 target Sun → Mon 8am"
-        day_0 = _et(2025, 3, 7, 17)   # Fri 5pm
-        assert add_business_days(day_0, 2) == _et(2025, 3, 10, 8)   # Mon 8am
+    Day 0      | +2 BD          | +4 BD          | +6 BD
+    -----------|----------------|----------------|----------------
+    Mon 03-03  | Wed 03-05      | Fri 03-07      | Tue 03-11
+    Tue 03-04  | Thu 03-06      | Mon 03-10      | Wed 03-12
+    Wed 03-05  | Fri 03-07      | Tue 03-11      | Thu 03-13
+    Thu 03-06  | Mon 03-10      | Wed 03-12      | Fri 03-14
+    Fri 03-07  | Tue 03-11      | Thu 03-13      | Mon 03-17
+    """
+
+    # Day 0 = Monday
+    def test_mon_day_0_plus_2(self):
+        assert add_business_days(_et(2025, 3, 3, 8), 2) == _et(2025, 3, 5, 8)
+
+    def test_mon_day_0_plus_4(self):
+        assert add_business_days(_et(2025, 3, 3, 8), 4) == _et(2025, 3, 7, 8)
+
+    def test_mon_day_0_plus_6(self):
+        assert add_business_days(_et(2025, 3, 3, 8), 6) == _et(2025, 3, 11, 8)
+
+    # Day 0 = Tuesday
+    def test_tue_day_0_plus_2(self):
+        assert add_business_days(_et(2025, 3, 4, 10), 2) == _et(2025, 3, 6, 8)
+
+    def test_tue_day_0_plus_4(self):
+        assert add_business_days(_et(2025, 3, 4, 10), 4) == _et(2025, 3, 10, 8)
+
+    def test_tue_day_0_plus_6(self):
+        assert add_business_days(_et(2025, 3, 4, 10), 6) == _et(2025, 3, 12, 8)
+
+    # Day 0 = Wednesday
+    def test_wed_day_0_plus_2(self):
+        assert add_business_days(_et(2025, 3, 5, 14), 2) == _et(2025, 3, 7, 8)
+
+    def test_wed_day_0_plus_4(self):
+        assert add_business_days(_et(2025, 3, 5, 14), 4) == _et(2025, 3, 11, 8)
+
+    def test_wed_day_0_plus_6(self):
+        assert add_business_days(_et(2025, 3, 5, 14), 6) == _et(2025, 3, 13, 8)
+
+    # Day 0 = Thursday — the case that exposed the production bug
+    def test_thu_day_0_plus_2(self):
+        assert add_business_days(_et(2025, 3, 6, 10, 13), 2) == _et(2025, 3, 10, 8)
+
+    def test_thu_day_0_plus_4(self):
+        assert add_business_days(_et(2025, 3, 6, 10, 13), 4) == _et(2025, 3, 12, 8)
+
+    def test_thu_day_0_plus_6(self):
+        assert add_business_days(_et(2025, 3, 6, 10, 13), 6) == _et(2025, 3, 14, 8)
+
+    # Day 0 = Friday
+    def test_fri_day_0_plus_2(self):
+        # Fri 5pm + 2 BD = Tue. Old test expected Mon (calendar-snap-from-Sun).
+        assert add_business_days(_et(2025, 3, 7, 17), 2) == _et(2025, 3, 11, 8)
+
+    def test_fri_day_0_plus_4(self):
+        assert add_business_days(_et(2025, 3, 7, 17), 4) == _et(2025, 3, 13, 8)
+
+    def test_fri_day_0_plus_6(self):
+        assert add_business_days(_et(2025, 3, 7, 17), 6) == _et(2025, 3, 17, 8)
+
+    # Time-of-day on `start` is discarded; only the date anchors the count.
+    def test_start_time_of_day_is_irrelevant(self):
+        morning = add_business_days(_et(2025, 3, 6, 6, 30), 2)
+        evening = add_business_days(_et(2025, 3, 6, 23, 45), 2)
+        assert morning == evening == _et(2025, 3, 10, 8)
+
+    # Cadence steps are independent: +4 BD ≠ +2 BD chained twice from
+    # weekday-anchored Day 0, but should equal +2 BD from the +2 result
+    # when that result is itself a business day.
+    def test_chained_consistency_from_thursday(self):
+        day_0 = _et(2025, 3, 6, 10, 13)   # Thu
+        day_2 = add_business_days(day_0, 2)        # Mon 03-10 8am
+        day_4_direct = add_business_days(day_0, 4)
+        day_4_chained = add_business_days(day_2, 2)
+        assert day_4_direct == day_4_chained == _et(2025, 3, 12, 8)
 
 
 # ── next_business_day_8am ────────────────────────────────────────────────────
