@@ -1,30 +1,9 @@
 # Railway service configuration — Carolina Compliance Solutions
+#
+# This file configures the web service only.
+# Cron jobs (daily pipeline, weekly backup, follow-up ladder) are configured
+# as separate Railway Cron services in the Railway UI, not in this file.
 
-# ── Web service: SendGrid inbound webhook + Stripe payment webhook ───────────
 [deploy]
 startCommand = "gunicorn module_16_inbound_webhook:app --bind 0.0.0.0:$PORT --workers 2"
 healthcheckPath = "/health"
-
-# ── Daily pipeline cron: runs full compliance pipeline every day at 12:00 UTC ─
-[deploy.cronSchedule.daily-pipeline]
-schedule = "0 12 * * *"
-command = "python run_pipeline.py"
-
-# ── Weekly backup cron: exports all Airtable tables to CSV every Sunday 6am UTC
-[deploy.cronSchedule.weekly-backup]
-schedule = "0 6 * * 0"
-command = "python airtable_backup.py"
-
-# ── Follow-up ladder cron: scans Active Outbound Follow-Ups and advances due
-# ones (Day 2 / Day 4 / Day 6). Targets 08:00 ET Mon–Fri.
-#
-# DST EDGE CASE: Railway cron runs in UTC and does NOT auto-adjust for DST.
-#   - Standard time (EST, UTC−5): 08:00 ET = 13:00 UTC
-#   - Daylight time (EDT, UTC−4): 08:00 ET = 12:00 UTC
-# During the two-week window after each DST transition, the cron may fire
-# an hour early or late. If that matters, flip this schedule between
-# "0 12 * * 1-5" and "0 13 * * 1-5" on the Sunday of each transition.
-# (Haley: acceptable for v1 since ladder stages are day-scale, not hour-scale.)
-[deploy.cronSchedule.followup-ladder]
-schedule = "0 13 * * 1-5"
-command = "python railway_cron_followup.py"
