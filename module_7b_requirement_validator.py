@@ -135,7 +135,7 @@ def validate_vendor(vendor, client_requirements, insurance_policies):
 def update_vendor_status(vendors_table, vendor_id, status):
     """Update the compliance status of a vendor."""
     try:
-        vendors_table.update(vendor_id, {"Compliance Status": status})
+        vendors_table.update(vendor_id, {"Compliance Status": status}, typecast=True)
         logger.info("Updated vendor %s to status: %s", vendor_id, status)
     except Exception as e:
         logger.error("Failed to update vendor status: %s", e)
@@ -180,7 +180,7 @@ def update_vendor_expiration_status(vendors_table, vendor_id, vendor_name, vendo
     """Write the rolled-up Expiration Status to the Vendors table."""
     exp_status = compute_vendor_expiration_status(vendor_policies)
     try:
-        vendors_table.update(vendor_id, {FLD_VENDOR_EXPIRATION_STATUS: exp_status})
+        vendors_table.update(vendor_id, {FLD_VENDOR_EXPIRATION_STATUS: exp_status}, typecast=True)
         logger.info("Vendor %s Expiration Status → %s", vendor_name, exp_status)
     except Exception as e:
         logger.error("Failed to update Expiration Status for vendor %s: %s", vendor_name, e)
@@ -239,7 +239,7 @@ def update_vendor_policy_detail(vendors_table, vendor_id, vendor_name, vendor_po
     )
 
     try:
-        vendors_table.update(vendor_id, fields)
+        vendors_table.update(vendor_id, fields, typecast=True)
         logger.info("Vendor %s policy detail written — GL:%s WC:%s Auto:%s AI:%s WOS:%s NextExp:%s",
                      vendor_name,
                      fields.get(FLD_V_GL_STATUS), fields.get(FLD_V_WC_STATUS),
@@ -637,7 +637,7 @@ def evaluate_assignment(vendor, client_reqs, insurance_policies, assignment, ass
         assignments_table.update(assignment["id"], {
             "Compliance Status": overall_status,
             "Last Evaluated": date.today().isoformat()
-        })
+        }, typecast=True)
         logger.info("Vendor %s → %s | Reasons: %d", vendor_name, overall_status, len(all_reasons))
     except Exception as e:
         logger.error("Failed to update assignment: %s", e)
