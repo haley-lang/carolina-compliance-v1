@@ -288,6 +288,7 @@ def _send_welcome_email(name, email):
 
     import sendgrid
     from sendgrid.helpers.mail import Mail
+    from legal_disclaimer import EMAIL_DISCLAIMER_HTML
     sg = sendgrid.SendGridAPIClient(api_key=SENDGRID_API_KEY)
 
     welcome_subject = "You're in. Let's get your subs in line. 🏗️"
@@ -296,7 +297,7 @@ def _send_welcome_email(name, email):
         "<p>Welcome to Carolina Compliance Solutions — and congratulations on "
         "officially retiring your COI spreadsheet. It had a good run. "
         "We'll take it from here.</p>"
-        "<p>Here's what happens next. Three steps. That's it.</p>"
+        "<p>Here's what happens next. Four steps. That's it.</p>"
         "<p><strong>Step 1 — Send us your vendor list</strong><br>"
         "Just reply to this email with your subcontractors — however you have "
         "them. A list, a spreadsheet, a napkin photo. We'll get them loaded in.</p>"
@@ -326,12 +327,7 @@ def _send_welcome_email(name, email):
         "<strong>The Carolina Compliance Team</strong><br>"
         "carolinacompliancesolutions.com</p>"
         "<p><em>P.S. Your electrician already needs a reminder. We're on it.</em></p>"
-        '<hr><p style="font-size:11px;color:#999;">Carolina Compliance Solutions is '
-        "an administrative certificate tracking tool. We organize and extract data "
-        "from certificates of insurance for your convenience. We do not verify "
-        "policy authenticity, guarantee active coverage, or provide legal or "
-        "insurance advice. Please consult a licensed insurance professional for "
-        "compliance decisions.</p>"
+        f"{EMAIL_DISCLAIMER_HTML}"
     )
 
     message = Mail(
