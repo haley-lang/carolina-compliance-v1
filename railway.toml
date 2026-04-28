@@ -1,9 +1,19 @@
 # Railway service configuration — Carolina Compliance Solutions
 #
-# This file configures the web service only.
-# Cron jobs (daily pipeline, weekly backup, follow-up ladder) are configured
-# as separate Railway Cron services in the Railway UI, not in this file.
-
-[deploy]
-startCommand = "gunicorn module_16_inbound_webhook:app --bind 0.0.0.0:$PORT --workers 2"
-healthcheckPath = "/health"
+# Intentionally minimal. Service-specific settings (startCommand,
+# healthcheckPath, cronSchedule) are configured per-service in the
+# Railway UI, not here — multiple services deploy from this repo
+# (webhook + cron services), and any [deploy] block in this file
+# would override the UI start command for ALL of them.
+#
+# Project-wide settings (Python version, build provider, env defaults)
+# can be added here in the future. Do NOT add service-specific keys.
+#
+# Reference start commands per service (set via Railway UI):
+#   carolina-compliance-v1 (webhook):
+#     gunicorn module_16_inbound_webhook:app --bind 0.0.0.0:$PORT --workers 2
+#     healthcheckPath: /health
+#   cron-pipeline:           python run_pipeline.py            (0 12 * * *)
+#   cron-daily:              python daily_cron.py              (30 12 * * *)
+#   cron-followup:           python railway_cron_followup.py   (0 13 * * 1-5)
+#   cron-backup:             python airtable_backup.py         (0 6 * * 0)
