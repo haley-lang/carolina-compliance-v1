@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from pyairtable import Api
 import config as _cfg
 from module_12_vendor_reminder_engine import get_vendors_needing_reminders
+from legal_disclaimer import EMAIL_DISCLAIMER
 
 # Initialize logging
 logging.basicConfig(level=logging.INFO)
@@ -122,11 +123,7 @@ def build_deficiency_email_body(vendor_name: str, client_name: str, failure_reas
         f"Questions? Reply to this email.\n\n"
         f"Carolina Compliance Solutions\n"
         f"{_cfg.INBOUND_EMAIL}"
-        f"\n\n---\n"
-        f"This assessment is based solely on certificate of insurance documentation "
-        f"submitted to Carolina Compliance Solutions. It does not constitute verification "
-        f"of actual insurance coverage, policy terms, or carrier obligations. "
-        f"Please consult your insurance advisor for coverage determinations."
+        f"{EMAIL_DISCLAIMER}"
     )
     return body
 
@@ -189,11 +186,7 @@ def build_expiration_email_body(
         f"Questions? Reply to this email.\n\n"
         f"Carolina Compliance Solutions\n"
         f"{_cfg.INBOUND_EMAIL}"
-        f"\n\n---\n"
-        f"This assessment is based solely on certificate of insurance documentation "
-        f"submitted to Carolina Compliance Solutions. It does not constitute verification "
-        f"of actual insurance coverage, policy terms, or carrier obligations. "
-        f"Please consult your insurance advisor for coverage determinations."
+        f"{EMAIL_DISCLAIMER}"
     )
     return body
 

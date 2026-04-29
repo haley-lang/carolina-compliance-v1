@@ -495,8 +495,9 @@ def handle_cancellation(extraction, vendor, client, email_queue_table,
                 f"Subcontractor: {vendor_name}\n"
                 f"Cancellation effective date: {eff_date_display}\n\n"
                 f"The cancellation effective date on the submitted notice has passed. "
-                f"Please review whether this subcontractor should continue working on "
-                f"active projects and consult your insurance advisor.\n\n"
+                f"Submitted documentation indicates this policy is no longer in effect "
+                f"as of the effective date. Please consult your insurance advisor for "
+                f"coverage determinations.\n\n"
                 f"We have contacted the vendor and their agency to request updated "
                 f"certificate documentation.\n\n"
                 f"Carolina Compliance Solutions\n"
@@ -508,9 +509,9 @@ def handle_cancellation(extraction, vendor, client, email_queue_table,
                 f"We received a cancellation notice for the following subcontractor:\n\n"
                 f"Subcontractor: {vendor_name}\n"
                 f"Cancellation effective date: {eff_date_display}\n\n"
-                f"We have contacted the vendor and their agency and are monitoring "
-                f"for resolution. We will update you if the situation is not resolved "
-                f"before the effective date.\n\n"
+                f"We have requested updated certificate documentation from the vendor "
+                f"and their agency. We will notify you if updated documentation is not "
+                f"received before the effective date.\n\n"
                 f"Carolina Compliance Solutions\n"
                 f"{_cfg.INBOUND_EMAIL}"
             )
@@ -621,8 +622,8 @@ def handle_endorsement(extraction, vendor, client, email_queue_table):
         f"Source Document: {source_file}\n\n"
         f"Endorsements may change coverage limits, remove additional insured status, "
         f"modify waiver of subrogation, or alter other policy terms.\n\n"
-        f"Please review the extracted data in Incoming Extractions and verify whether "
-        f"the vendor's submitted documentation meets {client_name}'s certificate requirements.\n\n"
+        f"Please review the extracted data in Incoming Extractions to determine whether "
+        f"the vendor's submitted documentation reflects {client_name}'s certificate requirements.\n\n"
         f"Carolina Compliance Solutions"
     )
     queue_email(
@@ -692,7 +693,7 @@ def handle_reinstatement(extraction, vendor, client, email_queue_table,
         f"Detected: {today_str}\n"
         f"Source Document: {source_file}\n\n"
         f"Compliance check result: {new_status}\n\n"
-        f"{'Submitted documentation now meets certificate requirements.' if new_status == 'Compliant' else 'Outstanding documentation deficiencies remain — please review in Airtable.'}\n\n"
+        f"{'Submitted documentation now meets certificate requirements on file.' if new_status == 'Matches Requirements' else 'Outstanding documentation items remain — please review in Airtable.'}\n\n"
         f"Carolina Compliance Solutions"
     )
     queue_email(
