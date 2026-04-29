@@ -11,6 +11,15 @@ from sendgrid.helpers.mail import Cc, Email, Mail
 load_dotenv(override=True)
 
 import config as _cfg
+from airtable_constants import (
+    TBL_EMAIL_QUEUE,
+    EQ_PRIMARY_EMAIL, EQ_SUBJECT, EQ_BODY, EQ_CC_EMAILS,
+    EQ_EMAIL_TYPE, EQ_EMAIL_STATUS, EQ_RECORD_STATUS, EQ_SENT_AT,
+    EQ_VENDOR_LINK, EQ_CLIENT_LINK,
+    C_REQUIREMENTS_STATUS,
+    EMAIL_TYPE_INITIAL_REQUEST, EMAIL_TYPE_DEFICIENCY_REQUEST,
+    STATUS_PENDING, STATUS_ACTIVE, STATUS_SENT,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -37,7 +46,7 @@ def _client_requirements_received(api: Api, client_record_id: str) -> bool:
     try:
         clients_table = api.table(AIRTABLE_BASE_ID, CLIENTS_TABLE_ID)
         record = clients_table.get(client_record_id)
-        status = record.get("fields", {}).get("Requirements Status", "")
+        status = record.get("fields", {}).get(C_REQUIREMENTS_STATUS, "")
         return status == "Received"
     except Exception as exc:
         logger.error("Failed to check client requirements status: %s", exc)
@@ -81,15 +90,15 @@ def send_initial_vendor_requests() -> None:
         )
 
     api = Api(AIRTABLE_API_KEY)
-    email_queue_table = api.table(AIRTABLE_BASE_ID, "Email Queue")
+    email_queue_table = api.table(AIRTABLE_BASE_ID, TBL_EMAIL_QUEUE)
     sendgrid = SendGridAPIClient(api_key=SENDGRID_API_KEY)
 
     formula = (
         "AND("  # Minimal safe send criteria using current Email Queue schema.
-        "{Email Status}='Pending',"
-        "OR({Email Type}='Initial Request',{Email Type}='Deficiency Request'),"
-        "{Record Status}='Active',"
-        "{Primary Email}!=''"
+        f"{{{EQ_EMAIL_STATUS}}}='{STATUS_PENDING}',"
+        f"OR({{{EQ_EMAIL_TYPE}}}='{EMAIL_TYPE_INITIAL_REQUEST}',{{{EQ_EMAIL_TYPE}}}='{EMAIL_TYPE_DEFICIENCY_REQUEST}'),"
+        f"{{{EQ_RECORD_STATUS}}}='{STATUS_ACTIVE}',"
+        f"{{{EQ_PRIMARY_EMAIL}}}!=''"
         ")"
     )
     try:
@@ -108,38 +117,42 @@ def send_initial_vendor_requests() -> None:
     for queue_record in queue_records:
         record_id = queue_record.get("id", "unknown") if isinstance(queue_record, dict) else "unknown"
         fields = queue_record.get("fields", {}) if isinstance(queue_record, dict) else {}
-        recipient = fields.get("Primary Email")
-        email_type = fields.get("Email Type")
+        recipient = fields.get(EQ_PRIMARY_EMAIL)
+        email_type = fields.get(EQ_EMAIL_TYPE)
         vendor_name = fields.get("Vendor Name", "Vendor")
         if isinstance(vendor_name, list):
             vendor_name = vendor_name[0] if vendor_name else "Vendor"
         gc_client_name = _coerce_client_name(fields.get("Client Name"))
 
         # --- Guard clause: linked vendor record ID and client record ID ---
-        vendor_link_raw = fields.get("Vendor Link", [])
+        # Use airtable_constants for field names. The Email Queue schema
+        # names these "Vendor" and "Client" (EQ_VENDOR_LINK / EQ_CLIENT_LINK),
+        # not "Vendor Link" / "Client Link" — that mismatch silently broke
+        # both the requirements-confirmed and duplicate-send guards.
+        vendor_link_raw = fields.get(EQ_VENDOR_LINK, [])
         vendor_record_id = vendor_link_raw[0] if isinstance(vendor_link_raw, list) and vendor_link_raw else None
-        client_link_raw = fields.get("Client Link", [])
+        client_link_raw = fields.get(EQ_CLIENT_LINK, [])
         client_record_id = client_link_raw[0] if isinstance(client_link_raw, list) and client_link_raw else None
 
         # --- GUARD: Client requirements must be confirmed ---
-        if email_type == "Initial Request" and not _client_requirements_received(api, client_record_id):
+        if email_type == EMAIL_TYPE_INITIAL_REQUEST and not _client_requirements_received(api, client_record_id):
             skipped += 1
             logger.info("Skipping %s — client requirements not yet confirmed", vendor_name)
             continue
 
         # --- GUARD: Duplicate send prevention (Initial Request within 30 days) ---
-        if email_type == "Initial Request" and _initial_request_sent_recently(api, vendor_record_id):
+        if email_type == EMAIL_TYPE_INITIAL_REQUEST and _initial_request_sent_recently(api, vendor_record_id):
             skipped += 1
             logger.info("Skipping %s — initial request already sent within 30 days", vendor_name)
             continue
 
         try:
-            cc_raw = fields.get("CC Emails", [])
+            cc_raw = fields.get(EQ_CC_EMAILS, [])
             cc_values = cc_raw if isinstance(cc_raw, list) else [cc_raw]
             cc_values = [email for email in cc_values if isinstance(email, str) and email.strip()]
 
             # --- Build subject and body ---
-            if email_type == "Initial Request":
+            if email_type == EMAIL_TYPE_INITIAL_REQUEST:
                 subject = f"{gc_client_name} — Certificate of Insurance Request"
                 body = (
                     f"Hi {vendor_name},\n\n"
@@ -160,8 +173,8 @@ def send_initial_vendor_requests() -> None:
                     f"{_cfg.INBOUND_EMAIL}"
                 )
             else:
-                subject = fields.get("Subject", "")
-                body = fields.get("Body", "")
+                subject = fields.get(EQ_SUBJECT, "")
+                body = fields.get(EQ_BODY, "")
 
             # Append disclaimer to all email bodies
             from legal_disclaimer import EMAIL_DISCLAIMER
@@ -202,8 +215,8 @@ def send_initial_vendor_requests() -> None:
                     email_queue_table.update(
                         record_id,
                         {
-                            "Email Status": "Sent",
-                            "Sent At": datetime.now(timezone.utc).isoformat(),
+                            EQ_EMAIL_STATUS: STATUS_SENT,
+                            EQ_SENT_AT: datetime.now(timezone.utc).isoformat(),
                         },
                     )
                 except Exception as exc:

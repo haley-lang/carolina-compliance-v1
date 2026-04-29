@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from pyairtable import Api
 
@@ -14,7 +14,7 @@ from airtable_constants import (
     TBL_VENDORS, TBL_EMAIL_QUEUE, TBL_CLIENTS, TBL_VENDOR_CLIENT_ASSIGNMENTS,
     V_VENDOR_NAME, V_VENDOR_EMAIL, V_SEND_REQUEST,
     EQ_PRIMARY_EMAIL, EQ_SUBJECT, EQ_BODY, EQ_EMAIL_TYPE, EQ_EMAIL_STATUS,
-    EQ_RECORD_STATUS, EQ_VENDOR_LINK, EQ_REMINDER_STATUS, EQ_SEND_AFTER,
+    EQ_RECORD_STATUS, EQ_VENDOR_LINK, EQ_CLIENT_LINK, EQ_REMINDER_STATUS, EQ_SEND_AFTER,
     A_VENDOR_LINK, A_CLIENT_LINK, A_ACTIVE,
     C_CLIENT_NAME, C_CLIENT_LINK,
     STATUS_PENDING, STATUS_ACTIVE, STATUS_SENT,
@@ -37,6 +37,7 @@ QUEUE_EMAIL_TYPE_FIELD = EQ_EMAIL_TYPE
 QUEUE_EMAIL_STATUS_FIELD = EQ_EMAIL_STATUS
 QUEUE_RECORD_STATUS_FIELD = EQ_RECORD_STATUS
 QUEUE_VENDOR_LINK_FIELD = EQ_VENDOR_LINK
+QUEUE_CLIENT_LINK_FIELD = EQ_CLIENT_LINK
 
 VENDOR_CLIENT_LINK_FIELD = C_CLIENT_LINK
 ASSIGNMENT_VENDOR_LINK_FIELD = A_VENDOR_LINK
@@ -85,13 +86,17 @@ def _fetch_client_name_by_id(clients_table, client_id: str) -> Optional[str]:
     return client_name or None
 
 
-def _resolve_client_name(
+def _resolve_client(
     vendor_id: str,
     vendor_name: str,
     vendor_fields: Dict[str, Any],
     clients_table,
     assignments_table,
-) -> str:
+) -> Tuple[str, Optional[str]]:
+    """Return (client_name, client_id) for the vendor's active assignment, or
+    (CLIENT_PLACEHOLDER, None) if no client could be resolved. The client_id
+    is required so the queue row can populate its Client link field — without
+    it, module_18's _client_requirements_received guard short-circuits to False."""
     try:
         vendor_name_clean = vendor_name.strip()
         escaped_vendor_name = _escape_formula_value(vendor_name_clean)
@@ -112,7 +117,7 @@ def _resolve_client_name(
             if assigned_client_id:
                 assigned_client_name = _fetch_client_name_by_id(clients_table, assigned_client_id)
                 if assigned_client_name:
-                    return assigned_client_name
+                    return assigned_client_name, assigned_client_id
     except Exception:
         pass
 
@@ -120,9 +125,9 @@ def _resolve_client_name(
     if legacy_client_id:
         legacy_client_name = _fetch_client_name_by_id(clients_table, legacy_client_id)
         if legacy_client_name:
-            return legacy_client_name
+            return legacy_client_name, legacy_client_id
 
-    return CLIENT_PLACEHOLDER
+    return CLIENT_PLACEHOLDER, None
 
 
 def _build_subject(client_name: str) -> str:
@@ -167,6 +172,7 @@ def _create_queue_record(
     vendor_name: str,
     vendor_email: str,
     client_name: str,
+    client_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     # Guard: do not create orphaned queue records with no vendor
     if not vendor_id or not vendor_id.strip():
@@ -187,6 +193,17 @@ def _create_queue_record(
         QUEUE_SEND_AFTER_FIELD: send_after,
         QUEUE_VENDOR_LINK_FIELD: [vendor_id],
     }
+    # Client link is required for module_18's requirements-confirmed guard.
+    # Without it, _client_requirements_received(api, None) short-circuits
+    # to False and the Initial Request is silently skipped.
+    if client_id:
+        fields[QUEUE_CLIENT_LINK_FIELD] = [client_id]
+    else:
+        logger.warning(
+            "Queue record for vendor %s (%s) created without Client link — "
+            "module_18 will skip the send because client requirements can't be checked",
+            vendor_name, vendor_id,
+        )
     return email_queue_table.create(fields)
 
 
@@ -228,7 +245,7 @@ def run() -> None:
             logger.warning("skipped missing email: %s (%s)", vendor_name, vendor_id)
             continue
 
-        client_name = _resolve_client_name(
+        client_name, client_id = _resolve_client(
             vendor_id=vendor_id,
             vendor_name=vendor_name,
             vendor_fields=fields,
@@ -279,6 +296,7 @@ def run() -> None:
                 vendor_name=vendor_name,
                 vendor_email=vendor_email,
                 client_name=client_name,
+                client_id=client_id,
             )
             if not queue_record:
                 continue
