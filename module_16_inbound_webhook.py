@@ -181,7 +181,13 @@ def stripe_payment():
         }
         # Stripe webhooks do not include line_items in the session payload by default.
         # Fetch them via API after receiving the event.
-        session_id = session.get("id")
+        # Use subscript access not .get() — Stripe Session objects raise
+        # AttributeError when .get() is called on missing keys.
+        try:
+            session_id = session["id"]
+        except (KeyError, TypeError):
+            session_id = None
+
         price_id = ""
         if session_id:
             try:
