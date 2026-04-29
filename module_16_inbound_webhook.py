@@ -40,6 +40,7 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 
 SENDGRID_WEBHOOK_SECRET = os.getenv("SENDGRID_WEBHOOK_SECRET", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "")
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "")
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
@@ -178,7 +179,21 @@ def stripe_payment():
             "price_pro": "Pro",
             "price_scale": "Scale",
         }
-        price_id = session.get("line_items", {}).get("data", [{}])[0].get("price", {}).get("id", "")
+        # Stripe webhooks do not include line_items in the session payload by default.
+        # Fetch them via API after receiving the event.
+        session_id = session.get("id")
+        price_id = ""
+        if session_id:
+            try:
+                line_items = stripe.checkout.Session.list_line_items(session_id, limit=1)
+                if line_items.data:
+                    price_id = line_items.data[0].price.id
+            except Exception as e:
+                logger.exception(f"Failed to fetch line_items for session {session_id}: {e}")
+
+        if not price_id:
+            logger.warning(f"No price_id resolved for session {session_id}; falling back to amount-based plan mapping")
+
         plan = price_to_plan.get(price_id)
         if not plan:
             plan = {14900: "Starter", 39900: "Growth", 59900: "Pro", 79900: "Scale"}.get(session.amount_total, "Unknown Plan")
