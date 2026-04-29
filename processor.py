@@ -2215,7 +2215,7 @@ def _process_single_extraction(extraction, tables, base_id=""):
                         for reason in m7b_failure_reasons
                     ],
                     evaluator_version="v2-module-7b",
-                    should_queue_deficiency_email=(m7b_status == "Non-Compliant"),
+                    should_queue_deficiency_email=(m7b_status == "Has Open Items"),
                     metadata={
                         "stub": False,
                         "rule_version": "v2-module-7b",
@@ -2279,7 +2279,7 @@ def _process_single_extraction(extraction, tables, base_id=""):
             certificate_id,
         )
 
-        if compliance_result.outcome == "Non-Compliant":
+        if compliance_result.outcome == "Has Open Items":
             queue_deficiency_email_if_needed(
                 email_queue_table=tables[TABLE_EMAIL_QUEUE],
                 templates_table=tables[TABLE_TEMPLATES],

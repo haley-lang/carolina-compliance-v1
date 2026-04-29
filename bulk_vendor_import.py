@@ -89,7 +89,7 @@ def import_vendors(client_name, csv_path):
                 vendor_fields = {
                     "Vendor Name": vendor_name,
                     "Vendor Email": email,
-                    "Compliance Status": "Pending",
+                    "Compliance Status": "Needs Review",
                     "Send Request": True,
                 }
                 # Write the client's portal email so Softr can filter vendors per GC
@@ -108,7 +108,7 @@ def import_vendors(client_name, csv_path):
                     "Vendor Link": [new_vendor_id],
                     "Client Link": [client_id],
                     "Active": True,
-                    "Compliance Status": "Pending Review",
+                    "Compliance Status": "Needs Review",
                 })
 
                 logger.info("Imported: %s (%s)", vendor_name, email)

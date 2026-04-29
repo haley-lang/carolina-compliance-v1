@@ -360,7 +360,7 @@ def handle_cancellation(extraction, vendor, client, email_queue_table,
     # ── Intent only — softer handling, no status change ──────────────────
     if subtype == CANCEL_INTENT:
         try:
-            vendors_table.update(vendor_id, {FLD_VEN_COMP_STATUS: "Needs Review"})
+            vendors_table.update(vendor_id, {FLD_VEN_COMP_STATUS: "Needs Review"}, typecast=True)
         except Exception:
             pass
 
@@ -388,7 +388,7 @@ def handle_cancellation(extraction, vendor, client, email_queue_table,
     # ── Partial cancellation — flag specific lines, Needs Review ─────────
     if subtype == CANCEL_PARTIAL and affected_lines:
         try:
-            vendors_table.update(vendor_id, {FLD_VEN_COMP_STATUS: "Needs Review"})
+            vendors_table.update(vendor_id, {FLD_VEN_COMP_STATUS: "Needs Review"}, typecast=True)
         except Exception:
             pass
 
@@ -421,7 +421,7 @@ def handle_cancellation(extraction, vendor, client, email_queue_table,
             urgency = "\n⚡ URGENT: Premium finance cancellation — shorter notice period.\n"
 
         try:
-            vendors_table.update(vendor_id, {FLD_VEN_COMP_STATUS: "Non-Compliant"})
+            vendors_table.update(vendor_id, {FLD_VEN_COMP_STATUS: "Has Open Items"}, typecast=True)
         except Exception as e:
             logger.error("Failed to update vendor status: %s", e)
 
@@ -432,9 +432,9 @@ def handle_cancellation(extraction, vendor, client, email_queue_table,
                 a_client = (a["fields"].get(FLD_ASSIGN_CLIENT) or [None])[0]
                 if a_vendor == vendor_id and a_client == client_id and a["fields"].get(FLD_ASSIGN_ACTIVE):
                     assignments_table.update(a["id"], {
-                        FLD_ASSIGN_COMP: "Non-Compliant",
+                        FLD_ASSIGN_COMP: "Has Open Items",
                         FLD_ASSIGN_EVALUATED: today.isoformat(),
-                    })
+                    }, typecast=True)
         except Exception as e:
             logger.error("Failed to update assignments: %s", e)
 

@@ -116,7 +116,7 @@ class TestCancellationEmailQueuing:
                 "fldb0BUb3wggDMJMp": "ABC Contractors",
                 "fldxteHtQ5ITcx6Zw": "vendor@abc.com",
                 "fldWfYjoWXxksW5iG": "agency@abc.com",
-                "fldUSiQOqZocnT4zX": "Compliant",
+                "fldUSiQOqZocnT4zX": "Matches Requirements",
             }
         }
         mock_client = {
@@ -162,7 +162,7 @@ class TestCancellationEmailQueuing:
                 "fldb0BUb3wggDMJMp": "ABC Contractors",
                 "fldxteHtQ5ITcx6Zw": "vendor@abc.com",
                 "fldWfYjoWXxksW5iG": "agency@abc.com",
-                "fldUSiQOqZocnT4zX": "Compliant",
+                "fldUSiQOqZocnT4zX": "Matches Requirements",
             }
         }
         mock_client = {
@@ -190,7 +190,7 @@ class TestCancellationEmailQueuing:
         mock_vendors_table.update.assert_called()
         call_args = mock_vendors_table.update.call_args
         if call_args:
-            assert "Non-Compliant" in str(call_args) or "non-compliant" in str(call_args).lower()
+            assert "Has Open Items" in str(call_args) or "has open items" in str(call_args).lower()
 
     def test_handle_endorsement_queues_emails(self):
         """handle_endorsement should queue notification email."""

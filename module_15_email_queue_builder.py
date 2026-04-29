@@ -44,7 +44,7 @@ FLD_LOG_TIMESTAMP = "fldWzdPiDQOXqlwhg"
 VENDORS_TABLE_ID = "tblsOphSd5DKSZEro"
 CLIENTS_TABLE_ID = "tbltnBIWke20IEI3K"
 
-COMPLIANCE_TRIGGER_STATUSES = {"Non-Compliant", "Needs Review", "Missing Coverage"}
+COMPLIANCE_TRIGGER_STATUSES = {"Has Open Items", "Needs Review", "Missing Coverage"}
 
 GENERIC_FAILURE_MESSAGE = (
     "Your certificate of insurance does not meet the coverage requirements on file. "
@@ -384,7 +384,7 @@ def fetch_compliance_log_failure_reasons(api: Api, base_id: str, vendor_id: str,
             f"AND("
             f"FIND('{safe_vendor}', ARRAYJOIN({{{FLD_LOG_VENDOR_LINK}}})), "
             f"FIND('{safe_client}', ARRAYJOIN({{{FLD_LOG_CLIENT_LINK}}})), "
-            f"OR({{{FLD_LOG_DECISION}}} = 'Non-Compliant', {{{FLD_LOG_DECISION}}} = 'Needs Review', {{{FLD_LOG_DECISION}}} = 'Missing Coverage')"
+            f"OR({{{FLD_LOG_DECISION}}} = 'Has Open Items', {{{FLD_LOG_DECISION}}} = 'Needs Review', {{{FLD_LOG_DECISION}}} = 'Missing Coverage')"
             f")"
         )
         records = log_table.all(formula=formula)
@@ -410,13 +410,13 @@ def fetch_compliance_log_failure_reasons(api: Api, base_id: str, vendor_id: str,
 
 def get_non_compliant_assignments(api: Api, base_id: str) -> List[Dict[str, Any]]:
     """Query Vendor Client Assignments for active records where Compliance Status
-    is Non-Compliant or Needs Review."""
+    is Has Open Items, Needs Review, or Missing Coverage."""
     try:
         assignments_table = api.table(base_id, ASSIGNMENTS_TABLE_ID)
         formula = (
             f"AND("
             f"{{{FLD_ASSIGN_ACTIVE}}} = TRUE(), "
-            f"OR({{{FLD_ASSIGN_COMP}}} = 'Non-Compliant', {{{FLD_ASSIGN_COMP}}} = 'Needs Review', {{{FLD_ASSIGN_COMP}}} = 'Missing Coverage')"
+            f"OR({{{FLD_ASSIGN_COMP}}} = 'Has Open Items', {{{FLD_ASSIGN_COMP}}} = 'Needs Review', {{{FLD_ASSIGN_COMP}}} = 'Missing Coverage')"
             f")"
         )
         records = assignments_table.all(formula=formula)

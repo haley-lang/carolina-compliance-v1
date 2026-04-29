@@ -155,7 +155,7 @@ class TestMissingFieldsComplianceImpact:
             },
         )
         result = evaluate_returned_coi_compliance(payload)
-        assert result.outcome == "Non-Compliant"
+        assert result.outcome == "Has Open Items"
         # Should have failure reason mentioning Workers Compensation
         assert any("Workers Compensation" in str(r) for r in result.failure_reasons)
 
@@ -188,7 +188,7 @@ class TestMissingFieldsComplianceImpact:
             },
         )
         result = evaluate_returned_coi_compliance(payload)
-        assert result.outcome == "Non-Compliant"
+        assert result.outcome == "Has Open Items"
 
     @pytest.mark.skip(reason=(
         "extract_limit_from_policy was renamed to extract_limits_from_policy "

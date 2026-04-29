@@ -27,10 +27,10 @@ TABLE_VENDORS = "Vendors"
 TABLE_POLICIES = "Insurance Policies"
 EXPIRY_WARNING_DAYS = 30
 
-STATUS_MISSING = "missing"
-STATUS_EXPIRED = "expired"
-STATUS_EXPIRING_SOON = "expiring soon"
-STATUS_COMPLIANT = "compliant"
+STATUS_MISSING = "Missing Coverage"
+STATUS_EXPIRED = "Expired"
+STATUS_EXPIRING_SOON = "Expiring Soon"
+STATUS_COMPLIANT = "Matches Requirements"
 
 _DATE_FORMATS = ["%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y", "%Y/%m/%d"]
 
@@ -136,7 +136,7 @@ def run() -> None:
         current_status = vendor_fields.get("Compliance Status") or ""
 
         if current_status != new_status:
-            vendors_table.update(vendor_id, {"Compliance Status": new_status})
+            vendors_table.update(vendor_id, {"Compliance Status": new_status}, typecast=True)
             logger.info("Updated %s -> %s", vendor_id, new_status)
 
 

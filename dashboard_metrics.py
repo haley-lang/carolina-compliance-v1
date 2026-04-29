@@ -91,10 +91,10 @@ def _print_compliance_overview(api: Api) -> None:
         deficiency_queue_status = fields.get("Deficiency Email Queue Status")
         failure_reasons = fields.get("Compliance Failure Reasons")
 
-        if compliance_status == "Compliant":
+        if compliance_status == "Matches Requirements":
             fully_compliant += 1
 
-        if compliance_status == "Non-Compliant" and deficiency_queue_status == "Queued":
+        if compliance_status == "Has Open Items" and deficiency_queue_status == "Queued":
             edits_requested += 1
 
         if _contains_required_policy_expired(failure_reasons):

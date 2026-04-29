@@ -24,7 +24,7 @@ TABLE_CLIENT_REQUIREMENTS = "Client Requirements"
 TABLE_INSURANCE_POLICIES = "Insurance Policies"
 
 # Compliance status values
-STATUS_COMPLIANT = "Compliant"
+STATUS_COMPLIANT = "Matches Requirements"
 STATUS_MISSING_COVERAGE = "Missing Coverage"
 STATUS_EXPIRED = "Expired"
 STATUS_NEEDS_REVIEW = "Needs Review"
@@ -161,6 +161,32 @@ FLD_P_AI_ON_FILE            = "flduWmW1efOyEf886"
 FLD_P_WOS_ON_FILE           = "fld2neC2QvLJ16kr7"
 FLD_P_POLICY_TYPE           = "fldq25Ttay2ZDC1lA"
 
+def _translate_policy_status_for_display(raw_status: str) -> str:
+    """Convert internal Policy/Expiration values to customer-facing TOS vocabulary.
+
+    Per TOS Section 2A, customer-facing status fields show one of:
+    Current, Expiring Soon, Expired, Missing Coverage, Needs Review.
+
+    "Expiring Soon" is dashboard-only and not in TOS Section 2A's enumerated list;
+    it's a UX warning state for early renewal action. Backlog item: align TOS.
+    """
+    if not raw_status or raw_status == "Unknown":
+        return "Needs Review"
+    if raw_status == "Missing":
+        return "Missing Coverage"
+    if raw_status in ("Active", "Pending Active"):
+        return "Current"
+    if raw_status == "Expired":
+        return "Expired"
+    if raw_status in ("Missing Expiration Date", "Action Needed"):
+        return "Needs Review"
+    if raw_status.startswith("Expiring in"):
+        return "Expiring Soon"
+    if raw_status in ("Superseded", "Canceled"):
+        return "Expired"
+    return "Needs Review"  # safe fallback for unexpected values
+
+
 def compute_vendor_expiration_status(vendor_policies):
     """Derive a rollup Expiration Status from all policies for a vendor."""
     statuses = set()
@@ -173,8 +199,8 @@ def compute_vendor_expiration_status(vendor_policies):
     if "Expiring Soon" in statuses:
         return "Expiring Soon"
     if "Missing Expiration Date" in statuses:
-        return "Missing Expiration Date"
-    return "Active"
+        return "Needs Review"
+    return "Current"
 
 def update_vendor_expiration_status(vendors_table, vendor_id, vendor_name, vendor_policies):
     """Write the rolled-up Expiration Status to the Vendors table."""
@@ -206,7 +232,7 @@ def update_vendor_policy_detail(vendors_table, vendor_id, vendor_name, vendor_po
     for type_name, (status_fld, exp_fld) in _POLICY_TYPE_VENDOR_FIELDS.items():
         policies_of_type = by_type.get(type_name, [])
         if not policies_of_type:
-            fields[status_fld] = "Missing"
+            fields[status_fld] = "Missing Coverage"
             fields[exp_fld] = None
             continue
         policies_of_type.sort(
@@ -215,7 +241,7 @@ def update_vendor_policy_detail(vendors_table, vendor_id, vendor_name, vendor_po
         )
         best = policies_of_type[0]
         raw_status = best["fields"].get("Status") or best["fields"].get("Expiration Status") or "Unknown"
-        fields[status_fld] = "Active" if raw_status == "Current" else raw_status
+        fields[status_fld] = _translate_policy_status_for_display(raw_status)
         fields[exp_fld] = best["fields"].get("Expiration Date") or None
 
     all_expirations = []
@@ -650,7 +676,7 @@ COMPLIANCE_LOG_TABLE_ID = "tblxdt7DT6V3JCQcW"
 INSURANCE_CERTS_TABLE_ID = "tbl0IH6zQQsXBff3l"
 VENDORS_TABLE_ID_FOR_LADDER = "tblsOphSd5DKSZEro"
 
-NONCOMPLIANT_DECISIONS = {"Non-Compliant", "Needs Review", "Missing Coverage"}
+NONCOMPLIANT_DECISIONS = {"Has Open Items", "Needs Review", "Missing Coverage"}
 
 
 def _find_most_recent_cert_id_for_vendor(certs_table, vendor_id: str, client_id: str):

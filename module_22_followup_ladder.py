@@ -5,7 +5,7 @@ progression:
   - Short-Dated Renewal (initiated by module_20 when a cert has policies
     expiring within 30 days).
   - Noncompliance Return (initiated by module_7b when an assignment is
-    evaluated as Non-Compliant, Needs Review, or Missing Coverage).
+    evaluated as Has Open Items, Needs Review, or Missing Coverage).
 
 Passive response detection halts the ladder when an inbound email from a
 recipient references the ladder's named insured. A new compliant cert for
