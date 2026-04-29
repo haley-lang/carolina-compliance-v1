@@ -49,21 +49,21 @@ def import_vendors(client_name, csv_path):
         logger.warning("Client %s has no Primary Contact Email — Softr portal filtering will not work", client_name)
     logger.info("Found client: %s (ID: %s, Portal Email: %s)", client_name, client_id, client_portal_email or "MISSING")
 
-    # Build set of existing vendor names for this client (via junction table)
-    existing_junctions = client_vendors_table.all(
-        formula=f"FIND('{client_id}', ARRAYJOIN({{Client}}))"
-    )
-    existing_vendor_ids = set()
-    for j in existing_junctions:
-        for vid in j["fields"].get("Vendors", []):
-            existing_vendor_ids.add(vid)
-    existing_vendor_names = set()
-    for vid in existing_vendor_ids:
-        try:
-            v = vendors_table.get(vid)
-            existing_vendor_names.add((v["fields"].get("Vendor Name", "")).strip().lower())
-        except Exception:
-            pass
+    # Build set of vendor IDs already assigned to this client.
+    # We walk Vendor Client Assignments (the canonical V1 junction) and filter
+    # in Python because Airtable's ARRAYJOIN on linked-record fields returns
+    # primary-field text (vendor/client names), not record IDs — which is why
+    # the previous FIND(client_id, ARRAYJOIN({Client})) approach silently
+    # never matched, allowing duplicate vendor records on re-import.
+    existing_assigned_vendor_ids = set()
+    try:
+        for a in assignments_table.all():
+            if client_id in (a["fields"].get("Client Link") or []):
+                for vid in (a["fields"].get("Vendor Link") or []):
+                    existing_assigned_vendor_ids.add(vid)
+    except Exception as e:
+        logger.error("Failed to load assignments for dedup: %s", e)
+        sys.exit(1)
 
     imported_names = []
     skipped_names = []
@@ -80,8 +80,20 @@ def import_vendors(client_name, csv_path):
                 skipped_names.append(vendor_name or "(blank)")
                 continue
 
-            if vendor_name.strip().lower() in existing_vendor_names:
-                logger.info("Duplicate skipped: %s", vendor_name)
+            # Look up vendors by name (case-insensitive). If any match is
+            # already assigned to this client, skip; otherwise create new.
+            try:
+                safe_name = vendor_name.strip().lower().replace("'", "\\'")
+                name_matches = vendors_table.all(
+                    formula=f"LOWER({{Vendor Name}}) = '{safe_name}'"
+                )
+            except Exception as e:
+                logger.error("Failed to look up vendor %s for dedup: %s", vendor_name, e)
+                failed_names.append(vendor_name)
+                continue
+
+            if any(v["id"] in existing_assigned_vendor_ids for v in name_matches):
+                logger.info("Vendor %s already assigned to %s — skipping", vendor_name, client_name)
                 skipped_names.append(vendor_name)
                 continue
 
@@ -92,11 +104,10 @@ def import_vendors(client_name, csv_path):
                     "Compliance Status": "Needs Review",
                     "Send Request": True,
                 }
-                # Write the client's portal email to the dedicated Client Email field
-                # so Softr can filter vendors per GC. Vendor Email (set above from CSV)
-                # remains the actual vendor's address used for Initial Requests.
-                if client_portal_email:
-                    vendor_fields["fldyPBBSXqYnvjhL0"] = client_portal_email
+                # Client Email (fldyPBBSXqYnvjhL0) is a computed lookup field
+                # on Vendors that auto-populates from the linked Client via
+                # Vendor Client Assignment. Don't write it directly — Airtable
+                # rejects with 422.
                 vendor_record = vendors_table.create(vendor_fields)
                 new_vendor_id = vendor_record["id"]
 
@@ -114,7 +125,7 @@ def import_vendors(client_name, csv_path):
                 })
 
                 logger.info("Imported: %s (%s)", vendor_name, email)
-                existing_vendor_names.add(vendor_name.strip().lower())
+                existing_assigned_vendor_ids.add(new_vendor_id)
                 imported_names.append(vendor_name)
             except Exception as e:
                 logger.error("Error importing %s: %s", vendor_name, e)
