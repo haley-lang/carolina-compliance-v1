@@ -92,9 +92,11 @@ def import_vendors(client_name, csv_path):
                     "Compliance Status": "Needs Review",
                     "Send Request": True,
                 }
-                # Write the client's portal email so Softr can filter vendors per GC
+                # Write the client's portal email to the dedicated Client Email field
+                # so Softr can filter vendors per GC. Vendor Email (set above from CSV)
+                # remains the actual vendor's address used for Initial Requests.
                 if client_portal_email:
-                    vendor_fields["fldxteHtQ5ITcx6Zw"] = client_portal_email
+                    vendor_fields["fldyPBBSXqYnvjhL0"] = client_portal_email
                 vendor_record = vendors_table.create(vendor_fields)
                 new_vendor_id = vendor_record["id"]
 

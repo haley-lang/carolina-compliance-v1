@@ -1,13 +1,15 @@
-"""Test that bulk vendor import writes the client's portal email to each vendor."""
+"""Test that bulk vendor import writes the CSV's vendor email and the
+client's portal email to separate fields on each vendor record."""
 
 import csv
 import tempfile
 from unittest.mock import MagicMock, patch, call
 
 
-def test_imported_vendor_has_client_portal_email():
-    """Vendor record created during CSV import should include the client's
-    Primary Contact Email in field fldxteHtQ5ITcx6Zw (Softr portal filter)."""
+def test_imported_vendor_has_vendor_and_client_emails():
+    """Vendor record created during CSV import should populate two distinct
+    email fields: Vendor Email (from CSV) and Client Email
+    (fldyPBBSXqYnvjhL0, copy of client portal email for Softr filtering)."""
 
     # Prepare a tiny CSV
     csv_content = "vendor_name,email\nTest Plumbing LLC,plumber@example.com\n"
@@ -59,12 +61,16 @@ def test_imported_vendor_has_client_portal_email():
     created_fields = mock_vendors_table.create.call_args[0][0]
 
     assert created_fields["Vendor Name"] == "Test Plumbing LLC"
-    assert created_fields["Vendor Email"] == "plumber@example.com"
-    assert created_fields["fldxteHtQ5ITcx6Zw"] == "dalton@example.com", (
-        f"Expected portal email 'dalton@example.com', got '{created_fields.get('fldxteHtQ5ITcx6Zw')}'"
+    assert created_fields["Vendor Email"] == "plumber@example.com", (
+        f"Expected vendor email 'plumber@example.com', got '{created_fields.get('Vendor Email')}'"
     )
-    print("Test passed: imported vendor has client portal email in fldxteHtQ5ITcx6Zw.")
+    assert created_fields["fldyPBBSXqYnvjhL0"] == "dalton@example.com", (
+        f"Expected client portal email 'dalton@example.com' in Client Email field, "
+        f"got '{created_fields.get('fldyPBBSXqYnvjhL0')}'"
+    )
+    print("Test passed: imported vendor has CSV email in Vendor Email and "
+          "client portal email in Client Email (fldyPBBSXqYnvjhL0).")
 
 
 if __name__ == "__main__":
-    test_imported_vendor_has_client_portal_email()
+    test_imported_vendor_has_vendor_and_client_emails()
