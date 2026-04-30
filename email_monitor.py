@@ -85,8 +85,13 @@ def fetch_unread_emails(server: IMAPClient) -> list[dict]:
 
     for msg_id in message_ids:
         try:
-            raw = server.fetch([msg_id], ["RFC822"])
-            msg = email.message_from_bytes(raw[msg_id][b"RFC822"])
+            # Use BODY.PEEK[] not RFC822 — RFC822 implicitly marks the message
+            # \Seen on fetch (RFC 3501 side effect), which silently loses any
+            # email that crashes between fetch and Airtable write. With PEEK,
+            # the message stays UNSEEN until we explicitly add_flags after the
+            # Airtable record is confirmed created.
+            raw = server.fetch([msg_id], ["BODY.PEEK[]"])
+            msg = email.message_from_bytes(raw[msg_id][b"BODY[]"])
 
             sender = decode_mime_words(msg.get("From", ""))
             subject = decode_mime_words(msg.get("Subject", "(no subject)"))
@@ -150,6 +155,7 @@ def fetch_unread_emails(server: IMAPClient) -> list[dict]:
             print("[email_monitor] Airtable Incoming Documents create queued: True")
             results.append(
                 {
+                    "msg_id": msg_id,
                     "sender": sender,
                     "subject": subject,
                     "date_received": date_received,
@@ -207,6 +213,37 @@ if __name__ == "__main__":
                 print("[email_monitor] Airtable Incoming Documents record created: True")
                 print(f"[email_monitor][airtable] create response: {record}")
                 print(f"[email_monitor][airtable] created record id: {record.get('id')}")
+
+                # ── Mark message Seen on Gmail (dedup hygiene) ──────────
+                # The Airtable record is now the source of truth; the Seen
+                # flag prevents this message from being re-fetched on the
+                # next cron run. If marking fails (transient IMAP error), a
+                # duplicate Airtable record may be created next run — log and
+                # continue, don't unwind the successful Airtable write.
+                try:
+                    server.add_flags(entry["msg_id"], [b"\\Seen"])
+                    print(f"[email_monitor] Marked Seen: msg_id={entry['msg_id']}")
+                except Exception as _seen_exc:
+                    print(f"[email_monitor] add_flags failed for msg_id={entry['msg_id']}: {_seen_exc}")
+
+                # ── Move message to "Processed" Gmail label ─────────────
+                # Keeps INBOX clean as volume grows. Gmail treats labels as
+                # folders for IMAP: copy adds the Processed label, then
+                # delete+expunge removes the INBOX label (the message itself
+                # persists under Processed). The "Processed" label must exist
+                # in Gmail; if not, copy raises and the message stays in INBOX
+                # (still Seen — no re-fetch, no data loss).
+                #
+                # Wrapped in try/except per the same source-of-truth principle
+                # as the Seen flag above: an IMAP move failure must not unwind
+                # the successful Airtable write.
+                try:
+                    server.copy([entry["msg_id"]], "Processed")
+                    server.delete_messages([entry["msg_id"]])
+                    server.expunge()
+                    print(f"[email_monitor] Moved to Processed: msg_id={entry['msg_id']}")
+                except Exception as _move_exc:
+                    print(f"[email_monitor] Move to Processed failed for msg_id={entry['msg_id']}: {_move_exc}")
 
                 # ── Email classification ─────────────────────────────────
                 record_id = record.get("id")
