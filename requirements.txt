@@ -12,3 +12,6 @@ flask
 gunicorn
 rapidfuzz
 pdfplumber
+imapclient==3.1.0
+pytz==2026.1.post1
+requests==2.33.0
