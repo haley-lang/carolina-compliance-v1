@@ -80,6 +80,9 @@ def fetch_unread_emails(server: IMAPClient) -> list[dict]:
     logger.info("Found %d unread email(s).", len(message_ids))
     upload_dir = Path(config.UPLOAD_DIR)
     upload_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[email_monitor][path-debug] cwd={os.getcwd()}")
+    print(f"[email_monitor][path-debug] config.UPLOAD_DIR={config.UPLOAD_DIR!r}")
+    print(f"[email_monitor][path-debug] upload_dir.resolve()={upload_dir.resolve()}")
 
     results = []
 
@@ -140,6 +143,7 @@ def fetch_unread_emails(server: IMAPClient) -> list[dict]:
                 try:
                     dest.write_bytes(part.get_payload(decode=True))
                     print(f"[email_monitor] Attachment saved: True ({dest})")
+                    print(f"[email_monitor][path-debug] dest.resolve()={dest.resolve()} exists={dest.exists()} size={dest.stat().st_size if dest.exists() else 'N/A'}")
                     logger.info("Saved attachment: %s", dest)
                     saved_files.append(str(dest))
                 except Exception as e:

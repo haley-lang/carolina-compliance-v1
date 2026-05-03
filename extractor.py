@@ -214,6 +214,23 @@ def get_all_pending_files(folder: Path) -> list[Path]:
     exists in EXTRACT_DIR.  Results are sorted oldest-first so files are
     processed in the order they arrived.
     """
+    print(f"[extractor][path-debug] cwd={os.getcwd()}")
+    print(f"[extractor][path-debug] UPLOAD_DIR_env={os.getenv('UPLOAD_DIR')!r}")
+    print(f"[extractor][path-debug] folder={folder} folder.resolve()={folder.resolve()} folder.exists()={folder.exists()}")
+    print(f"[extractor][path-debug] EXTRACT_DIR={EXTRACT_DIR} EXTRACT_DIR.resolve()={EXTRACT_DIR.resolve()} EXTRACT_DIR.exists()={EXTRACT_DIR.exists()}")
+    if folder.exists():
+        try:
+            _all_entries = list(folder.iterdir())
+            print(f"[extractor][path-debug] folder contents ({len(_all_entries)} entries): {[str(p) for p in _all_entries]}")
+        except Exception as _e:
+            print(f"[extractor][path-debug] folder.iterdir() failed: {_e}")
+    if EXTRACT_DIR.exists():
+        try:
+            _ej = list(EXTRACT_DIR.iterdir())
+            print(f"[extractor][path-debug] extracted/ contents ({len(_ej)} entries): {[p.name for p in _ej]}")
+        except Exception as _e:
+            print(f"[extractor][path-debug] EXTRACT_DIR.iterdir() failed: {_e}")
+
     if not folder.exists():
         raise FileNotFoundError(f"Upload folder not found: {folder}")
 
@@ -221,6 +238,7 @@ def get_all_pending_files(folder: Path) -> list[Path]:
         f for f in folder.iterdir()
         if f.is_file() and f.suffix.lower() in SUPPORTED_EXTENSIONS
     ]
+    print(f"[extractor][path-debug] candidates after extension filter ({len(candidates)}): {[f.name for f in candidates]}")
     if not candidates:
         return []
 
@@ -229,8 +247,10 @@ def get_all_pending_files(folder: Path) -> list[Path]:
     for f in candidates:
         json_path = EXTRACT_DIR / (f.stem + ".json")
         if json_path.exists():
+            print(f"[extractor][path-debug] SKIP {f.name} — already extracted at {json_path.resolve()}")
             log.debug("Skipping %s — already extracted (%s)", f.name, json_path.name)
         else:
+            print(f"[extractor][path-debug] PENDING {f.name}")
             pending.append(f)
 
     # Process oldest files first (FIFO by modification time)
