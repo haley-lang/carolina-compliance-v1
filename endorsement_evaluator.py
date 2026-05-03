@@ -214,18 +214,14 @@ def evaluate_endorsements(
     wos_required = requirement_fields.get("Waiver Required", False)
     pnc_required = requirement_fields.get("Primary Noncontributory Required", False)
 
-    ai_checked = bool(
-        policy_fields.get("additional_insured_checked")
-        or policy_fields.get("Additional Insured")
-    )
-    wos_checked = bool(
-        policy_fields.get("waiver_of_subrogation_checked")
-        or policy_fields.get("Waiver")
-    )
-    pnc_checked = bool(
-        policy_fields.get("primary_noncontributory_checked")
-        or policy_fields.get("Primary Noncontributory")
-    )
+    # Read by Airtable display name. policy_fields is name-keyed (pyairtable
+    # default). The display names "Additional Insured On File" and "Waiver of
+    # Subrogation On File" are verified live against the Insurance Policies
+    # schema — the snake_case JSON keys never reach this dict because the
+    # values arrive on the policy record via processor.py's field-ID writes.
+    ai_checked = bool(policy_fields.get("Additional Insured On File"))
+    wos_checked = bool(policy_fields.get("Waiver of Subrogation On File"))
+    pnc_checked = bool(policy_fields.get("Primary Noncontributory"))
 
     # ── AI evidence level ────────────────────────────────────────────────
     result.ai_level = _determine_ai_evidence_level(ai_checked, desc, has_endorsement_doc)

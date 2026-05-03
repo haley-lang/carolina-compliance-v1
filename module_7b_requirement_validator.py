@@ -516,24 +516,20 @@ def _evaluate_line(req_fields, matching_policies, grace_days, insurance_policies
                 _worsen(STATUS_NEEDS_REVIEW)
 
     # ── Endorsement evaluation (evidence levels) ──────────────────────────
-    # pf is name-keyed (pyairtable Table.all() default is returnFieldsByFieldId=False);
-    # field-ID fallbacks below match the existing dual-key pattern used elsewhere
-    # in this file (e.g. "Last Reminder Threshold" lookups) and protect against
-    # a future schema rename of the display label.
-    has_ai = bool(pf.get("Additional Insured") or pf.get("flduWmW1efOyEf886"))
-    has_wos = bool(pf.get("Waiver of Subrogation") or pf.get("fld2neC2QvLJ16kr7"))
-    has_pnc = bool(pf.get("Primary Noncontributory") or pf.get("fldkgjVGuMCHTeKbR"))
+    # pf is name-keyed (pyairtable Table.all() default is returnFieldsByFieldId=False).
+    # The Airtable display names for these checkbox fields differ from the
+    # pre-existing constants' "_ON_FILE" suffix conventions — verified live
+    # against the Insurance Policies schema. Use the actual names.
+    has_ai = bool(pf.get("Additional Insured On File"))
+    has_wos = bool(pf.get("Waiver of Subrogation On File"))
+    has_pnc = bool(pf.get("Primary Noncontributory"))
 
-    # Write basic booleans to policy record
-    if insurance_policies_table:
-        try:
-            insurance_policies_table.update(best_policy["id"], {
-                FLD_P_AI_ON_FILE: has_ai,
-                FLD_P_WOS_ON_FILE: has_wos,
-                "fldkgjVGuMCHTeKbR": has_pnc,  # Primary Noncontributory
-            })
-        except Exception:
-            pass
+    # Note: this function used to write has_ai/has_wos/has_pnc back to the
+    # policy record. That writeback was REMOVED because processor.py is now
+    # the authoritative writer (by field ID) of these three fields from the
+    # source extraction's checkbox booleans. The old writeback was overwriting
+    # processor's correct True values with False whenever the read above
+    # missed (which it did, because the display names were wrong).
 
     # Run endorsement evaluator for evidence-level analysis
     try:
@@ -546,9 +542,15 @@ def _evaluate_line(req_fields, matching_policies, grace_days, insurance_policies
         desc_of_ops = ""
         cert_links = pf.get("Insurance Certificates") or []
         if cert_links:
+            # Use cert_links[-1] (most recent) not [0] (oldest). Each new COI
+            # creates a new Insurance Certificate record; Airtable appends the
+            # new ID to the policy's link list, so the latest cert is at the
+            # end. Reading [0] picks the OLDEST cert which predates the
+            # description_of_operations write and has an empty description.
+            _latest_cert_id = cert_links[-1]
             try:
                 _certs_table = Api(AIRTABLE_API_KEY).table(AIRTABLE_BASE_ID, INSURANCE_CERTS_TABLE_ID)
-                _cert = _certs_table.get(cert_links[0])
+                _cert = _certs_table.get(_latest_cert_id)
                 _cf = _cert.get("fields", {}) if _cert else {}
                 desc_of_ops = (
                     _cf.get("Description of Operations")
@@ -557,7 +559,7 @@ def _evaluate_line(req_fields, matching_policies, grace_days, insurance_policies
                 )
             except Exception as _desc_exc:
                 logger.warning("Description of Operations lookup failed for cert %s: %s",
-                               cert_links[0], _desc_exc)
+                               _latest_cert_id, _desc_exc)
         endorse_result = evaluate_endorsements(
             policy_fields=pf,
             requirement_fields=req_fields,
