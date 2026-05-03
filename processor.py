@@ -1431,6 +1431,13 @@ def process_policies(
             if source_filename:
                 refreshed_fields["Certificate Source Filename"] = source_filename
 
+            # Refresh endorsement booleans from the source extraction so
+            # mid-term endorsement changes (e.g., AI added or WOS removed)
+            # propagate onto the policy record on every refresh.
+            refreshed_fields["flduWmW1efOyEf886"] = bool(policy.get("additional_insured_checked", False))       # Additional Insured
+            refreshed_fields["fld2neC2QvLJ16kr7"] = bool(policy.get("waiver_of_subrogation_checked", False))    # Waiver of Subrogation
+            refreshed_fields["fldkgjVGuMCHTeKbR"] = bool(policy.get("primary_noncontributory_checked", False))  # Primary Noncontributory
+
             policies_table.update(existing_policy["id"], refreshed_fields, typecast=True)
             logger.info(
                 "Policy %d (%s) existing policy found — refreshed fields: %s",
@@ -1489,6 +1496,11 @@ def process_policies(
             "Coverage Limits":         (policy.get("coverage_limits")  or "").strip(),
             "Status":                  computed_status,
             "Certificate Source Filename": source_filename,
+            # Endorsement booleans — written by field ID so a future schema
+            # rename of the display label can't silently drop the data.
+            "flduWmW1efOyEf886": bool(policy.get("additional_insured_checked", False)),       # Additional Insured
+            "fld2neC2QvLJ16kr7": bool(policy.get("waiver_of_subrogation_checked", False)),    # Waiver of Subrogation
+            "fldkgjVGuMCHTeKbR": bool(policy.get("primary_noncontributory_checked", False)),  # Primary Noncontributory
         }
         if effective_raw:
             fields["Effective Date"] = effective_raw
@@ -1644,6 +1656,7 @@ def create_certificate(
     matched_request_id: Optional[str] = None,
     matched_client_id: Optional[str] = None,
     base_id: Optional[str] = None,
+    description_of_operations: str = "",
 ) -> dict:
     """Create one Insurance Certificate record linked to the Vendor.
     If the original PDF is found on disk, uploads it to the Certificate File
@@ -1653,6 +1666,10 @@ def create_certificate(
         "Vendor Link":      [vendor_record_id],
         "Named Insured":    named_insured,
         "Source Filename":  source_filename,
+        # Description of Operations — needed by module_7b's endorsement
+        # evaluator to corroborate AI/WOS/PNC checkbox claims with the
+        # narrative text. Written by field ID for schema-rename stability.
+        "fldow02cj5ermE0aJ": description_of_operations or "",
     }
     if certificate_date and certificate_date.strip():
         fields["Certificate Date"] = certificate_date.strip()
@@ -1837,6 +1854,7 @@ def _process_single_extraction(extraction, tables, base_id=""):
 
     policies         = raw_data.get("policies") or []
     certificate_date = raw_data.get("certificate_date") or ""
+    description_of_operations = raw_data.get("description_of_operations") or ""
     document_type    = normalize_document_type(raw_data.get("document_type") or "")
     logger.info("Policies in JSON : %d", len(policies))
     logger.info("Document Type    : %s", document_type or "(blank)")
@@ -1975,6 +1993,7 @@ def _process_single_extraction(extraction, tables, base_id=""):
         matched_request_id,
         matched_client_id,
         base_id=base_id,
+        description_of_operations=description_of_operations,
     )
     certificate_id = certificate_record["id"]
     if not matched_request_id:

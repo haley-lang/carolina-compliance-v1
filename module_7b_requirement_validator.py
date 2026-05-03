@@ -516,9 +516,13 @@ def _evaluate_line(req_fields, matching_policies, grace_days, insurance_policies
                 _worsen(STATUS_NEEDS_REVIEW)
 
     # ── Endorsement evaluation (evidence levels) ──────────────────────────
-    has_ai = bool(pf.get("Additional Insured") or pf.get("additional_insured_checked"))
-    has_wos = bool(pf.get("Waiver") or pf.get("waiver_of_subrogation_checked"))
-    has_pnc = bool(pf.get("Primary Noncontributory") or pf.get("primary_noncontributory_checked"))
+    # pf is name-keyed (pyairtable Table.all() default is returnFieldsByFieldId=False);
+    # field-ID fallbacks below match the existing dual-key pattern used elsewhere
+    # in this file (e.g. "Last Reminder Threshold" lookups) and protect against
+    # a future schema rename of the display label.
+    has_ai = bool(pf.get("Additional Insured") or pf.get("flduWmW1efOyEf886"))
+    has_wos = bool(pf.get("Waiver of Subrogation") or pf.get("fld2neC2QvLJ16kr7"))
+    has_pnc = bool(pf.get("Primary Noncontributory") or pf.get("fldkgjVGuMCHTeKbR"))
 
     # Write basic booleans to policy record
     if insurance_policies_table:
@@ -526,6 +530,7 @@ def _evaluate_line(req_fields, matching_policies, grace_days, insurance_policies
             insurance_policies_table.update(best_policy["id"], {
                 FLD_P_AI_ON_FILE: has_ai,
                 FLD_P_WOS_ON_FILE: has_wos,
+                "fldkgjVGuMCHTeKbR": has_pnc,  # Primary Noncontributory
             })
         except Exception:
             pass
@@ -533,7 +538,26 @@ def _evaluate_line(req_fields, matching_policies, grace_days, insurance_policies
     # Run endorsement evaluator for evidence-level analysis
     try:
         from endorsement_evaluator import evaluate_endorsements
-        desc_of_ops = pf.get("description_of_operations") or pf.get("Description of Operations") or ""
+        # Description of Operations lives on the linked Insurance Certificate,
+        # not on the Insurance Policy. Resolve via the policy's "Insurance
+        # Certificates" link field. If lookup fails, fall back to empty —
+        # endorsement_evaluator will emit *_CHECKBOX_ONLY codes which is
+        # acceptable degradation when description text is unavailable.
+        desc_of_ops = ""
+        cert_links = pf.get("Insurance Certificates") or []
+        if cert_links:
+            try:
+                _certs_table = Api(AIRTABLE_API_KEY).table(AIRTABLE_BASE_ID, INSURANCE_CERTS_TABLE_ID)
+                _cert = _certs_table.get(cert_links[0])
+                _cf = _cert.get("fields", {}) if _cert else {}
+                desc_of_ops = (
+                    _cf.get("Description of Operations")
+                    or _cf.get("fldow02cj5ermE0aJ")
+                    or ""
+                )
+            except Exception as _desc_exc:
+                logger.warning("Description of Operations lookup failed for cert %s: %s",
+                               cert_links[0], _desc_exc)
         endorse_result = evaluate_endorsements(
             policy_fields=pf,
             requirement_fields=req_fields,
