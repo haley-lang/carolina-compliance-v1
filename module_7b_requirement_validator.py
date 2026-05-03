@@ -207,6 +207,18 @@ def _translate_policy_status_for_display(raw_status: str) -> str:
     Per TOS Section 2A, customer-facing status fields show one of:
     Current, Expiring Soon, Expired, Missing Coverage, Needs Review.
 
+    Inputs come from two sources on the policy record:
+      - Policy.Expiration Status (module_8's per-policy state machine):
+        "Active", "Pending Active", "Expired", "Expiring in 7/30/60/90 Days",
+        "Missing Expiration Date".
+      - Policy.Status (processor.py's compute_policy_status):
+        "Current", "Expiring Soon", "Expired", "Needs Review", "Superseded",
+        "Canceled", "Action Needed".
+    The TOS-aligned outputs ("Current", "Expiring Soon", ...) overlap with
+    Policy.Status's vocabulary, so this function must accept those as
+    identity-mapped inputs in addition to translating the older internal
+    values from Policy.Expiration Status.
+
     "Expiring Soon" is dashboard-only and not in TOS Section 2A's enumerated list;
     it's a UX warning state for early renewal action. Backlog item: align TOS.
     """
@@ -214,16 +226,18 @@ def _translate_policy_status_for_display(raw_status: str) -> str:
         return "Needs Review"
     if raw_status == "Missing":
         return "Missing Coverage"
-    if raw_status in ("Active", "Pending Active"):
+    if raw_status in ("Active", "Pending Active", "Current"):
         return "Current"
     if raw_status == "Expired":
         return "Expired"
     if raw_status in ("Missing Expiration Date", "Action Needed"):
         return "Needs Review"
-    if raw_status.startswith("Expiring in"):
+    if raw_status.startswith("Expiring in") or raw_status == "Expiring Soon":
         return "Expiring Soon"
     if raw_status in ("Superseded", "Canceled"):
         return "Expired"
+    if raw_status == "Needs Review":
+        return "Needs Review"
     return "Needs Review"  # safe fallback for unexpected values
 
 
