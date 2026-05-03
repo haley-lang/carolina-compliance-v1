@@ -140,6 +140,46 @@ def update_vendor_status(vendors_table, vendor_id, status):
     except Exception as e:
         logger.error("Failed to update vendor status: %s", e)
 
+
+def _rollup_vendor_compliance_from_assignments(vendor_id, assignments_table):
+    """Compute the vendor-level Compliance Status as the worst across all
+    active Vendor Client Assignments for this vendor.
+
+    Closes a gap in the modern compliance flow: evaluate_assignment writes
+    per-client decisions to the Vendor Client Assignments table but did not
+    previously propagate any decision to the vendor record's Compliance
+    Status field. The vendor record was therefore stuck at whatever earlier
+    writes (legacy validate_vendor path, or module_8b's cancellation flow)
+    had set — even after every active assignment was evaluated as
+    Matches Requirements.
+
+    Returns the worst status string (per _STATUS_PRIORITY) across active
+    assignments, or None if the vendor has no active assignments at all
+    (in which case the vendor record's Compliance Status is left untouched).
+    """
+    try:
+        all_assignments = assignments_table.all()
+    except Exception as exc:
+        logger.error("Failed to fetch assignments for vendor rollup: %s", exc)
+        return None
+
+    vendor_assignments = [
+        a for a in all_assignments
+        if a["fields"].get("Active")
+        and vendor_id in (a["fields"].get("Vendor Link") or [])
+    ]
+    if not vendor_assignments:
+        return None
+
+    worst = STATUS_COMPLIANT
+    for a in vendor_assignments:
+        s = a["fields"].get("Compliance Status")
+        if isinstance(s, dict):
+            s = s.get("name", "")
+        if s and _STATUS_PRIORITY.get(s, 0) > _STATUS_PRIORITY.get(worst, 0):
+            worst = s
+    return worst
+
 # Expiration Status field on Vendors table
 FLD_VENDOR_EXPIRATION_STATUS = "fldK61HV4dwDS5Kkb"
 # Expiration Status field on Insurance Policies table
@@ -286,12 +326,18 @@ RC_WOS_NOT_EVIDENCED                 = "WOS_NOT_EVIDENCED"
 RC_PNC_NOT_EVIDENCED                 = "PNC_NOT_EVIDENCED"
 RC_COVERAGE_GAP_DETECTED             = "COVERAGE_GAP_DETECTED"
 
-# Status priority (higher number = worse)
+# Status priority (higher number = worse). "Has Open Items" was added during
+# the TOS Section 2A vocab rename (replacing "Non-Compliant") but never made it
+# into this dict — the omission is benign for the legacy path's _worsen() use
+# (Has Open Items decisions are produced through different code paths) but
+# matters for the vendor rollup helper below, which compares assignment
+# statuses across clients.
 _STATUS_PRIORITY = {
     STATUS_COMPLIANT: 0,
     STATUS_NEEDS_REVIEW: 1,
-    STATUS_EXPIRED: 2,
-    STATUS_MISSING_COVERAGE: 3,
+    "Has Open Items": 2,
+    STATUS_EXPIRED: 3,
+    STATUS_MISSING_COVERAGE: 4,
 }
 
 DEFAULT_GRACE_PERIOD_DAYS = 30
@@ -955,6 +1001,18 @@ def run():
                     previous_decision=previous_decision,
                     failure_reasons=failure_reasons,
                 )
+
+            # After every assignment for this vendor has been evaluated,
+            # roll up the worst Compliance Status across all active
+            # assignments and write it to the vendor record. The legacy
+            # path at the bottom of this branch already calls
+            # update_vendor_status; the modern path was missing the
+            # equivalent step, leaving vendor.Compliance Status stale.
+            vendor_overall_status = _rollup_vendor_compliance_from_assignments(
+                vendor_id, assignments_table,
+            )
+            if vendor_overall_status:
+                update_vendor_status(vendors_table, vendor_id, vendor_overall_status)
         else:
             # Use legacy path
             client_id_legacy = vendor["fields"].get("Client Link", [None])[0]
