@@ -80,9 +80,9 @@ def fetch_unread_emails(server: IMAPClient) -> list[dict]:
     logger.info("Found %d unread email(s).", len(message_ids))
     upload_dir = Path(config.UPLOAD_DIR)
     upload_dir.mkdir(parents=True, exist_ok=True)
-    print(f"[email_monitor][path-debug] cwd={os.getcwd()}")
-    print(f"[email_monitor][path-debug] config.UPLOAD_DIR={config.UPLOAD_DIR!r}")
-    print(f"[email_monitor][path-debug] upload_dir.resolve()={upload_dir.resolve()}")
+    logger.info("[email_monitor][path-debug] cwd=%s", os.getcwd())
+    logger.info("[email_monitor][path-debug] config.UPLOAD_DIR=%r", config.UPLOAD_DIR)
+    logger.info("[email_monitor][path-debug] upload_dir.resolve()=%s", upload_dir.resolve())
 
     results = []
 
@@ -141,16 +141,30 @@ def fetch_unread_emails(server: IMAPClient) -> list[dict]:
                     counter += 1
 
                 try:
-                    dest.write_bytes(part.get_payload(decode=True))
+                    payload = part.get_payload(decode=True)
+                    payload_len = len(payload) if payload is not None else 0
+                    logger.info(
+                        "[email_monitor][write] About to write %d bytes to %s",
+                        payload_len, dest.resolve(),
+                    )
+                    dest.write_bytes(payload)
+                    exists = dest.exists()
+                    size = dest.stat().st_size if exists else None
+                    logger.info(
+                        "[email_monitor][write] Write completed. dest=%s exists=%s size=%s",
+                        dest.resolve(), exists, size,
+                    )
                     print(f"[email_monitor] Attachment saved: True ({dest})")
-                    print(f"[email_monitor][path-debug] dest.resolve()={dest.resolve()} exists={dest.exists()} size={dest.stat().st_size if dest.exists() else 'N/A'}")
-                    logger.info("Saved attachment: %s", dest)
                     saved_files.append(str(dest))
                 except Exception as e:
                     staging_status = "Failed"
                     save_error = str(e)
+                    logger.error(
+                        "[email_monitor][write] Write FAILED for %s: %s: %s",
+                        dest.resolve() if dest else "<unresolved>", type(e).__name__, e,
+                        exc_info=True,
+                    )
                     print(f"[email_monitor] Attachment saved: False ({dest})")
-                    logger.exception("Failed to save attachment: %s", dest)
 
             if not found_attachment:
                 print("[email_monitor] Attachment found: False")
