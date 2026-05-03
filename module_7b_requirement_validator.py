@@ -549,14 +549,22 @@ def _evaluate_line(req_fields, matching_policies, grace_days, insurance_policies
             # description_of_operations write and has an empty description.
             _latest_cert_id = cert_links[-1]
             try:
-                _certs_table = Api(AIRTABLE_API_KEY).table(AIRTABLE_BASE_ID, INSURANCE_CERTS_TABLE_ID)
-                _cert = _certs_table.get(_latest_cert_id)
-                _cf = _cert.get("fields", {}) if _cert else {}
-                desc_of_ops = (
-                    _cf.get("Description of Operations")
-                    or _cf.get("fldow02cj5ermE0aJ")
-                    or ""
+                # Read by field ID via raw REST. pyairtable 3.3.0 has no
+                # returnFieldsByFieldId option on Table.get(), and the
+                # Airtable display name for fldow02cj5ermE0aJ has drifted
+                # ("Descriptions of Operations" plural in production vs.
+                # "Description of Operations" singular in our writes), so
+                # name-keyed reads are unreliable. Field ID is stable.
+                import requests
+                _resp = requests.get(
+                    f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{INSURANCE_CERTS_TABLE_ID}/{_latest_cert_id}",
+                    headers={"Authorization": f"Bearer {AIRTABLE_API_KEY}"},
+                    params={"returnFieldsByFieldId": "true"},
+                    timeout=10,
                 )
+                _resp.raise_for_status()
+                _cf = _resp.json().get("fields", {})
+                desc_of_ops = _cf.get("fldow02cj5ermE0aJ") or ""
             except Exception as _desc_exc:
                 logger.warning("Description of Operations lookup failed for cert %s: %s",
                                _latest_cert_id, _desc_exc)
