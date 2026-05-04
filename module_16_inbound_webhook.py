@@ -86,10 +86,10 @@ def stripe_payment():
                 if hasattr(field, 'text') and field.text:
                     business_name = field.text.value
         price_to_plan = {
-            # Update these Price IDs from your Stripe dashboard
+            # Update these Price IDs from your Stripe dashboard.
+            # V1 ships 3 tiers only — Starter / Growth / Scale. Pro is dead.
             "price_starter": "Starter",
             "price_growth": "Growth",
-            "price_pro": "Pro",
             "price_scale": "Scale",
         }
         # Stripe webhooks do not include line_items in the session payload by default.
@@ -115,21 +115,27 @@ def stripe_payment():
 
         plan = price_to_plan.get(price_id)
         if not plan:
-            plan = {14900: "Starter", 39900: "Growth", 59900: "Pro", 79900: "Scale"}.get(session.amount_total, "Unknown Plan")
-            logger.warning("Plan detection fell back to amount-based matching. Amount: %s, Resolved: %s", session.amount_total, plan)
+            # 3-tier model only (Starter/Growth/Scale). If the amount doesn't
+            # match, leave plan as None — caller logs and writes nothing to
+            # Subscription Tier rather than guessing a wrong cap.
+            plan = {14900: "Starter", 39900: "Growth", 79900: "Scale"}.get(session.amount_total)
+            if plan:
+                logger.warning("Plan detection fell back to amount-based matching. Amount: %s, Resolved: %s", session.amount_total, plan)
+            else:
+                logger.error("Could not resolve subscription tier for session %s (price_id=%s, amount=%s) — leaving Subscription Tier blank", session_id, price_id, session.amount_total)
 
         amount = session.amount_total / 100 if session.amount_total else 0
 
         logger.info("New customer: %s (%s) — %s — $%.2f/mo", customer_name, customer_email, plan, amount)
         _send_owner_notification(customer_name, customer_email, customer_phone, business_name, plan, amount)
-        _create_airtable_client(customer_name, customer_email, business_name, amount)
+        _create_airtable_client(customer_name, customer_email, business_name, amount, plan)
         _send_welcome_email(customer_name, customer_email)
         _send_onboarding_email(customer_name, customer_email)
 
     return jsonify({"status": "ok"}), 200
 
 
-def _create_airtable_client(customer_name, customer_email, business_name, amount):
+def _create_airtable_client(customer_name, customer_email, business_name, amount, plan):
     """Create a new client record in Airtable after Stripe checkout completes."""
     try:
         if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
@@ -160,9 +166,15 @@ def _create_airtable_client(customer_name, customer_email, business_name, amount
             "fldCL7YwtBAG7slEd": "Active",                           # Client Status
             "flde7mzXePBqKBjGx": "Pending — Awaiting Reply",        # Requirements Status
         }
+        # Subscription Tier (single-select: Starter / Growth / Scale).
+        # Only write if we resolved a known tier; bulk_vendor_import enforces
+        # the cap on read, and a missing value will hard-fail there with a
+        # clear message rather than silently allowing an unbounded import.
+        if plan in {"Starter", "Growth", "Scale"}:
+            record_fields["fldXnhsv3ntup5Gpy"] = plan
 
         clients_table.create(record_fields)
-        logger.info("Created Airtable client record for %s", customer_email)
+        logger.info("Created Airtable client record for %s (tier=%s)", customer_email, plan)
 
     except Exception as e:
         logger.error("Failed to create Airtable client record for %s: %s", customer_email, e)
@@ -170,7 +182,7 @@ def _create_airtable_client(customer_name, customer_email, business_name, amount
 
 def _send_owner_notification(name, email, phone, business, plan, amount):
     import sendgrid
-    from sendgrid.helpers.mail import Mail
+    from sendgrid.helpers.mail import Mail, Email as SGEmail
     sg = sendgrid.SendGridAPIClient(api_key=SENDGRID_API_KEY)
     message = Mail(
         from_email=SENDER_EMAIL,
@@ -188,6 +200,7 @@ def _send_owner_notification(name, email, phone, business, plan, amount):
         <p>Next step: Add them manually in Softr at app.carolinacompliancesolutions.com</p>
         """
     )
+    message.reply_to = SGEmail(_cfg.reply_to_for("internal"))
     sg.send(message)
     logger.info("Owner notification sent for %s", email)
 
@@ -221,7 +234,7 @@ def _send_welcome_email(name, email):
         return
 
     import sendgrid
-    from sendgrid.helpers.mail import Mail
+    from sendgrid.helpers.mail import Mail, Email as SGEmail
     from legal_disclaimer import EMAIL_DISCLAIMER_HTML
     sg = sendgrid.SendGridAPIClient(api_key=SENDGRID_API_KEY)
 
@@ -270,6 +283,7 @@ def _send_welcome_email(name, email):
         subject=welcome_subject,
         html_content=build_email_html(welcome_subject, welcome_body_html),
     )
+    message.reply_to = SGEmail(_cfg.reply_to_for("client"))
     sg.send(message)
     _record_welcome_email_sent(email)
     logger.info("Welcome email sent to %s", email)
@@ -308,7 +322,7 @@ def _send_onboarding_email(name, email):
         subject=onboarding_subject,
         html_content=build_email_html(onboarding_subject, onboarding_body_html),
     )
-    message.reply_to = SGEmail(_cfg.INBOUND_EMAIL)
+    message.reply_to = SGEmail(_cfg.reply_to_for("client"))
 
     try:
         sg.send(message)

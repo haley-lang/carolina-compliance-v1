@@ -17,6 +17,7 @@ BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail, Email, To, Cc, Content
 from email_template import build_email_html
+import config as _cfg
 from airtable_constants import (
     TBL_EMAIL_QUEUE, EQ_PRIMARY_EMAIL, EQ_SUBJECT, EQ_BODY, EQ_CC_EMAILS,
     EQ_REMINDER_STATUS, EQ_SEND_AFTER, STATUS_QUEUED, STATUS_SENT, STATUS_FAILED,
@@ -29,6 +30,31 @@ LADDER_EQ_TYPES = {
     "Ladder Day 0", "Ladder Day 0 Retry",
     "Ladder Day 2", "Ladder Day 4",
     "Ladder Day 6 Approval Request",
+}
+
+# Audience routing for Reply-To. Drives config.reply_to_for(audience):
+#   vendor   -> INBOUND_EMAIL (replies feed the IMAP poller)
+#   client   -> OWNER_EMAIL   (Haley reads + responds personally)
+#   internal -> OWNER_EMAIL   (system→owner notifications)
+# Unknown / unmapped Email Type defaults to "internal" (safest — lands with Haley).
+EMAIL_TYPE_AUDIENCE = {
+    "Initial Request": "vendor",
+    "Deficiency Request": "vendor",
+    "reminder": "vendor",
+    "Ladder Day 0": "vendor",
+    "Ladder Day 0 Retry": "vendor",
+    "Ladder Day 2": "vendor",
+    "Ladder Day 4": "vendor",
+    "Ladder Day 6 Approval Request": "internal",
+    "Cancellation Alert": "client",
+    "Reinstatement Request": "vendor",
+    "Reinstatement Alert": "internal",
+    "Endorsement Alert": "internal",
+    "Bounce Alert": "internal",
+    "No Attachment Alert": "internal",
+    "Cloud Link Alert": "internal",
+    "Escalation Alert": "internal",
+    "Exception Alert": "client",
 }
 
 def send_queued_emails(api):
@@ -67,6 +93,8 @@ def send_queued_emails(api):
                 subject=subject,
             )
             mail.add_content(Content("text/html", html_body))
+            audience = EMAIL_TYPE_AUDIENCE.get(fields.get("Email Type"), "internal")
+            mail.reply_to = Email(_cfg.reply_to_for(audience))
             if cc_emails:
                 mail.personalizations[0].add_cc(cc_emails)
 

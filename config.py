@@ -20,6 +20,18 @@ OWNER_EMAIL = os.getenv("HALEY_EMAIL", "haley@carolinacompliancesolutions.com")
 FROM_EMAIL = os.getenv("SENDGRID_FROM_EMAIL", "compliance@carolinacompliancesolutions.com")
 INBOUND_EMAIL = os.getenv("INBOUND_EMAIL", "coi@carolinacompliancesolutions.com")
 
+
+def reply_to_for(audience: str) -> str:
+    """Pick the right Reply-To header per email audience.
+
+    vendor   → INBOUND_EMAIL (automated COI inbox; replies feed the IMAP poller)
+    client   → OWNER_EMAIL   (Haley reads + responds personally)
+    internal → OWNER_EMAIL   (system→owner notifications)
+    """
+    if audience == "vendor":
+        return INBOUND_EMAIL
+    return OWNER_EMAIL
+
 # Local storage
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploads")
 

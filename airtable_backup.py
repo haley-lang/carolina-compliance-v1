@@ -216,7 +216,7 @@ def send_summary_email(today_str: str, results: list, failures: list,
             subject=subject,
             plain_text_content=body + EMAIL_DISCLAIMER,
         )
-        message.reply_to = Email(config.INBOUND_EMAIL)
+        message.reply_to = Email(config.reply_to_for("internal"))
         sg.send(message)
         logger.info("Backup summary email sent to %s", config.OWNER_EMAIL)
     except Exception as e:

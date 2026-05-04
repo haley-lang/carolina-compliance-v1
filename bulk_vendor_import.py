@@ -22,6 +22,10 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
+# Subscription-tier vendor caps. Mirrors module_16 webhook tiers.
+# Pro is intentionally not present — V1 ships 3 tiers only.
+TIER_CAPS = {"Starter": 30, "Growth": 100, "Scale": 300}
+
 
 def get_client_record(api, client_name):
     table = api.table(config.AIRTABLE_BASE_ID, "Clients")
@@ -64,6 +68,49 @@ def import_vendors(client_name, csv_path):
     except Exception as e:
         logger.error("Failed to load assignments for dedup: %s", e)
         sys.exit(1)
+
+    # ── Subscription-tier cap enforcement (hard-fail) ─────────────────────
+    # Read the client's tier and refuse the whole import if existing+CSV
+    # would exceed it. Hard-fail (not partial) — partial imports leave the
+    # operator guessing which rows landed and which didn't.
+    tier = (
+        client["fields"].get("fldXnhsv3ntup5Gpy")  # Subscription Tier (field ID)
+        or client["fields"].get("Subscription Tier")
+    )
+    if not tier:
+        logger.error(
+            "Client %s has no Subscription Tier — refusing import. "
+            "Set tier on the Clients table (Starter / Growth / Scale) and retry.",
+            client_name,
+        )
+        sys.exit(1)
+    if tier not in TIER_CAPS:
+        logger.error(
+            "Client %s has unknown Subscription Tier '%s' — refusing import. "
+            "Allowed tiers: %s",
+            client_name, tier, ", ".join(sorted(TIER_CAPS.keys())),
+        )
+        sys.exit(1)
+    cap = TIER_CAPS[tier]
+    existing_count = len(existing_assigned_vendor_ids)
+    try:
+        with open(csv_path, newline="", encoding="utf-8") as _f:
+            csv_count = sum(1 for _ in csv.DictReader(_f))
+    except Exception as e:
+        logger.error("Failed to read CSV for cap pre-check: %s", e)
+        sys.exit(1)
+    projected = existing_count + csv_count
+    if projected > cap:
+        logger.error(
+            "Tier cap exceeded for %s — tier=%s cap=%d existing=%d csv_rows=%d projected=%d. "
+            "Refusing import. Upgrade the client's Subscription Tier or trim the CSV.",
+            client_name, tier, cap, existing_count, csv_count, projected,
+        )
+        sys.exit(1)
+    logger.info(
+        "Tier check OK for %s — tier=%s cap=%d existing=%d csv_rows=%d projected=%d",
+        client_name, tier, cap, existing_count, csv_count, projected,
+    )
 
     imported_names = []
     skipped_names = []
@@ -197,7 +244,7 @@ def _send_import_summary(client_name, imported_names, skipped_names, failed_name
             subject=subject,
             plain_text_content=body + EMAIL_DISCLAIMER,
         )
-        message.reply_to = Email(config.INBOUND_EMAIL)
+        message.reply_to = Email(config.reply_to_for("internal"))
         sg.send(message)
         logger.info("Import summary email sent to %s", to_email)
     except Exception as e:
