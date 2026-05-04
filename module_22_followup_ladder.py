@@ -362,6 +362,53 @@ def create_ladder(
     if cert_id:
         fields[FLD_CERTIFICATE_LINK] = [cert_id]
 
+    # ── Idempotency guard ───────────────────────────────────────────────
+    # Skip creation if an Active ladder of this type already exists for the
+    # same (vendor, client) pair. Without this check, every cron cycle that
+    # re-evaluates a persistently-noncompliant assignment spawns another
+    # ladder — observed live as 1232 ladders accumulating from ~8 stuck
+    # assignments before this guard was added.
+    #
+    # Filters Status + Ladder Type via Airtable formula (cheap, both are
+    # singleSelect). Vendor/Client matching is done in Python because
+    # FIND(record_id, ARRAYJOIN({Linked Field})) silently doesn't match —
+    # ARRAYJOIN on linked records returns primary-field text (vendor/client
+    # display names), not record IDs.
+    if vendor_id or client_id:
+        try:
+            existing_active = ladder_table.all(
+                formula=(
+                    f"AND("
+                    f"{{{FLD_STATUS}}} = '{STATUS_ACTIVE}', "
+                    f"{{{FLD_LADDER_TYPE}}} = '{ladder_type}'"
+                    f")"
+                )
+            )
+            for row in existing_active:
+                rf = row.get("fields", {})
+                row_vendors = rf.get("Vendor Link") or rf.get(FLD_VENDOR_LINK) or []
+                row_clients = rf.get("Client Link") or rf.get(FLD_CLIENT_LINK) or []
+                vendor_match = (not vendor_id) or (vendor_id in row_vendors)
+                client_match = (not client_id) or (client_id in row_clients)
+                if vendor_match and client_match:
+                    existing_id = row.get("id")
+                    existing_ladder_id = (
+                        rf.get("Ladder ID") or rf.get(FLD_LADDER_ID) or "?"
+                    )
+                    logger.info(
+                        "Skipping ladder creation — Active %s ladder already "
+                        "exists for vendor=%s client=%s, existing=%s (%s)",
+                        ladder_type, vendor_id, client_id,
+                        existing_id, existing_ladder_id,
+                    )
+                    return None
+        except Exception as exc:
+            logger.warning(
+                "Idempotency check failed for %s ladder vendor=%s client=%s: %s "
+                "— proceeding with create (may produce duplicate)",
+                ladder_type, vendor_id, client_id, exc,
+            )
+
     try:
         ladder_row = ladder_table.create(fields, typecast=True)
     except Exception as exc:
