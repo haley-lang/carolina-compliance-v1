@@ -15,7 +15,8 @@ Usage:
 import config as _cfg
 
 
-def build_email_html(subject: str, body_html: str, gc_company_name: str = None) -> str:
+def build_email_html(subject: str, body_html: str, gc_company_name: str = None,
+                     audience: str = "vendor") -> str:
     """Return a complete HTML email string with CCS branding.
 
     Parameters
@@ -28,7 +29,14 @@ def build_email_html(subject: str, body_html: str, gc_company_name: str = None) 
         If provided, a light-gray context bar is shown below the header:
         "[gc_company_name] uses Carolina Compliance Solutions to manage
         subcontractor insurance compliance."
+    audience : str
+        Drives which address shows in the footer/contact line. "vendor"
+        (default) → INBOUND_EMAIL — composing new mail lands at the COI
+        ingest mailbox (correct for vendors). "client" / "internal" →
+        OWNER_EMAIL so a client/owner reaches Haley directly instead of
+        the automated inbox.
     """
+    footer_email = _cfg.reply_to_for(audience)
 
     gc_bar = ""
     if gc_company_name:
@@ -112,7 +120,7 @@ font-size:15px;line-height:1.6;color:#333333;">
 <td style="background-color:#FFFFFF;padding:20px 30px 25px;text-align:center;
 font-family:Arial,sans-serif;font-size:12px;color:#999999;font-style:italic;">
 carolinacompliancesolutions.com &nbsp;|&nbsp;
-{_cfg.INBOUND_EMAIL} &nbsp;|&nbsp;
+{footer_email} &nbsp;|&nbsp;
 Gaston County, NC
 </td>
 </tr>

@@ -501,7 +501,7 @@ def handle_cancellation(extraction, vendor, client, email_queue_table,
                 f"We have contacted the vendor and their agency to request updated "
                 f"certificate documentation.\n\n"
                 f"Carolina Compliance Solutions\n"
-                f"{_cfg.INBOUND_EMAIL}"
+                f"{_cfg.OWNER_EMAIL}"
             )
         else:
             gc_body = (
@@ -513,7 +513,7 @@ def handle_cancellation(extraction, vendor, client, email_queue_table,
                 f"and their agency. We will notify you if updated documentation is not "
                 f"received before the effective date.\n\n"
                 f"Carolina Compliance Solutions\n"
-                f"{_cfg.INBOUND_EMAIL}"
+                f"{_cfg.OWNER_EMAIL}"
             )
 
         queue_email(
@@ -590,7 +590,7 @@ def check_cancellation_monitoring(extractions_table, email_queue_table, clients_
                     f"Cancellation effective date: {eff_raw}\n\n"
                     f"Please review accordingly and consult your insurance advisor.\n\n"
                     f"Carolina Compliance Solutions\n"
-                    f"{_cfg.INBOUND_EMAIL}"
+                    f"{_cfg.OWNER_EMAIL}"
                 ),
                 email_type="Cancellation Alert",
             )
@@ -630,7 +630,7 @@ def handle_endorsement(extraction, vendor, client, email_queue_table):
         email_queue_table,
         primary_email=HALEY_EMAIL,
         subject=_endorse_subject,
-        body=build_email_html(_endorse_subject, _plain_to_html(_endorse_body)),
+        body=build_email_html(_endorse_subject, _plain_to_html(_endorse_body), audience="internal"),
         email_type="Endorsement Alert",
         vendor_id=vendor["id"],
         client_id=client["id"],
@@ -700,7 +700,7 @@ def handle_reinstatement(extraction, vendor, client, email_queue_table,
         email_queue_table,
         primary_email=HALEY_EMAIL,
         subject=_reinstate_subject,
-        body=build_email_html(_reinstate_subject, _plain_to_html(_reinstate_body)),
+        body=build_email_html(_reinstate_subject, _plain_to_html(_reinstate_body), audience="internal"),
         email_type="Reinstatement Alert",
         vendor_id=vendor["id"],
         client_id=client["id"],

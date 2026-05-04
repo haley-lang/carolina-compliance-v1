@@ -281,7 +281,7 @@ def _send_welcome_email(name, email):
         from_email=SENDER_EMAIL,
         to_emails=email,
         subject=welcome_subject,
-        html_content=build_email_html(welcome_subject, welcome_body_html),
+        html_content=build_email_html(welcome_subject, welcome_body_html, audience="client"),
     )
     message.reply_to = SGEmail(_cfg.reply_to_for("client"))
     sg.send(message)
@@ -312,7 +312,7 @@ def _send_onboarding_email(name, email):
         "app.carolinacompliancesolutions.com</a></p>"
         "<p>If you have questions in the meantime, just reply to this email.</p>"
         "<p>Carolina Compliance Solutions<br>"
-        f"{_cfg.INBOUND_EMAIL}</p>"
+        f"{_cfg.OWNER_EMAIL}</p>"
         f"{EMAIL_DISCLAIMER_HTML}"
     )
 
@@ -320,7 +320,7 @@ def _send_onboarding_email(name, email):
         from_email=SGEmail(email=SENDER_EMAIL, name="Carolina Compliance Solutions"),
         to_emails=email,
         subject=onboarding_subject,
-        html_content=build_email_html(onboarding_subject, onboarding_body_html),
+        html_content=build_email_html(onboarding_subject, onboarding_body_html, audience="client"),
     )
     message.reply_to = SGEmail(_cfg.reply_to_for("client"))
 

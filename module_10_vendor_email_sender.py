@@ -79,13 +79,18 @@ def send_queued_emails(api):
             subject = fields[EQ_SUBJECT]
             raw_body = fields[EQ_BODY]
 
+            # Audience drives both Reply-To and the footer email rendered by
+            # build_email_html. Default to "internal" for unknown Email Types
+            # — safest landing zone (Haley) rather than the automated COI inbox.
+            audience = EMAIL_TYPE_AUDIENCE.get(fields.get("Email Type"), "internal")
+
             # If the body is already a full HTML email (from module_8b etc.),
             # send as-is; otherwise wrap plain text in the branded template.
             if raw_body.strip().startswith("<!DOCTYPE") or raw_body.strip().startswith("<html"):
                 html_body = raw_body
             else:
                 body_html = "<p>" + raw_body.replace("\n\n", "</p><p>").replace("\n", "<br>") + "</p>"
-                html_body = build_email_html(subject, body_html)
+                html_body = build_email_html(subject, body_html, audience=audience)
 
             mail = Mail(
                 from_email=from_email,
@@ -93,7 +98,6 @@ def send_queued_emails(api):
                 subject=subject,
             )
             mail.add_content(Content("text/html", html_body))
-            audience = EMAIL_TYPE_AUDIENCE.get(fields.get("Email Type"), "internal")
             mail.reply_to = Email(_cfg.reply_to_for(audience))
             if cc_emails:
                 mail.personalizations[0].add_cc(cc_emails)
