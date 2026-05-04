@@ -111,10 +111,38 @@ Rules:
 - Set policy_basis to "claims-made" if CLAIMS-MADE is checked, "occurrence" if OCCUR is checked, null if neither is clearly marked.
 - RETROACTIVE DATE: For claims-made policies, look for a retroactive date (often labeled "RETRO DATE" or "RET. DATE" near the claims-made checkbox). Return as retro_date in MM/DD/YYYY format. Return null if not visible.
 - TAIL COVERAGE: If the document mentions "extended reporting period", "tail coverage", "ERP", or similar language, set tail_coverage_evidenced to true. Otherwise set to false.
-- ENDORSEMENT CHECKBOXES: For each policy row on the ACORD form, check:
-  - additional_insured_checked: true if the "ADDL INSD" or "Additional Insured" checkbox/column is marked Y or checked for that row. false otherwise.
-  - waiver_of_subrogation_checked: true if the "SUBR WVD" or "Waiver of Subrogation" checkbox/column is marked Y or checked for that row. false otherwise.
-  - primary_noncontributory_checked: true if "Primary and Noncontributory" or "Primary/Non-Contributory" language appears in the description of operations referencing this policy type. false otherwise.
+- ENDORSEMENT CHECKBOXES (ADDL INSD and SUBR WVD columns):
+  These ACORD columns can contain "Y", "N", "N/A", "NA", a dash, blank, or
+  a marked/unmarked checkbox. The literal letter "N" means NO and is the
+  most common false-positive trap — read the actual character, do not infer
+  from cell non-emptiness.
+
+  - additional_insured_checked:
+      true  ONLY if the ADDL INSD cell for that row contains the literal
+            letter "Y", the word "Yes", a filled/marked checkbox in the
+            YES position, or an "X" in a single YES checkbox.
+      false in EVERY other case, including: "N", "n", "No", "N/A", "NA",
+            "n/a", a dash "-", blank/empty, an unmarked/empty checkbox,
+            or any value that is not an explicit YES.
+
+  - waiver_of_subrogation_checked:
+      true  ONLY if the SUBR WVD cell for that row contains the literal
+            letter "Y", the word "Yes", a filled/marked checkbox in the
+            YES position, or an "X" in a single YES checkbox.
+      false in EVERY other case, including: "N", "n", "No", "N/A", "NA",
+            "n/a", a dash "-", blank/empty, an unmarked/empty checkbox,
+            or any value that is not an explicit YES.
+
+  Examples:
+      ADDL INSD = "Y"   → additional_insured_checked: true
+      ADDL INSD = "N"   → additional_insured_checked: false  (NOT true)
+      ADDL INSD = "N/A" → additional_insured_checked: false
+      ADDL INSD = ""    → additional_insured_checked: false
+      SUBR WVD  = "N"   → waiver_of_subrogation_checked: false (NOT true)
+
+  - primary_noncontributory_checked: true if "Primary and Noncontributory"
+    or "Primary/Non-Contributory" language appears in the description of
+    operations referencing this policy type. false otherwise.
 - DESCRIPTION OF OPERATIONS: Extract the full text from the "DESCRIPTION OF OPERATIONS / LOCATIONS / VEHICLES" section at the bottom of the ACORD form. Return as description_of_operations at the top level. Return null if blank or not present.
 
 Return this exact JSON structure:
