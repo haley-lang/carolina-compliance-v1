@@ -51,28 +51,22 @@ def build_email_html(subject: str, body_html: str, gc_company_name: str = None,
             '</tr>'
         )
 
-    logo_svg = (
-        '<svg width="260" height="65" viewBox="0 0 320 80" fill="none" '
-        'xmlns="http://www.w3.org/2000/svg">'
-        '<path d="M34 4C34 4 12 12 10 14C10 14 8 16 8 22C8 38 14 58 34 68'
-        'C54 58 60 38 60 22C60 16 58 14 58 14C56 12 34 4 34 4Z" fill="#4A90D9"/>'
-        '<path d="M34 8C34 8 15 15 13.5 16.5C13.5 16.5 12 18 12 23C12 37 17.5 55 '
-        '34 64C50.5 55 56 37 56 23C56 18 54.5 16.5 54.5 16.5C53 15 34 8 34 8Z" '
-        'fill="#5A9FE8"/>'
-        '<path d="M34 13C34 13 18 19.5 17 20.5C17 20.5 16 22 16 26C16 38 20 53 '
-        '34 61C48 53 52 38 52 26C52 22 51 20.5 51 20.5C50 19.5 34 13 34 13Z" '
-        'fill="#4A90D9"/>'
-        '<polyline points="22,38 29,47 47,28" stroke="white" stroke-width="3.5" '
-        'stroke-linecap="round" stroke-linejoin="round" fill="none"/>'
-        '<text x="78" y="32" font-family="Georgia, serif" font-size="28" '
-        'font-weight="700" fill="white" letter-spacing="2">CAROLINA</text>'
-        '<text x="79" y="50" font-family="Arial, sans-serif" font-size="13" '
-        'font-weight="500" fill="#7BAFD4" letter-spacing="3">COMPLIANCE SOLUTIONS</text>'
-        '<line x1="79" y1="58" x2="310" y2="58" stroke="#2A5580" stroke-width="0.75"/>'
-        '<text x="79" y="72" font-family="Georgia, serif" font-size="11" '
-        'font-style="italic" fill="#7BAFD4" letter-spacing="0.5">'
-        'Less chasing. More building.</text>'
-        '</svg>'
+    # HTML-based header. SVG previously used here was being stripped/squashed
+    # by Gmail and Outlook, rendering the brand text as
+    # "CAROLINACOMPLIANCE SOLUTIONSLess chasing. More building." with no
+    # spacing. Plain HTML + table-based styling renders consistently across
+    # email clients.
+    header_html = (
+        '<td style="background-color:#1B3A5C;padding:28px 30px;text-align:center;">'
+        '<div style="font-family:Georgia,serif;font-size:24px;font-weight:700;'
+        'letter-spacing:3px;color:#FFFFFF;line-height:1.2;">'
+        'CAROLINA COMPLIANCE SOLUTIONS'
+        '</div>'
+        '<div style="font-family:Georgia,serif;font-size:13px;font-style:italic;'
+        'color:#7BAFD4;letter-spacing:1px;margin-top:10px;">'
+        'Less chasing. More building.'
+        '</div>'
+        '</td>'
     )
 
     return f"""\
@@ -97,9 +91,7 @@ def build_email_html(subject: str, body_html: str, gc_company_name: str = None,
        style="max-width:600px;width:100%;border-collapse:collapse;">
 <!-- Header -->
 <tr>
-<td style="background-color:#1B3A5C;padding:12px 30px;height:80px;vertical-align:middle;">
-{logo_svg}
-</td>
+{header_html}
 </tr>
 {gc_bar}
 <!-- Body -->

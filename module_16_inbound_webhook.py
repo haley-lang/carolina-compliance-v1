@@ -1,7 +1,7 @@
 """
 Module 16 — Stripe Webhook Service
 Handles checkout.session.completed events from Stripe to onboard new
-customers (Airtable client record + welcome/onboarding emails).
+customers (Airtable client record + single consolidated welcome email).
 
 Inbound COI mail is handled separately by email_monitor.py (IMAP polling
 of coi-intake@carolinacompliancesolutions.com). The previous SendGrid
@@ -129,8 +129,7 @@ def stripe_payment():
         logger.info("New customer: %s (%s) — %s — $%.2f/mo", customer_name, customer_email, plan, amount)
         _send_owner_notification(customer_name, customer_email, customer_phone, business_name, plan, amount)
         _create_airtable_client(customer_name, customer_email, business_name, amount, plan)
-        _send_welcome_email(customer_name, customer_email)
-        _send_onboarding_email(customer_name, customer_email)
+        _send_welcome_email(customer_name, customer_email, plan)
 
     return jsonify({"status": "ok"}), 200
 
@@ -227,7 +226,13 @@ def _record_welcome_email_sent(email: str) -> None:
         logger.warning("Failed to record welcome sent: %s", e)
 
 
-def _send_welcome_email(name, email):
+def _send_welcome_email(name, email, plan):
+    """Send the single consolidated welcome email after Stripe checkout.
+
+    Replaces the previous welcome + onboarding two-email flow. Takes the
+    Stripe-resolved plan ("Starter" / "Growth" / "Scale") and personalizes
+    the signup line; falls back to a no-tier line if plan is unknown.
+    """
     # Idempotency check: skip if welcome email already sent (Airtable lookup)
     if _has_welcome_been_sent_recently(email):
         logger.info("Welcome email already sent to %s — skipping.", email)
@@ -238,47 +243,99 @@ def _send_welcome_email(name, email):
     from legal_disclaimer import EMAIL_DISCLAIMER_HTML
     sg = sendgrid.SendGridAPIClient(api_key=SENDGRID_API_KEY)
 
-    welcome_subject = "You're in. Let's get your subs in line. 🏗️"
+    # First name from the Stripe customer name (split on first space).
+    # Stripe's "not provided" + empty string both fall back to no-name greeting.
+    first_name = ""
+    if name and name.strip() and name.strip().lower() not in {"there", "not provided"}:
+        first_name = name.strip().split(" ", 1)[0]
+
+    greeting = f"<p>Hi {first_name},</p>" if first_name else "<p>Hi,</p>"
+
+    if plan in {"Starter", "Growth", "Scale"}:
+        signup_line = (
+            f"<p>Welcome to Carolina Compliance Solutions. You just signed up for "
+            f"<strong>{plan}</strong> — thanks for trusting us with this.</p>"
+        )
+    else:
+        signup_line = (
+            "<p>Welcome to Carolina Compliance Solutions — thanks for trusting "
+            "us with this.</p>"
+        )
+
+    divider = '<hr style="border:none;border-top:1px solid #1B3A5C;margin:24px 0;">'
+
+    welcome_subject = "You're in — here's what happens next"
     welcome_body_html = (
-        f"<p>Hi {name},</p>"
-        "<p>Welcome to Carolina Compliance Solutions — and congratulations on "
-        "officially retiring your COI spreadsheet. It had a good run. "
-        "We'll take it from here.</p>"
-        "<p>Here's what happens next. Four steps. That's it.</p>"
-        "<p><strong>Step 1 — Send us your vendor list</strong><br>"
-        "Just reply to this email with your subcontractors — however you have "
-        "them. A list, a spreadsheet, a napkin photo. We'll get them loaded in.</p>"
-        "<p><strong>Step 2 — Forward your existing COIs</strong><br>"
-        "Got certificates already on file? Forward them to "
-        f"{_cfg.INBOUND_EMAIL}. Our system reads and tracks them "
-        "automatically.</p>"
-        "<p><strong>Step 3 — Log into your dashboard</strong><br>"
-        'Head to <a href="https://app.carolinacompliancesolutions.com">'
-        "app.carolinacompliancesolutions.com</a>. Your compliance dashboard is ready.</p>"
-        "<p><strong>Step 4 — Tell us your requirements</strong><br>"
-        "Reply to this email with the insurance minimums you require from your "
-        "subcontractors:</p>"
-        "<ul>"
-        "<li>General Liability (GL) — required? If yes, minimum limit?</li>"
-        "<li>Auto Liability (AL) — required? If yes, minimum limit?</li>"
-        "<li>Workers Compensation (WC) — required yes or no?</li>"
-        "<li>Additional Insured (AI) — required yes or no?</li>"
-        "<li>Waiver of Subrogation (WOS) — required yes or no?</li>"
-        "</ul>"
-        "<p>We'll load your requirements into the system within 1 business day.</p>"
-        "<p>That's it. No more chasing your electrician for his certificate. "
-        "No more wondering if your framer's workers' comp lapsed mid-project. "
-        "We track it so you don't have to.</p>"
-        "<p>Reply to this email anytime with questions.</p>"
-        "<p>Welcome aboard,<br>"
-        "<strong>The Carolina Compliance Team</strong><br>"
-        "carolinacompliancesolutions.com</p>"
-        "<p><em>P.S. Your electrician already needs a reminder. We're on it.</em></p>"
-        f"{EMAIL_DISCLAIMER_HTML}"
+        greeting
+        + signup_line
+        + "<p>Here's the short version of what we do: <strong>we chase your "
+          "subs for their certificates so you don't have to.</strong> Once we "
+          "know who your subs are and what coverage you require, we handle "
+          "the COI requests, the expiration tracking, the renewal follow-ups. "
+          "You see the results in one dashboard.</p>"
+        + "<p>To get started, I need two things from you. The faster you send "
+          "these, the faster the system kicks in for you.</p>"
+        + "<p><strong>1. Your subcontractor list</strong></p>"
+        + "<p>Reply to this email with however you have it — a spreadsheet or "
+          "a list typed in the email body. For each sub, the most useful "
+          "info is:</p>"
+        + "<ul>"
+          "<li>Company name</li>"
+          "<li>Email address (the one that actually handles their COIs — "
+          "sometimes that's the office, sometimes the owner, sometimes their "
+          "insurance agent)</li>"
+          "<li>Phone (optional, but helpful if email bounces)</li>"
+          "</ul>"
+        + "<p>If you already have COIs on file for some of your subs, forward "
+          "those PDFs to <strong>coi@carolinacompliancesolutions.com</strong> "
+          "and we'll process them automatically. No need to organize them — "
+          "just forward.</p>"
+        + "<p><strong>2. Your insurance requirements</strong></p>"
+        + "<p>Reply to this email and tell me what you require from your "
+          "subs. The basics:</p>"
+        + "<ul>"
+          "<li>General Liability — required? If yes, what minimum limit?</li>"
+          "<li>Workers Compensation — required?</li>"
+          "<li>Auto Liability — required? If yes, what minimum limit?</li>"
+          "<li>Additional Insured endorsement — required?</li>"
+          "<li>Waiver of Subrogation — required?</li>"
+          "</ul>"
+        + "<p>If you have a written requirements document or contract "
+          "template, attach it instead — I'll pull what I need.</p>"
+        + divider
+        + "<p><strong>Once I have those, here's what happens:</strong></p>"
+        + "<ul>"
+          "<li>Within 1 business day, COI request emails start going out to "
+          "your subs automatically</li>"
+          "<li>As they reply with certificates, our system extracts the "
+          "policy details and evaluates compliance against your requirements</li>"
+          "<li>If a sub's coverage doesn't match what you require, we send "
+          "them a follow-up. If they don't respond, we keep following up.</li>"
+          "<li>You can log in to "
+          "<strong><a href=\"https://app.carolinacompliancesolutions.com\">"
+          "app.carolinacompliancesolutions.com</a></strong> to see the status "
+          "of every sub at any time</li>"
+          "<li>Whenever you need to know which subs have current "
+          "documentation on file and which don't, the answer is one click "
+          "away</li>"
+          "</ul>"
+        + divider
+        + "<p><strong>Something to know:</strong></p>"
+        + "<p>You're going to hear from me directly. Not a ticket queue, not "
+          "a chatbot. I'm Haley — I built this and I run it. When you reply "
+          "to this email, I read it. When you have a question, I answer it.</p>"
+        + "<p>Reply with your sub list and requirements whenever you're "
+          "ready. If you have questions first, those are welcome too.</p>"
+        + "<p>Talk soon,</p>"
+        + "<p>Haley Bridges<br>"
+          "Founder, Carolina Compliance Solutions<br>"
+          f"{_cfg.OWNER_EMAIL}<br>"
+          "carolinacompliancesolutions.com</p>"
+        + EMAIL_DISCLAIMER_HTML
     )
 
     message = Mail(
-        from_email=SENDER_EMAIL,
+        from_email=SGEmail(email=SENDER_EMAIL, name="Carolina Compliance Solutions"),
         to_emails=email,
         subject=welcome_subject,
         html_content=build_email_html(welcome_subject, welcome_body_html, audience="client"),
@@ -286,49 +343,7 @@ def _send_welcome_email(name, email):
     message.reply_to = SGEmail(_cfg.reply_to_for("client"))
     sg.send(message)
     _record_welcome_email_sent(email)
-    logger.info("Welcome email sent to %s", email)
-
-
-def _send_onboarding_email(name, email):
-    """Send the 'what happens next' onboarding email immediately after welcome."""
-    import sendgrid
-    from sendgrid.helpers.mail import Mail, Email as SGEmail
-    from legal_disclaimer import EMAIL_DISCLAIMER_HTML
-
-    sg = sendgrid.SendGridAPIClient(api_key=SENDGRID_API_KEY)
-
-    onboarding_subject = "What happens next — Carolina Compliance Solutions"
-    onboarding_body_html = (
-        f"<p>Hi {name},</p>"
-        "<p>Welcome to Carolina Compliance Solutions. Here's what happens next:</p>"
-        "<p><strong>1.</strong> We'll reach out within 24 hours to collect your "
-        "subcontractor insurance requirements — things like coverage types, minimum "
-        "limits, and any endorsements your contracts require.</p>"
-        "<p><strong>2.</strong> Once we have your requirements confirmed, we'll contact "
-        "your subcontractors automatically and start collecting their certificates.</p>"
-        "<p><strong>3.</strong> You can log into your compliance portal any time to see "
-        "the status of every subcontractor:<br>"
-        '<a href="https://app.carolinacompliancesolutions.com">'
-        "app.carolinacompliancesolutions.com</a></p>"
-        "<p>If you have questions in the meantime, just reply to this email.</p>"
-        "<p>Carolina Compliance Solutions<br>"
-        f"{_cfg.OWNER_EMAIL}</p>"
-        f"{EMAIL_DISCLAIMER_HTML}"
-    )
-
-    message = Mail(
-        from_email=SGEmail(email=SENDER_EMAIL, name="Carolina Compliance Solutions"),
-        to_emails=email,
-        subject=onboarding_subject,
-        html_content=build_email_html(onboarding_subject, onboarding_body_html, audience="client"),
-    )
-    message.reply_to = SGEmail(_cfg.reply_to_for("client"))
-
-    try:
-        sg.send(message)
-        logger.info("Onboarding email sent to %s", email)
-    except Exception as e:
-        logger.error("Failed to send onboarding email to %s: %s", email, e)
+    logger.info("Welcome email sent to %s (tier=%s)", email, plan)
 
 
 if __name__ == "__main__":
