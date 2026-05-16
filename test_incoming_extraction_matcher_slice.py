@@ -13,7 +13,6 @@ from incoming_extraction_matcher_slice import (
     REASON_NO_CANDIDATE_FOUND,
     RULE_C1_CERTIFICATE_HOLDER_CLIENT_EXACT,
     RULE_R1_SINGLE_OPEN_REQUEST,
-    RULE_V1_POLICY_NUMBER_VENDOR_EXACT,
     RULE_V2_NAMED_INSURED_VENDOR_EXACT,
     MatchEvaluation,
     apply_incoming_extraction_match_update,
@@ -120,63 +119,6 @@ class TestIncomingExtractionMatcherSlice(unittest.TestCase):
         ]
 
         result = evaluate_vendor_match(extraction_fields, vendors)
-        self.assertEqual(result.match_status, MATCH_STATUS_MATCHED)
-        self.assertEqual(result.matched_vendor_id, "ven_1")
-        self.assertEqual(result.applied_rule_id, RULE_V2_NAMED_INSURED_VENDOR_EXACT)
-
-    def test_policy_number_vendor_exact_has_highest_priority(self):
-        extraction_fields = {
-            "Named Insured": "Conflicting Vendor Name",
-            "Policy Number": "ABC-123",
-            "Policy Number Confidence": 0.95,
-        }
-        vendors = [
-            {"id": "ven_name", "fields": {"Vendor Name": "Conflicting Vendor Name"}},
-            {"id": "ven_policy", "fields": {"Vendor Name": "Different Vendor"}},
-        ]
-        policies = [
-            {
-                "id": "pol_1",
-                "fields": {
-                    "Policy Number": "ABC-123",
-                    "Vendor": ["ven_policy"],
-                },
-            }
-        ]
-
-        result = evaluate_vendor_match(
-            extraction_fields,
-            vendors,
-            policy_records=policies,
-        )
-
-        self.assertEqual(result.match_status, MATCH_STATUS_MATCHED)
-        self.assertEqual(result.matched_vendor_id, "ven_policy")
-        self.assertEqual(result.applied_rule_id, RULE_V1_POLICY_NUMBER_VENDOR_EXACT)
-
-    def test_policy_number_low_confidence_does_not_match_and_falls_back_to_named_insured(self):
-        extraction_fields = {
-            "Named Insured": "Acme LLC",
-            "Policy Number": "ABC-123",
-            "Policy Number Confidence": 0.40,
-        }
-        vendors = [{"id": "ven_1", "fields": {"Vendor Name": "Acme LLC"}}]
-        policies = [
-            {
-                "id": "pol_1",
-                "fields": {
-                    "Policy Number": "ABC-123",
-                    "Vendor": ["ven_x"],
-                },
-            }
-        ]
-
-        result = evaluate_vendor_match(
-            extraction_fields,
-            vendors,
-            policy_records=policies,
-        )
-
         self.assertEqual(result.match_status, MATCH_STATUS_MATCHED)
         self.assertEqual(result.matched_vendor_id, "ven_1")
         self.assertEqual(result.applied_rule_id, RULE_V2_NAMED_INSURED_VENDOR_EXACT)

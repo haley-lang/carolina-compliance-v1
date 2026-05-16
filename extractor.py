@@ -144,6 +144,15 @@ Rules:
     or "Primary/Non-Contributory" language appears in the description of
     operations referencing this policy type. false otherwise.
 - DESCRIPTION OF OPERATIONS: Extract the full text from the "DESCRIPTION OF OPERATIONS / LOCATIONS / VEHICLES" section at the bottom of the ACORD form. Return as description_of_operations at the top level. Return null if blank or not present.
+- CONFIDENCE: After extracting all fields, return an overall confidence score
+  as a single top-level "confidence" field, a float between 0.0 and 1.0 with
+  two decimals. Reflect your own certainty that the extracted values are
+  correct based on document legibility, field completeness, and any
+  ambiguity you encountered. 1.0 = the document was clean and every requested
+  field was clearly visible. Values below 0.85 indicate this extraction
+  should be human-reviewed before downstream use. Do NOT inflate;
+  conservative scoring is preferred. If the document was unreadable or no
+  ACORD form was present, return 0.0.
 
 Return this exact JSON structure:
 {
@@ -153,6 +162,7 @@ Return this exact JSON structure:
   "certificate_date": "<string or null>",
   "contact_emails": ["<email>"],
   "description_of_operations": "<string or null>",
+  "confidence": <float between 0.0 and 1.0>,
   "policies": [
     {
       "policy_type": "<string or null>",
@@ -751,7 +761,7 @@ def _process_single_file(file_path: Path) -> dict:
                     "description_of_operations": None,
                     "policies": [],
                     "_page_map": page_map,
-                    "_extraction_confidence": 0,
+                    "confidence": 0.0,
                     "_triage_reason": "No ACORD 25 certificate page identified in document",
                 }
                 save_extraction(triage_data, file_path)

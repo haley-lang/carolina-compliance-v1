@@ -38,7 +38,6 @@ FLD_DOC_STATUS           = "fldIQxRQiAcc6tD6Z"
 FLD_DOC_SENDER_EMAIL     = "fld4ycFJuXpRCSGMd"
 
 # Incoming Extractions
-FLD_EXT_CONFIDENCE       = "fldMid4vBOWoiMHrT"
 FLD_EXT_DUPLICATE_OF     = "fldYmU49onpvXabJi"
 FLD_EXT_PROC_STATUS      = "fld4KqSQEX32Zenut"
 FLD_EXT_NAMED_INSURED    = "fld4X90MLBQIqTNTn"
@@ -72,7 +71,6 @@ TRIAGE_ESCALATION_HOURS = 48
 MAX_ATTACHMENT_SIZE_MB = 10.0
 SUPPORTED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".tif"}
 DUPLICATE_WINDOW_DAYS = 30
-MIN_EXTRACTION_CONFIDENCE = 60
 
 import config as _cfg
 OWNER_EMAIL = _cfg.OWNER_EMAIL
@@ -414,73 +412,6 @@ def handle_cloud_link(
         doc_table, doc_record_id,
         f"Cloud link submission from {sender_display}. Links: {links_text[:200]}"
     )
-
-
-# ── 4. OCR confidence scoring ────────────────────────────────────────────────
-
-def score_extraction_confidence(extracted_data: dict) -> int:
-    """Score extraction completeness. Returns 0-100.
-
-    20 points each for:
-    - Named insured present
-    - At least one policy number
-    - At least one expiration date
-    - At least one policy type
-    - Certificate holder present
-    """
-    score = 0
-
-    if (extracted_data.get("named_insured") or "").strip():
-        score += 20
-
-    if (extracted_data.get("certificate_holder") or "").strip():
-        score += 20
-
-    policies = extracted_data.get("policies") or []
-    has_policy_number = any((p.get("policy_number") or "").strip() for p in policies)
-    has_expiration = any((p.get("expiration_date") or "").strip() for p in policies)
-    has_policy_type = any((p.get("policy_type") or "").strip() for p in policies)
-
-    if has_policy_number:
-        score += 20
-    if has_expiration:
-        score += 20
-    if has_policy_type:
-        score += 20
-
-    return score
-
-
-def write_extraction_confidence(extractions_table, record_id: str, score: int):
-    """Write extraction confidence score to the record."""
-    try:
-        extractions_table.update(record_id, {
-            FLD_EXT_CONFIDENCE: score,
-        })
-    except Exception as exc:
-        logger.warning("Failed to write extraction confidence: %s", exc)
-
-
-def gate_low_confidence(
-    extractions_table, record_id: str, score: int,
-    email_queue_table, sender_email: str,
-):
-    """If confidence below threshold, set to Low Confidence and alert GC."""
-    if score >= MIN_EXTRACTION_CONFIDENCE:
-        return False
-
-    try:
-        extractions_table.update(record_id, {
-            FLD_EXT_PROC_STATUS: "Low Confidence",
-            FLD_EXT_CONFIDENCE: score,
-        }, typecast=True)
-    except Exception as exc:
-        logger.error("Failed to set Low Confidence status: %s", exc)
-
-    # Low confidence → no email, just route to dashboard for internal review
-    logger.info("Extraction %s gated at confidence %d (threshold %d) — routed to dashboard",
-                record_id, score, MIN_EXTRACTION_CONFIDENCE)
-    return True
 
 
 # ── 5. Large attachment gating ───────────────────────────────────────────────

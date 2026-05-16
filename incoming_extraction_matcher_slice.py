@@ -58,15 +58,12 @@ ALLOWED_INCOMING_EXTRACTIONS_FIELDS: Set[str] = {
     FLD_MATCH_CONFIDENCE,
 }
 
-RULE_V1_POLICY_NUMBER_VENDOR_EXACT = "V1_POLICY_NUMBER_VENDOR_EXACT"
 RULE_V2_NAMED_INSURED_VENDOR_EXACT = "V2_NAMED_INSURED_VENDOR_EXACT"
 RULE_V3_DBA_NAME_MATCH = "V3_DBA_NAME_MATCH"
 RULE_V4_FUZZY_NAME_MATCH = "V4_FUZZY_NAME_MATCH"
 RULE_V5_BROKER_EMAIL_MATCH = "V5_BROKER_EMAIL_MATCH"
 RULE_C1_CERTIFICATE_HOLDER_CLIENT_EXACT = "C1_CERTIFICATE_HOLDER_CLIENT_EXACT"
 RULE_R1_SINGLE_OPEN_REQUEST = "R1_SINGLE_OPEN_REQUEST"
-
-HIGH_CONFIDENCE_THRESHOLD = 0.90
 
 # Fuzzy match thresholds
 FUZZY_AUTO_MATCH_THRESHOLD = 85
@@ -202,134 +199,6 @@ def _parse_linked_ids(value: Any) -> List[str]:
     if isinstance(value, str) and value:
         return [value]
     return []
-
-
-def _extract_policy_number_candidates(extraction_fields: Dict[str, Any]) -> List[str]:
-    candidates: List[str] = []
-
-    policy_number_value = extraction_fields.get("Policy Number")
-    policy_number_confidence = _as_float(
-        extraction_fields.get("Policy Number Confidence")
-        or extraction_fields.get("policy_number_confidence")
-    )
-
-    if isinstance(policy_number_value, dict):
-        nested_value = normalize_match_text(
-            policy_number_value.get("value") or policy_number_value.get("policy_number")
-        )
-        nested_confidence = _as_float(policy_number_value.get("confidence"))
-        if (
-            nested_value
-            and _is_non_partial_exact_value(nested_value)
-            and nested_confidence is not None
-            and nested_confidence >= HIGH_CONFIDENCE_THRESHOLD
-        ):
-            candidates.append(nested_value)
-    else:
-        normalized_policy_number = normalize_match_text(policy_number_value)
-        if (
-            normalized_policy_number
-            and _is_non_partial_exact_value(normalized_policy_number)
-            and policy_number_confidence is not None
-            and policy_number_confidence >= HIGH_CONFIDENCE_THRESHOLD
-        ):
-            candidates.append(normalized_policy_number)
-
-    policies_value = extraction_fields.get("Policies")
-    if isinstance(policies_value, list):
-        for policy_item in policies_value:
-            if not isinstance(policy_item, dict):
-                continue
-            normalized_policy_number = normalize_match_text(
-                policy_item.get("policy_number") or policy_item.get("Policy Number")
-            )
-            confidence = _as_float(
-                policy_item.get("confidence")
-                or policy_item.get("policy_number_confidence")
-                or policy_item.get("Policy Number Confidence")
-            )
-            if (
-                normalized_policy_number
-                and _is_non_partial_exact_value(normalized_policy_number)
-                and confidence is not None
-                and confidence >= HIGH_CONFIDENCE_THRESHOLD
-            ):
-                candidates.append(normalized_policy_number)
-
-    return list(dict.fromkeys(candidates))
-
-
-def _resolve_vendor_by_policy_number(
-    extraction_fields: Dict[str, Any],
-    policy_records: Iterable[Dict[str, Any]],
-) -> MatchEvaluation:
-    policy_number_candidates = _extract_policy_number_candidates(extraction_fields)
-    if not policy_number_candidates:
-        return MatchEvaluation(
-            match_status=MATCH_STATUS_PENDING,
-            match_reason_code=REASON_NO_CANDIDATE_FOUND,
-            matched_vendor_id=None,
-            matched_client_id=None,
-            matched_request_id=None,
-            applied_rule_id=None,
-        )
-
-    matched_vendor_ids: List[str] = []
-    for policy_record in policy_records:
-        policy_fields = policy_record.get("fields")
-        if not isinstance(policy_fields, dict):
-            return MatchEvaluation(
-                match_status=MATCH_STATUS_ERROR,
-                match_reason_code=REASON_INVALID_REFERENCED_ID,
-                matched_vendor_id=None,
-                matched_client_id=None,
-                matched_request_id=None,
-                applied_rule_id=None,
-            )
-
-        normalized_policy_number = normalize_match_text(policy_fields.get("Policy Number"))
-        if not _is_non_partial_exact_value(normalized_policy_number):
-            continue
-        if normalized_policy_number not in policy_number_candidates:
-            continue
-
-        vendor_ids = _parse_linked_ids(
-            policy_fields.get("Vendor")
-            or policy_fields.get("Vendor Link")
-            or policy_fields.get("Vendors")
-        )
-        matched_vendor_ids.extend(vendor_ids)
-
-    unique_vendor_ids = list(dict.fromkeys(matched_vendor_ids))
-    if len(unique_vendor_ids) == 1:
-        return MatchEvaluation(
-            match_status=MATCH_STATUS_MATCHED,
-            match_reason_code=None,
-            matched_vendor_id=unique_vendor_ids[0],
-            matched_client_id=None,
-            matched_request_id=None,
-            applied_rule_id=RULE_V1_POLICY_NUMBER_VENDOR_EXACT,
-            match_method="exact", match_confidence=100,
-        )
-
-    if len(unique_vendor_ids) > 1:
-        return MatchEvaluation(
-            match_status=MATCH_STATUS_PENDING,
-            match_reason_code=REASON_AMBIGUOUS_VENDOR,
-            matched_vendor_id=None,
-            matched_client_id=None,
-            matched_request_id=None,
-            applied_rule_id=None,
-        )
-
-    return MatchEvaluation(
-        match_status=MATCH_STATUS_PENDING,
-        match_reason_code=REASON_NO_CANDIDATE_FOUND,
-        matched_vendor_id=None,
-        matched_client_id=None,
-        matched_request_id=None,
-        applied_rule_id=None,
-    )
 
 
 def _resolve_vendor_by_named_insured(
@@ -809,7 +678,6 @@ def _resolve_request_for_vendor_and_client(
 def evaluate_vendor_match(
     extraction_fields: Dict[str, Any],
     vendor_records: Iterable[Dict[str, Any]],
-    policy_records: Optional[Iterable[Dict[str, Any]]] = None,
     client_records: Optional[Iterable[Dict[str, Any]]] = None,
     request_records: Optional[Iterable[Dict[str, Any]]] = None,
 ) -> MatchEvaluation:
@@ -831,25 +699,12 @@ def evaluate_vendor_match(
                 extraction_fields = dict(extraction_fields)
                 extraction_fields["Named Insured"] = cleaned
 
-        # ── Step 1: Policy number exact match ────────────────────────────────
-        vendor_eval = MatchEvaluation(
-            match_status=MATCH_STATUS_PENDING,
-            match_reason_code=REASON_NO_CANDIDATE_FOUND,
-            matched_vendor_id=None, matched_client_id=None,
-            matched_request_id=None, applied_rule_id=None,
-        )
-
-        if policy_records is not None:
-            vendor_eval = _resolve_vendor_by_policy_number(extraction_fields, policy_records)
-            if vendor_eval.match_status == MATCH_STATUS_MATCHED and vendor_eval.matched_vendor_id:
-                pass
-            elif vendor_eval.match_reason_code == REASON_AMBIGUOUS_VENDOR:
-                return vendor_eval
-            else:
-                # ── Step 2: Named insured exact / alias match ────────────────
-                vendor_eval = _resolve_vendor_by_named_insured(extraction_fields, vendor_list)
-        else:
-            vendor_eval = _resolve_vendor_by_named_insured(extraction_fields, vendor_list)
+        # ── Step 1 (V1 policy-number match) — removed in 1A cleanup ──────────
+        # V1 was confidence-gated on the never-populated "Policy Number
+        # Confidence" field and so never fired in production. Matching now
+        # starts at V2 (named insured / alias).
+        # ── Step 2: Named insured exact / alias match ────────────────────────
+        vendor_eval = _resolve_vendor_by_named_insured(extraction_fields, vendor_list)
 
         # ── Step 3: DBA name match ───────────────────────────────────────────
         if vendor_eval.match_status != MATCH_STATUS_MATCHED or not vendor_eval.matched_vendor_id:

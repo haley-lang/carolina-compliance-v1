@@ -114,6 +114,16 @@ def build_fields(source_filename: str, data: dict, raw_json: str) -> dict:
     policies = data.get("policies") or []
     policies_count = len(policies) if isinstance(policies, list) else 0
 
+    # Defensive: only write confidence if Claude returned a numeric value.
+    # Malformed/missing responses write null rather than crash the import.
+    # bool is a subclass of int, so explicitly exclude it.
+    raw_confidence = data.get("confidence")
+    confidence_value = (
+        float(raw_confidence)
+        if isinstance(raw_confidence, (int, float)) and not isinstance(raw_confidence, bool)
+        else None
+    )
+
     return {
         "Source Filename": source_filename,
         "Document Type": data.get("document_type") or "",
@@ -124,6 +134,7 @@ def build_fields(source_filename: str, data: dict, raw_json: str) -> dict:
         "Raw JSON": raw_json,
         "Extraction Processed At": datetime.now(timezone.utc).isoformat(),
         "Processing Status": "Imported",
+        "Confidence Score": confidence_value,
     }
 
 

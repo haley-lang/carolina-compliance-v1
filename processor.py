@@ -1762,14 +1762,12 @@ def _process_single_extraction(extraction, tables, base_id=""):
 
     # ── Matcher integration: evaluate and write Incoming Extractions match fields ──
     vendor_records = tables[TABLE_VENDORS].all()
-    policy_records = tables[TABLE_POLICIES].all()
     client_records = tables[TABLE_CLIENTS].all()
     request_records = tables[TABLE_REQUESTS].all()
 
     match_evaluation = evaluate_vendor_match(
         extraction_fields=extraction_fields,
         vendor_records=vendor_records,
-        policy_records=policy_records,
         client_records=client_records,
         request_records=request_records,
     )
