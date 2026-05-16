@@ -47,3 +47,20 @@ def create_document_record(
     record = get_table().create(fields)
     logger.info("Airtable record created — ID: %s", record["id"])
     return record
+
+
+def update_document_pdf_r2_key(record_id: str, r2_keys: str) -> dict:
+    """Patch an Incoming Documents record with the R2 key(s) for its
+    attachment(s). Pass a comma-separated string if multiple attachments.
+
+    Used by email_monitor.py as the second half of the two-step write
+    pattern: create record → upload to R2 with record_id in key → patch
+    record with the resulting key(s).
+
+    Raises whatever pyairtable raises on update failure. Caller is
+    responsible for catching + logging so intake doesn't unwind.
+    """
+    record = get_table().update(record_id, {"PDF R2 Key": r2_keys})
+    logger.info("Patched record %s with PDF R2 Key (%d key(s))",
+                record_id, len(r2_keys.split(",")))
+    return record

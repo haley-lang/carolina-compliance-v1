@@ -10,8 +10,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import config
+import time
 from utils import safe_filename, parse_email_date
-from airtable_client import create_document_record, get_table
+from airtable_client import (
+    create_document_record, get_table, update_document_pdf_r2_key,
+)
 from email_classifier import (
     classify_email, write_classification_to_airtable, SKIP_EVENTS,
     EVENT_BOUNCE, EVENT_AUTO_REPLY, EVENT_CLOUD_LINK, _extract_body_text,
@@ -20,8 +23,41 @@ from operational_email_handler import (
     handle_bounce, handle_cloud_link, handle_no_attachment,
     gate_oversize_attachment, gate_unsupported_type, check_attachment_size,
 )
+from r2_storage import get_r2_client, upload_file_to_r2
 print("EMAIL MONITOR STARTED")
 logger = logging.getLogger(__name__)
+
+
+def _cleanup_old_uploads(upload_dir: Path, max_age_seconds: int = 24 * 60 * 60) -> int:
+    """Delete files in upload_dir older than max_age_seconds. Returns count deleted.
+
+    Skips dotfiles (e.g. .gitkeep) and subdirectories. Permission errors are
+    logged + skipped rather than raised — one un-deletable file should not
+    abort the rest of the cleanup.
+
+    Safe to call at the top of every cron-imap-poll cycle: by the time a file
+    is 24h old, the extractor has consumed it in a prior cycle and the
+    canonical copy lives in R2 (modulo the failure modes documented in
+    backlog_r2_upload_retry_before_cleanup memory).
+    """
+    if not upload_dir.exists():
+        return 0
+    cutoff = time.time() - max_age_seconds
+    deleted = 0
+    for f in upload_dir.iterdir():
+        if not f.is_file() or f.name.startswith("."):
+            continue
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+                deleted += 1
+                logger.info("[uploads-cleanup] deleted %s", f.name)
+        except OSError as e:
+            logger.warning("[uploads-cleanup] could not delete %s: %s", f.name, e)
+    if deleted:
+        logger.info("[uploads-cleanup] removed %d file(s) older than %dh",
+                    deleted, max_age_seconds // 3600)
+    return deleted
 
 
 def decode_mime_words(value: str) -> str:
@@ -196,6 +232,15 @@ def fetch_unread_emails(server: IMAPClient) -> list[dict]:
 if __name__ == "__main__":
     server = None
     try:
+        # ── 24-hour uploads/ cleanup (runs once per cron cycle) ─────────
+        _cleanup_old_uploads(Path(config.UPLOAD_DIR))
+
+        # ── R2 client (built once; reused across all emails this cycle) ─
+        # If env vars are missing, get_r2_client() logs a warning and
+        # returns (None, None) — the per-email upload block below skips
+        # when r2_client is None (local-only intake, no abort).
+        r2_client, r2_bucket = get_r2_client()
+
         print("[email_monitor] Entrypoint: starting connect_imap()")
         server = connect_imap()
         print("[email_monitor] Entrypoint: finished connect_imap()")
@@ -231,6 +276,61 @@ if __name__ == "__main__":
                 print("[email_monitor] Airtable Incoming Documents record created: True")
                 print(f"[email_monitor][airtable] create response: {record}")
                 print(f"[email_monitor][airtable] created record id: {record.get('id')}")
+
+                # ── R2 upload + patch (best-effort; never aborts intake) ─
+                # Two-step write pattern (spec'd in coi_review_dashboard
+                # _spec_v3.md §1B): record exists with blank PDF R2 Key
+                # first, then we upload each attachment under a key that
+                # includes record_id, then we patch the record with the
+                # comma-separated R2 key list.
+                #
+                # Failure modes accepted in v1 — both recoverable later
+                # (see backlog_r2_upload_retry_before_cleanup memory):
+                #   (A) R2 upload itself fails → record keeps blank PDF
+                #       R2 Key, local file persists until next intake's
+                #       24h cleanup deletes it (lossy after 24h).
+                #   (B) R2 upload succeeds but the patch step fails →
+                #       PDF is orphaned in R2 with record_id baked into
+                #       the key, so a future cleanup pass can enumerate
+                #       R2, match keys to records by record_id, and
+                #       reconcile.
+                # Either way: message gets marked Seen below so we
+                # don't infinite-retry; intake proceeds.
+                _record_id = record.get("id")
+                if r2_client is not None and entry["attachments"] and _record_id:
+                    _r2_keys = []
+                    for _local_path_str in entry["attachments"]:
+                        _local_path = Path(_local_path_str)
+                        if not _local_path.exists():
+                            logger.warning(
+                                "[r2-upload] local file missing, skipping: %s",
+                                _local_path,
+                            )
+                            continue
+                        _r2_key = f"coi-documents/{_record_id}/{_local_path.name}"
+                        _ok = upload_file_to_r2(
+                            r2_client, r2_bucket, _local_path, _r2_key,
+                        )
+                        if _ok:
+                            _r2_keys.append(_r2_key)
+                            logger.info(
+                                "[r2-upload] %s -> s3://%s/%s",
+                                _local_path.name, r2_bucket, _r2_key,
+                            )
+                        else:
+                            logger.error(
+                                "[r2-upload] FAILED for %s; record %s keeps blank PDF R2 Key",
+                                _local_path.name, _record_id,
+                            )
+                    if _r2_keys:
+                        try:
+                            update_document_pdf_r2_key(_record_id, ", ".join(_r2_keys))
+                        except Exception as _patch_exc:
+                            logger.error(
+                                "[r2-patch] failed to patch %s with PDF R2 Key: %s "
+                                "(PDF(s) orphaned in R2 — recoverable via record_id-keyed cleanup)",
+                                _record_id, _patch_exc,
+                            )
 
                 # ── Mark message Seen on Gmail (dedup hygiene) ──────────
                 # The Airtable record is now the source of truth; the Seen

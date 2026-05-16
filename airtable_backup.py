@@ -50,69 +50,27 @@ TABLES = [
 
 
 # ── Cloudflare R2 upload ─────────────────────────────────────────────────────
+# The actual R2 client construction and generic upload helper live in
+# r2_storage.py (shared with email_monitor.py for PDF persistence). This
+# module retains a thin wrapper so existing callers + the "R2 upload
+# skipped" warning copy keep working without churn.
+
+from r2_storage import get_r2_client, upload_file_to_r2
+
 
 def _r2_client():
-    """Construct an S3-compatible boto3 client for Cloudflare R2.
-
-    Returns a tuple (client, bucket_name) on success or (None, None) if any
-    required env var is missing — caller treats None as "skip R2 upload,
-    fall back to local-only behavior."
+    """Thin wrapper around r2_storage.get_r2_client() kept for backwards
+    compatibility with this module's callers. Returns (client, bucket) or
+    (None, None). The "skipped" warning is logged inside get_r2_client().
     """
-    access_key = os.getenv("R2_ACCESS_KEY_ID")
-    secret_key = os.getenv("R2_SECRET_ACCESS_KEY")
-    account_id = os.getenv("R2_ACCOUNT_ID")
-    bucket = os.getenv("R2_BUCKET_NAME")
-
-    missing = [
-        name for name, val in [
-            ("R2_ACCESS_KEY_ID", access_key),
-            ("R2_SECRET_ACCESS_KEY", secret_key),
-            ("R2_ACCOUNT_ID", account_id),
-            ("R2_BUCKET_NAME", bucket),
-        ] if not val
-    ]
-    if missing:
-        logger.warning(
-            "R2 upload skipped — missing env var(s): %s. "
-            "Backup CSVs will be local-only.",
-            ", ".join(missing),
-        )
-        return None, None
-
-    try:
-        import boto3
-        from botocore.config import Config as BotoConfig
-    except ImportError as exc:
-        logger.error("R2 upload skipped — boto3 not installed: %s", exc)
-        return None, None
-
-    endpoint = f"https://{account_id}.r2.cloudflarestorage.com"
-    client = boto3.client(
-        "s3",
-        endpoint_url=endpoint,
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
-        config=BotoConfig(signature_version="s3v4"),
-        region_name="auto",
-    )
-    return client, bucket
+    return get_r2_client()
 
 
 def upload_csv_to_r2(client, bucket, csv_path: Path, key: str) -> bool:
     """Upload one CSV to R2. Returns True on success, False on failure.
-    Failure is logged but never raises — caller continues with the next table.
+    Thin wrapper around upload_file_to_r2 that pins ContentType="text/csv".
     """
-    try:
-        client.upload_file(
-            Filename=str(csv_path),
-            Bucket=bucket,
-            Key=key,
-            ExtraArgs={"ContentType": "text/csv"},
-        )
-        return True
-    except Exception as exc:
-        logger.error("R2 upload failed for %s -> %s: %s", csv_path.name, key, exc)
-        return False
+    return upload_file_to_r2(client, bucket, csv_path, key, content_type="text/csv")
 
 
 def export_table_to_csv(api: Api, table_name: str, csv_path: Path) -> int:
