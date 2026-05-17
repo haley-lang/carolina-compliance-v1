@@ -1,10 +1,12 @@
 import os
 import email
 import logging
+import re
 import traceback
 from pathlib import Path
 from imapclient import IMAPClient
 from email.header import decode_header
+from email.utils import getaddresses
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -86,6 +88,63 @@ def connect_imap() -> IMAPClient:
         raise
 
 
+def _parse_email_metadata(msg) -> dict:
+    """Extract CC list, Message-ID, and body snippet from an email.message.Message.
+
+    Returns a dict with three keys:
+        cc            comma-separated, decoded, RFC-2822 form ('"Name" <email>'),
+                      or empty string if no CC header.
+        message_id    RFC-822 Message-ID including angle brackets, or empty string.
+        body_snippet  first 500 chars of body text (plain-text preferred,
+                      HTML stripped if no plain-text part), trimmed.
+
+    Defensive against malformed inputs: returns all-empty dict if msg has no
+    headers / no body / raises during walk.
+    """
+    # CC parsing — getaddresses correctly handles commas inside quoted
+    # display names ("Smith, John" <jsmith@…>); naive split(",") would break.
+    try:
+        cc_raw = msg.get("Cc", "") or msg.get("CC", "")
+    except Exception:
+        cc_raw = ""
+    cc_entries = []
+    if cc_raw:
+        try:
+            for raw_name, raw_email in getaddresses([cc_raw]):
+                if not raw_email:
+                    continue
+                decoded_name = decode_mime_words(raw_name) if raw_name else ""
+                if decoded_name:
+                    cc_entries.append(f'"{decoded_name}" <{raw_email}>')
+                else:
+                    cc_entries.append(raw_email)
+        except Exception:
+            cc_entries = []
+    cc = ", ".join(cc_entries)
+
+    # Message-ID (preserve angle brackets per RFC-2822)
+    try:
+        message_id = (msg.get("Message-ID") or "").strip()
+    except Exception:
+        message_id = ""
+
+    # Body snippet — reuse email_classifier's MIME tree walker (handles
+    # plain-text first, HTML fallback). Defensive: _extract_body_text only
+    # strips HTML tags on the multipart-HTML-fallback path; single-part
+    # HTML messages come back with raw tags. Apply a tag-strip regex here
+    # so the snippet is plain text regardless of MIME structure.
+    # Idempotent on already-stripped text (no-op when no tags present).
+    try:
+        body_text = _extract_body_text(msg) or ""
+    except Exception:
+        body_text = ""
+    if body_text and "<" in body_text:
+        body_text = re.sub(r"<[^>]+>", " ", body_text)
+    body_snippet = body_text[:500].strip()
+
+    return {"cc": cc, "message_id": message_id, "body_snippet": body_snippet}
+
+
 def fetch_unread_emails(server: IMAPClient) -> list[dict]:
     """
     Fetch unread emails from INBOX that have PDF or image attachments.
@@ -136,6 +195,7 @@ def fetch_unread_emails(server: IMAPClient) -> list[dict]:
             subject = decode_mime_words(msg.get("Subject", "(no subject)"))
             date_str = msg.get("Date", "")
             date_received = parse_email_date(date_str)
+            metadata = _parse_email_metadata(msg)
 
             logger.info("Processing email — From: %s | Subject: %s | Date: %s", sender, subject, date_received)
             print(f"[email_monitor] Checking email subject: {subject}")
@@ -213,6 +273,9 @@ def fetch_unread_emails(server: IMAPClient) -> list[dict]:
                     "sender": sender,
                     "subject": subject,
                     "date_received": date_received,
+                    "cc": metadata["cc"],
+                    "message_id": metadata["message_id"],
+                    "body_snippet": metadata["body_snippet"],
                     "attachments": saved_files,
                     "all_filenames": all_attachment_filenames,
                     "has_attachments": found_attachment and len(saved_files) > 0,
@@ -272,6 +335,9 @@ if __name__ == "__main__":
                     date_received=entry["date_received"],
                     attachment_paths=entry["attachments"],
                     status=staging_status,
+                    cc_list=entry.get("cc", ""),
+                    message_id=entry.get("message_id", ""),
+                    body_snippet=entry.get("body_snippet", ""),
                 )
                 print("[email_monitor] Airtable Incoming Documents record created: True")
                 print(f"[email_monitor][airtable] create response: {record}")

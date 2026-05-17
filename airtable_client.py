@@ -23,16 +23,22 @@ def create_document_record(
     date_received: str,
     attachment_paths: list[str],
     status: str = "Pending Review",
+    cc_list: str = "",
+    message_id: str = "",
+    body_snippet: str = "",
 ) -> dict:
     """
     Create a record in the Airtable 'Incoming Documents' table.
 
     Expected Airtable columns:
-        Sender Email   (Single line text)
-        Subject        (Single line text)
-        Date Received  (Single line text — ISO 8601)
-        File Names     (Long text — comma-separated list of saved filenames)
-        Status         (Single select — defaults to 'Pending Review')
+        Sender Email              (Single line text)
+        Subject                   (Single line text)
+        Date Received             (Single line text — ISO 8601)
+        File Names                (Long text — comma-separated list of saved filenames)
+        Status                    (Single select — defaults to 'Pending Review')
+        Source Email CC           (Long text — RFC-2822 comma-separated, decoded)
+        Source Email Message ID   (Long text — RFC-822 form, including angle brackets)
+        Source Email Body Snippet (Long text — first 500 chars of body, plain text)
     """
     filenames = ", ".join(attachment_paths)
 
@@ -42,6 +48,9 @@ def create_document_record(
         "Date Received": date_received,
         "File Names": filenames,
         "Status": status,
+        "Source Email CC": cc_list,
+        "Source Email Message ID": message_id,
+        "Source Email Body Snippet": body_snippet,
     }
 
     record = get_table().create(fields)
