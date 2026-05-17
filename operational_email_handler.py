@@ -38,7 +38,6 @@ FLD_DOC_STATUS           = "fldIQxRQiAcc6tD6Z"
 FLD_DOC_SENDER_EMAIL     = "fld4ycFJuXpRCSGMd"
 
 # Incoming Extractions
-FLD_EXT_DUPLICATE_OF     = "fldYmU49onpvXabJi"
 FLD_EXT_PROC_STATUS      = "fld4KqSQEX32Zenut"
 FLD_EXT_NAMED_INSURED    = "fld4X90MLBQIqTNTn"
 FLD_EXT_POLICY_NUMBER    = "flduz1v47MZ90rGy9"
@@ -358,21 +357,6 @@ def check_duplicate_extraction(
         logger.warning("Duplicate check failed: %s", exc)
 
     return None
-
-
-def mark_duplicate(extractions_table, record_id: str, duplicate_of_record: Dict[str, Any]):
-    """Mark an extraction record as a duplicate."""
-    dup_id = duplicate_of_record.get("id", "")
-    dup_date = duplicate_of_record.get("fields", {}).get("Extraction Processed At", "unknown date")
-
-    try:
-        extractions_table.update(record_id, {
-            FLD_EXT_PROC_STATUS: "Duplicate",
-            FLD_EXT_DUPLICATE_OF: f"{dup_id} (processed {dup_date})",
-        }, typecast=True)
-        logger.info("Marked extraction %s as duplicate of %s", record_id, dup_id)
-    except Exception as exc:
-        logger.error("Failed to mark duplicate: %s", exc)
 
 
 # ── 3. Cloud link extraction ─────────────────────────────────────────────────

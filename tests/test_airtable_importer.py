@@ -53,10 +53,40 @@ def test_build_fields_confidence_zero_kept():
 def test_build_fields_other_fields_unchanged():
     """Sanity: adding confidence didn't break the existing field mapping."""
     data = _base_data()
-    data["confidence"] = 0.5
+    data["confidence"] = 0.99  # high enough to keep Processing Status=Imported under 1E gate
     fields = build_fields("acme.json", data, json.dumps(data))
     assert fields["Source Filename"] == "acme.json"
     assert fields["Document Type"] == "COI"
     assert fields["Named Insured"] == "Acme LLC"
     assert fields["Processing Status"] == "Imported"
     assert "Raw JSON" in fields
+
+
+# ── 1E: review gating in build_fields ────────────────────────────────────────
+
+
+def test_build_fields_writes_auto_approved_for_high_confidence():
+    data = _base_data()
+    data["confidence"] = 0.99
+    fields = build_fields("acme.json", data, json.dumps(data), is_possible_duplicate=False)
+    assert fields["Processing Status"] == "Imported"
+    assert fields["Review Status"] == "Auto-Approved"
+    assert fields["Review Reason"] == "N/A"
+
+
+def test_build_fields_writes_pending_review_for_low_confidence():
+    data = _base_data()
+    data["confidence"] = 0.5
+    fields = build_fields("acme.json", data, json.dumps(data), is_possible_duplicate=False)
+    assert fields["Processing Status"] == "Pending Review"
+    assert fields["Review Status"] == "Pending Review"
+    assert fields["Review Reason"] == "Low Confidence"
+
+
+def test_build_fields_writes_pending_review_for_duplicate():
+    data = _base_data()
+    data["confidence"] = 0.99  # high — would auto-approve, but duplicate trumps
+    fields = build_fields("acme.json", data, json.dumps(data), is_possible_duplicate=True)
+    assert fields["Processing Status"] == "Pending Review"
+    assert fields["Review Status"] == "Pending Review"
+    assert fields["Review Reason"] == "Possible Duplicate"

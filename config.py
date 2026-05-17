@@ -38,6 +38,14 @@ UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploads")
 # File types accepted as COI attachments
 ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".tif"}
 
+# COI review threshold — extractions with confidence < this value get routed
+# to Pending Review on Incoming Extractions. Default 0.95 (conservative) for
+# launch; tunable via env var without code deploy. Malformed env values
+# raise ValueError at import (fail-loud — better than silent fallback).
+COI_REVIEW_CONFIDENCE_THRESHOLD = float(
+    os.getenv("COI_REVIEW_CONFIDENCE_THRESHOLD", "0.95")
+)
+
 
 def validate_config():
     required = {

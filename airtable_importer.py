@@ -103,8 +103,17 @@ def load_json_safe(path: Path) -> dict:
         raise ValueError(f"Invalid JSON in '{path}': {exc}") from exc
 
 
-def build_fields(source_filename: str, data: dict, raw_json: str) -> dict:
-    """Map extracted JSON fields to Airtable field names."""
+def build_fields(source_filename: str, data: dict, raw_json: str,
+                 is_possible_duplicate: bool = False) -> dict:
+    """Map extracted JSON fields to Airtable field names.
+
+    is_possible_duplicate: passed by caller after check_duplicate_extraction
+    runs against the Incoming Extractions table. Drives review_gate's
+    intake-time decision. Defaults to False so callers that don't yet do
+    the duplicate check (e.g. unit tests) still work.
+    """
+    from review_gate import compute_review_status
+
     contact_emails = data.get("contact_emails") or []
     if isinstance(contact_emails, list):
         contact_emails_str = ", ".join(str(e) for e in contact_emails)
@@ -124,6 +133,12 @@ def build_fields(source_filename: str, data: dict, raw_json: str) -> dict:
         else None
     )
 
+    # 1E: review-gate decision at intake time.
+    review_status, review_reason, processing_status = compute_review_status(
+        confidence=confidence_value,
+        is_possible_duplicate=is_possible_duplicate,
+    )
+
     return {
         "Source Filename": source_filename,
         "Document Type": data.get("document_type") or "",
@@ -133,8 +148,10 @@ def build_fields(source_filename: str, data: dict, raw_json: str) -> dict:
         "Policies Count": policies_count,
         "Raw JSON": raw_json,
         "Extraction Processed At": datetime.now(timezone.utc).isoformat(),
-        "Processing Status": "Imported",
+        "Processing Status": processing_status,
         "Confidence Score": confidence_value,
+        "Review Status": review_status,
+        "Review Reason": review_reason,
     }
 
 
@@ -214,8 +231,44 @@ def _import_single_file(json_path: Path, base_id: str, token: str) -> dict:
         len(data.get("policies") or []),
     )
 
+    # 1E: check for duplicate against recent extractions before importing.
+    # Wraps the call in try/except so a transient Airtable hiccup during the
+    # duplicate check does NOT block intake — the record gets created with
+    # is_possible_duplicate=False (worst case: an actual duplicate slips
+    # through and gets reprocessed; minor cost vs. blocking real imports).
+    is_possible_duplicate = False
+    try:
+        from pyairtable import Api
+        from operational_email_handler import check_duplicate_extraction
+        _api = Api(token)
+        _extractions_table = _api.table(base_id, INCOMING_EXTRACTIONS_TABLE)
+        named_insured = (data.get("named_insured") or "").strip()
+        _policies = data.get("policies") or []
+        _policy_numbers = [
+            (p.get("policy_number") or "").strip()
+            for p in _policies if p.get("policy_number")
+        ]
+        _expiration_dates = [
+            (p.get("expiration_date") or "").strip()
+            for p in _policies if p.get("expiration_date")
+        ]
+        _dup_record = check_duplicate_extraction(
+            _extractions_table, named_insured, _policy_numbers, _expiration_dates,
+        )
+        is_possible_duplicate = _dup_record is not None
+        if is_possible_duplicate:
+            logger.info(
+                "Duplicate detected for %s — prior record %s (will route to Pending Review)",
+                json_path.name, _dup_record.get("id"),
+            )
+    except Exception as _dup_exc:
+        logger.warning(
+            "Duplicate check failed for %s (continuing with is_possible_duplicate=False): %s",
+            json_path.name, _dup_exc,
+        )
+
     raw_json = json.dumps(data, indent=2)
-    fields = build_fields(json_path.name, data, raw_json)
+    fields = build_fields(json_path.name, data, raw_json, is_possible_duplicate=is_possible_duplicate)
 
     logger.info("Creating record in Airtable table '%s'...", INCOMING_EXTRACTIONS_TABLE)
     record = push_to_airtable(base_id, token, fields)

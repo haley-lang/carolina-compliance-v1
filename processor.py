@@ -770,11 +770,27 @@ def fetch_requirement_context_for_evaluator(
 
 
 def fetch_all_pending_extractions(table) -> list:
-    """Return all Incoming Extractions with status 'Imported', sorted oldest-first.
+    """Return all Incoming Extractions in a processable state, sorted oldest-first.
+
+    Processable = either freshly Imported, OR Pending Review with Review Reason
+    'Low Confidence'. The latter is included so apply_onboarding_window_gate
+    (1E) can upgrade Review Reason to 'Both' when the matched client is in
+    Manual Review Window. Records with other Review Reasons (Possible
+    Duplicate / Onboarding Window / Both) are excluded — they're terminal
+    pending states until human review.
+
+    Idempotent: once a Low Confidence record is upgraded to 'Both', the
+    filter no longer matches it, so no infinite re-visit loop.
 
     Processes oldest records first (FIFO) so no extraction gets stuck behind newer ones.
     """
-    records = table.all(formula="{Processing Status} = 'Imported'")
+    formula = (
+        "OR("
+        "{Processing Status} = 'Imported', "
+        "AND({Processing Status} = 'Pending Review', {Review Reason} = 'Low Confidence')"
+        ")"
+    )
+    records = table.all(formula=formula)
     if not records:
         return []
 
@@ -1950,6 +1966,31 @@ def _process_single_extraction(extraction, tables, base_id=""):
     vendor_id   = vendor["id"]
     vendor_name = vendor["fields"].get("Vendor Name", "")
     logger.info("Vendor matched — ID: %s  Name: '%s'", vendor_id, vendor_name)
+
+    # ── 1E Review gate ───────────────────────────────────────────────────────
+    # After vendor + client match, check whether matched client is in
+    # "Manual Review Window" mode. If so, downgrade Auto-Approved records
+    # to Pending Review (Onboarding Window), or upgrade Pending Review +
+    # Low Confidence records to Review Reason "Both". For ANY record that
+    # is Pending Review at this point (post-gate), skip downstream writes —
+    # they're queued for human review. Downstream resumes when the human
+    # flips Processing Status back to "Imported" (manual approve script or
+    # future dashboard).
+    from review_gate import apply_onboarding_window_gate
+    should_skip_downstream = apply_onboarding_window_gate(
+        incoming_table=tables[TABLE_INCOMING],
+        client_records=client_records,
+        extraction_id=extraction_id,
+        extraction_fields=extraction_fields,
+        matched_client_id=matched_client_id,
+    )
+    if should_skip_downstream:
+        logger.info(
+            "1E review gate: skipping downstream writes for %s "
+            "(record is Pending Review or was just downgraded)",
+            extraction_id,
+        )
+        return
 
     # Minimal cancellation handling: update affected policy status if found,
     # otherwise flag the vendor for action needed. Continue normal processing.
