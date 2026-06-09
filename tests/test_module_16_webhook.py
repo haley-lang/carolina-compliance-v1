@@ -387,3 +387,91 @@ def test_handle_subscription_updated_no_client_no_op(mock_find, mock_table):
     _handle_subscription_updated(event)
 
     mock_table.assert_not_called()
+
+
+# ── Route tests: /api/create-checkout-session ────────────────────────────────
+
+
+_CHECKOUT_ENV = {
+    "STRIPE_PRICE_STARTER":  "price_starter_xxx",
+    "STRIPE_COUPON_STARTER": "coupon_starter_xxx",
+    "STRIPE_PRICE_GROWTH":   "price_growth_xxx",
+    "STRIPE_COUPON_GROWTH":  "coupon_growth_xxx",
+    "STRIPE_PRICE_SCALE":    "price_scale_xxx",
+    "STRIPE_COUPON_SCALE":   "coupon_scale_xxx",
+    "CHECKOUT_SUCCESS_URL":  "https://example.com/success",
+    "CHECKOUT_CANCEL_URL":   "https://example.com/cancel",
+}
+
+
+@pytest.fixture
+def checkout_client():
+    from module_16_inbound_webhook import app
+    app.testing = True
+    return app.test_client()
+
+
+@pytest.mark.parametrize("tier,expected_price,expected_coupon", [
+    ("starter", "price_starter_xxx", "coupon_starter_xxx"),
+    ("growth",  "price_growth_xxx",  "coupon_growth_xxx"),
+    ("scale",   "price_scale_xxx",   "coupon_scale_xxx"),
+])
+def test_create_checkout_session_tier_maps_to_correct_price_and_coupon(
+    checkout_client, tier, expected_price, expected_coupon,
+):
+    with patch.dict("os.environ", _CHECKOUT_ENV, clear=False), \
+         patch("module_16_inbound_webhook.stripe.checkout.Session.create") as mock_create:
+        mock_create.return_value = MagicMock(url="https://checkout.stripe.com/test")
+        resp = checkout_client.get(f"/api/create-checkout-session?tier={tier}")
+
+    assert resp.status_code == 302
+    assert resp.headers["Location"] == "https://checkout.stripe.com/test"
+    mock_create.assert_called_once()
+    kwargs = mock_create.call_args.kwargs
+    assert kwargs["line_items"] == [{"price": expected_price, "quantity": 1}]
+    assert kwargs["discounts"] == [{"coupon": expected_coupon}]
+
+
+def test_create_checkout_session_uses_subscription_mode_and_discounts(checkout_client):
+    with patch.dict("os.environ", _CHECKOUT_ENV, clear=False), \
+         patch("module_16_inbound_webhook.stripe.checkout.Session.create") as mock_create:
+        mock_create.return_value = MagicMock(url="https://checkout.stripe.com/test")
+        resp = checkout_client.get("/api/create-checkout-session?tier=starter")
+
+    assert resp.status_code == 302
+    kwargs = mock_create.call_args.kwargs
+    assert kwargs["mode"] == "subscription"
+    assert kwargs["discounts"] == [{"coupon": "coupon_starter_xxx"}]
+    assert kwargs["allow_promotion_codes"] is False
+    assert kwargs["success_url"] == "https://example.com/success"
+    assert kwargs["cancel_url"] == "https://example.com/cancel"
+
+
+def test_create_checkout_session_invalid_tier_returns_400(checkout_client):
+    with patch("module_16_inbound_webhook.stripe.checkout.Session.create") as mock_create:
+        resp = checkout_client.get("/api/create-checkout-session?tier=enterprise")
+
+    assert resp.status_code == 400
+    assert resp.is_json
+    assert "error" in resp.get_json()
+    mock_create.assert_not_called()
+
+
+def test_create_checkout_session_missing_tier_returns_400(checkout_client):
+    with patch("module_16_inbound_webhook.stripe.checkout.Session.create") as mock_create:
+        resp = checkout_client.get("/api/create-checkout-session")
+
+    assert resp.status_code == 400
+    mock_create.assert_not_called()
+
+
+def test_create_checkout_session_stripe_error_returns_500_without_leaking_detail(checkout_client):
+    with patch.dict("os.environ", _CHECKOUT_ENV, clear=False), \
+         patch("module_16_inbound_webhook.stripe.checkout.Session.create") as mock_create:
+        mock_create.side_effect = Exception("super-secret stripe internals leaked here")
+        resp = checkout_client.get("/api/create-checkout-session?tier=growth")
+
+    assert resp.status_code == 500
+    body = resp.get_data(as_text=True)
+    assert "super-secret stripe internals" not in body
+    assert "error" in resp.get_json()

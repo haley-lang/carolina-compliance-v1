@@ -42,7 +42,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import stripe
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, redirect
 from dotenv import load_dotenv
 from pyairtable import Api as AirtableApi
 from email_template import build_email_html
@@ -133,6 +133,44 @@ def health():
         "business_hours": is_business_hours(),
         "time_et": datetime.now(EASTERN).strftime("%Y-%m-%d %H:%M:%S")
     }), 200
+
+
+# ── Tier → (price env var, coupon env var) ─────────────────────────────────
+# Resolved at request time, not import time, so Railway env updates take
+# effect without a redeploy.
+_CHECKOUT_TIER_ENV = {
+    "starter": ("STRIPE_PRICE_STARTER", "STRIPE_COUPON_STARTER"),
+    "growth":  ("STRIPE_PRICE_GROWTH",  "STRIPE_COUPON_GROWTH"),
+    "scale":   ("STRIPE_PRICE_SCALE",   "STRIPE_COUPON_SCALE"),
+}
+
+
+@app.route("/api/create-checkout-session", methods=["GET"])
+def create_checkout_session():
+    tier = (request.args.get("tier") or "").strip().lower()
+    if tier not in _CHECKOUT_TIER_ENV:
+        return jsonify({"error": "Invalid tier"}), 400
+
+    price_env, coupon_env = _CHECKOUT_TIER_ENV[tier]
+    price_id = os.getenv(price_env, "")
+    coupon_id = os.getenv(coupon_env, "")
+    success_url = os.getenv("CHECKOUT_SUCCESS_URL", "")
+    cancel_url = os.getenv("CHECKOUT_CANCEL_URL", "")
+
+    try:
+        session = stripe.checkout.Session.create(
+            mode="subscription",
+            line_items=[{"price": price_id, "quantity": 1}],
+            discounts=[{"coupon": coupon_id}],
+            allow_promotion_codes=False,
+            success_url=success_url,
+            cancel_url=cancel_url,
+        )
+    except Exception as exc:
+        logger.exception("Stripe Checkout session creation failed for tier=%s: %s", tier, exc)
+        return jsonify({"error": "Checkout session creation failed"}), 500
+
+    return redirect(session.url, code=302)
 
 
 @app.route("/webhook/stripe-payment", methods=["POST"])
