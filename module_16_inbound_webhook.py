@@ -162,7 +162,6 @@ def create_checkout_session():
             mode="subscription",
             line_items=[{"price": price_id, "quantity": 1}],
             discounts=[{"coupon": coupon_id}],
-            allow_promotion_codes=False,
             success_url=success_url,
             cancel_url=cancel_url,
         )

@@ -442,7 +442,8 @@ def test_create_checkout_session_uses_subscription_mode_and_discounts(checkout_c
     kwargs = mock_create.call_args.kwargs
     assert kwargs["mode"] == "subscription"
     assert kwargs["discounts"] == [{"coupon": "coupon_starter_xxx"}]
-    assert kwargs["allow_promotion_codes"] is False
+    # Stripe rejects allow_promotion_codes alongside discounts — must not be passed.
+    assert "allow_promotion_codes" not in kwargs
     assert kwargs["success_url"] == "https://example.com/success"
     assert kwargs["cancel_url"] == "https://example.com/cancel"
 
