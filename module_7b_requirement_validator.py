@@ -7,6 +7,14 @@ from pathlib import Path
 
 load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=True)
 
+from airtable_constants import (
+    V_EXPIRATION_STATUS,
+    V_GL_STATUS, V_GL_EXPIRATION_DATE,
+    V_WC_STATUS, V_WC_EXPIRATION_DATE,
+    V_AUTO_STATUS, V_AUTO_EXPIRATION_DATE,
+    V_AI_ON_FILE, V_WOS_ON_FILE, V_NEXT_EXPIRATION_DATE,
+)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -243,8 +251,13 @@ def _translate_policy_status_for_display(raw_status: str) -> str:
 
 def compute_vendor_expiration_status(vendor_policies):
     """Derive a rollup Expiration Status from all policies for a vendor."""
+    today = date.today().isoformat()
+    # Only count policies that haven't expired yet; expired ones shouldn't
+    # drag the rollup to Expired when active successor policies exist.
+    active = [p for p in vendor_policies if (p["fields"].get("Expiration Date") or "") >= today]
+    policies_to_check = active if active else vendor_policies
     statuses = set()
-    for p in vendor_policies:
+    for p in policies_to_check:
         status = p["fields"].get("Expiration Status") or p["fields"].get(FLD_POLICY_EXPIRATION_STATUS) or ""
         if status:
             statuses.add(status)
@@ -260,16 +273,16 @@ def update_vendor_expiration_status(vendors_table, vendor_id, vendor_name, vendo
     """Write the rolled-up Expiration Status to the Vendors table."""
     exp_status = compute_vendor_expiration_status(vendor_policies)
     try:
-        vendors_table.update(vendor_id, {FLD_VENDOR_EXPIRATION_STATUS: exp_status}, typecast=True)
+        vendors_table.update(vendor_id, {V_EXPIRATION_STATUS: exp_status}, typecast=True)
         logger.info("Vendor %s Expiration Status → %s", vendor_name, exp_status)
     except Exception as e:
         logger.error("Failed to update Expiration Status for vendor %s: %s", vendor_name, e)
 
-# Policy Type name → (status field, expiration field) on Vendors table
+# Policy Type name → (status field name, expiration field name) on Vendors table
 _POLICY_TYPE_VENDOR_FIELDS = {
-    "General Liability": (FLD_V_GL_STATUS, FLD_V_GL_EXPIRATION),
-    "Workers Comp":      (FLD_V_WC_STATUS, FLD_V_WC_EXPIRATION),
-    "Auto Liability":    (FLD_V_AUTO_STATUS, FLD_V_AUTO_EXPIRATION),
+    "General Liability": (V_GL_STATUS, V_GL_EXPIRATION_DATE),
+    "Workers Comp":      (V_WC_STATUS, V_WC_EXPIRATION_DATE),
+    "Auto Liability":    (V_AUTO_STATUS, V_AUTO_EXPIRATION_DATE),
 }
 
 def update_vendor_policy_detail(vendors_table, vendor_id, vendor_name, vendor_policies):
@@ -298,22 +311,23 @@ def update_vendor_policy_detail(vendors_table, vendor_id, vendor_name, vendor_po
         fields[status_fld] = _translate_policy_status_for_display(raw_status)
         fields[exp_fld] = best["fields"].get("Expiration Date") or None
 
-    all_expirations = []
-    for p in vendor_policies:
-        exp = p["fields"].get("Expiration Date")
-        if exp:
-            all_expirations.append(exp)
+    today_str = date.today().isoformat()
+    all_expirations = [
+        p["fields"]["Expiration Date"]
+        for p in vendor_policies
+        if p["fields"].get("Expiration Date") and p["fields"]["Expiration Date"] >= today_str
+    ]
     if all_expirations:
         all_expirations.sort()
-        fields[FLD_V_NEXT_EXPIRATION] = all_expirations[0]
+        fields[V_NEXT_EXPIRATION_DATE] = all_expirations[0]
     else:
-        fields[FLD_V_NEXT_EXPIRATION] = None
+        fields[V_NEXT_EXPIRATION_DATE] = None
 
-    fields[FLD_V_AI_ON_FILE] = any(
+    fields[V_AI_ON_FILE] = any(
         p["fields"].get("Additional Insured") or p["fields"].get(FLD_P_AI_ON_FILE)
         for p in vendor_policies
     )
-    fields[FLD_V_WOS_ON_FILE] = any(
+    fields[V_WOS_ON_FILE] = any(
         p["fields"].get("Waiver") or p["fields"].get(FLD_P_WOS_ON_FILE)
         for p in vendor_policies
     )
@@ -322,9 +336,9 @@ def update_vendor_policy_detail(vendors_table, vendor_id, vendor_name, vendor_po
         vendors_table.update(vendor_id, fields, typecast=True)
         logger.info("Vendor %s policy detail written — GL:%s WC:%s Auto:%s AI:%s WOS:%s NextExp:%s",
                      vendor_name,
-                     fields.get(FLD_V_GL_STATUS), fields.get(FLD_V_WC_STATUS),
-                     fields.get(FLD_V_AUTO_STATUS), fields.get(FLD_V_AI_ON_FILE),
-                     fields.get(FLD_V_WOS_ON_FILE), fields.get(FLD_V_NEXT_EXPIRATION))
+                     fields.get(V_GL_STATUS), fields.get(V_WC_STATUS),
+                     fields.get(V_AUTO_STATUS), fields.get(V_AI_ON_FILE),
+                     fields.get(V_WOS_ON_FILE), fields.get(V_NEXT_EXPIRATION_DATE))
     except Exception as e:
         logger.error("Failed to write policy detail for vendor %s: %s", vendor_name, e)
 
