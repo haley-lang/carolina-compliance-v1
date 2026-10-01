@@ -1,8 +1,8 @@
-"""Manually approve a Pending Review Incoming Extractions record so the
+"""Manually approve a Low Confidence / Needs Review Incoming Extractions record so the
 pipeline resumes downstream processing. Pre-dashboard interim mechanism.
 
 What it does:
-    - Sets Processing Status: "Pending Review" -> "Imported"  (resumes the gate)
+    - Sets Processing Status: "Low Confidence" | "Needs Review" -> "Imported"  (resumes the gate)
     - Sets Review Status:     -> "Approved"
     - Sets Reviewed By:       "Haley"
     - Sets Reviewed At:       now() in ISO 8601 UTC

@@ -772,11 +772,11 @@ def fetch_requirement_context_for_evaluator(
 def fetch_all_pending_extractions(table) -> list:
     """Return all Incoming Extractions in a processable state, sorted oldest-first.
 
-    Processable = either freshly Imported, OR Pending Review with Review Reason
+    Processable = either freshly Imported, OR Low Confidence with Review Reason
     'Low Confidence'. The latter is included so apply_onboarding_window_gate
     (1E) can upgrade Review Reason to 'Both' when the matched client is in
-    Manual Review Window. Records with other Review Reasons (Possible
-    Duplicate / Onboarding Window / Both) are excluded — they're terminal
+    Manual Review Window. Records with other Processing Statuses (Duplicate /
+    Needs Review) or Review Reasons (Both) are excluded — they're terminal
     pending states until human review.
 
     Idempotent: once a Low Confidence record is upgraded to 'Both', the
@@ -787,7 +787,7 @@ def fetch_all_pending_extractions(table) -> list:
     formula = (
         "OR("
         "{Processing Status} = 'Imported', "
-        "AND({Processing Status} = 'Pending Review', {Review Reason} = 'Low Confidence')"
+        "AND({Processing Status} = 'Low Confidence', {Review Reason} = 'Low Confidence')"
         ")"
     )
     records = table.all(formula=formula)
@@ -1970,9 +1970,9 @@ def _process_single_extraction(extraction, tables, base_id=""):
     # ── 1E Review gate ───────────────────────────────────────────────────────
     # After vendor + client match, check whether matched client is in
     # "Manual Review Window" mode. If so, downgrade Auto-Approved records
-    # to Pending Review (Onboarding Window), or upgrade Pending Review +
-    # Low Confidence records to Review Reason "Both". For ANY record that
-    # is Pending Review at this point (post-gate), skip downstream writes —
+    # to Needs Review (Onboarding Window), or upgrade Low Confidence
+    # records to Review Reason "Both". For ANY record that is not
+    # Auto-Approved at this point (post-gate), skip downstream writes —
     # they're queued for human review. Downstream resumes when the human
     # flips Processing Status back to "Imported" (manual approve script or
     # future dashboard).
@@ -1987,7 +1987,7 @@ def _process_single_extraction(extraction, tables, base_id=""):
     if should_skip_downstream:
         logger.info(
             "1E review gate: skipping downstream writes for %s "
-            "(record is Pending Review or was just downgraded)",
+            "(record is Low Confidence or was just downgraded to Needs Review)",
             extraction_id,
         )
         return

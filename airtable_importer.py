@@ -258,7 +258,7 @@ def _import_single_file(json_path: Path, base_id: str, token: str) -> dict:
         is_possible_duplicate = _dup_record is not None
         if is_possible_duplicate:
             logger.info(
-                "Duplicate detected for %s — prior record %s (will route to Pending Review)",
+                "Duplicate detected for %s — prior record %s (will route to Duplicate status)",
                 json_path.name, _dup_record.get("id"),
             )
     except Exception as _dup_exc:
