@@ -51,7 +51,9 @@ REVIEW_REASON_POSSIBLE_DUPLICATE = "Possible Duplicate"
 
 # Processing Status values (single-select on Incoming Extractions)
 PROCESSING_STATUS_IMPORTED = "Imported"
-PROCESSING_STATUS_PENDING_REVIEW = "Pending Review"
+PROCESSING_STATUS_DUPLICATE = "Duplicate"
+PROCESSING_STATUS_LOW_CONFIDENCE = "Low Confidence"
+PROCESSING_STATUS_NEEDS_REVIEW = "Needs Review"
 
 # Client Review Mode values (single-select on Clients)
 REVIEW_MODE_MANUAL_WINDOW = "Manual Review Window"
@@ -87,7 +89,7 @@ def compute_review_status(
         return (
             REVIEW_STATUS_PENDING_REVIEW,
             REVIEW_REASON_POSSIBLE_DUPLICATE,
-            PROCESSING_STATUS_PENDING_REVIEW,
+            PROCESSING_STATUS_DUPLICATE,
         )
 
     # Resolve threshold (env var → config default)
@@ -101,7 +103,7 @@ def compute_review_status(
         return (
             REVIEW_STATUS_PENDING_REVIEW,
             REVIEW_REASON_LOW_CONFIDENCE,
-            PROCESSING_STATUS_PENDING_REVIEW,
+            PROCESSING_STATUS_LOW_CONFIDENCE,
         )
 
     return (
@@ -152,7 +154,11 @@ def apply_onboarding_window_gate(
     review_status = (extraction_fields.get("Review Status") or "").strip()
     review_reason = (extraction_fields.get("Review Reason") or "").strip()
 
-    is_pending_review_record = (processing_status == PROCESSING_STATUS_PENDING_REVIEW)
+    is_pending_review_record = processing_status in (
+        PROCESSING_STATUS_DUPLICATE,
+        PROCESSING_STATUS_LOW_CONFIDENCE,
+        PROCESSING_STATUS_NEEDS_REVIEW,
+    )
 
     # No client → no per-client mode to apply
     if not matched_client_id:
@@ -177,7 +183,7 @@ def apply_onboarding_window_gate(
             incoming_table.update(extraction_id, {
                 "Review Status": REVIEW_STATUS_PENDING_REVIEW,
                 "Review Reason": REVIEW_REASON_ONBOARDING_WINDOW,
-                "Processing Status": PROCESSING_STATUS_PENDING_REVIEW,
+                "Processing Status": PROCESSING_STATUS_NEEDS_REVIEW,
             }, typecast=True)
             logger.info(
                 "[review-gate] Downgraded %s: Auto-Approved -> Pending Review (Onboarding Window) "
