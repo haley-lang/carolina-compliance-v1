@@ -14,6 +14,7 @@ venv/
 .venv-sandbox/
 *.log
 backups/
+.pipeline.lock
 .DS_Store
 tests/edge_case_report.html
 tests/edge_case_results.xml

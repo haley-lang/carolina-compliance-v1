@@ -13,7 +13,12 @@
 #   carolina-compliance-v1 (webhook):
 #     gunicorn module_16_inbound_webhook:app --bind 0.0.0.0:$PORT --workers 2
 #     healthcheckPath: /health
-#   cron-pipeline:           python run_pipeline.py            (0 12 * * *)
+#   cron-pipeline:           python run_pipeline.py            (*/15 * * * *)
+#     Recommended cadence, not once daily — run_pipeline.py runs email_monitor.py
+#     (IMAP intake) as its own first step, so it needs to fire often to keep
+#     COI turnaround from lagging a full day behind arrival. It's now guarded
+#     by an flock-based lock (see PIPELINE_LOCK_PATH in run_pipeline.py) so an
+#     overlapping invocation exits immediately instead of double-processing.
 #   cron-daily:              python daily_cron.py              (30 12 * * *)
 #   cron-followup:           python railway_cron_followup.py   (0 13 * * 1-5)
 #   cron-backup:             python airtable_backup.py         (0 6 * * 0)
