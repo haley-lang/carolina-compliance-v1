@@ -64,6 +64,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+from sendgrid_utils import apply_sandbox_if_enabled  # noqa: E402 (after load_dotenv)
+
 app = Flask(__name__)
 
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
@@ -414,6 +416,7 @@ def _send_owner_notification(name, email, phone, business, plan, amount):
         """
     )
     message.reply_to = SGEmail(_cfg.reply_to_for("internal"))
+    apply_sandbox_if_enabled(message)
     sg.send(message)
     logger.info("Owner notification sent for %s", email)
 
@@ -555,6 +558,7 @@ def _send_welcome_email(name, email, plan):
         html_content=build_email_html(welcome_subject, welcome_body_html, audience="client"),
     )
     message.reply_to = SGEmail(_cfg.reply_to_for("client"))
+    apply_sandbox_if_enabled(message)
     sg.send(message)
     _record_welcome_email_sent(email)
     logger.info("Welcome email sent to %s (tier=%s)", email, plan)
@@ -649,6 +653,7 @@ def _send_cancellation_email(customer_name: str, customer_email: str):
             html_content=build_email_html(subject, body_html, audience="client"),
         )
         message.reply_to = SGEmail(_cfg.reply_to_for("client"))
+        apply_sandbox_if_enabled(message)
         sg.send(message)
         logger.info("Cancellation confirmation email sent to %s", customer_email)
     except Exception as exc:

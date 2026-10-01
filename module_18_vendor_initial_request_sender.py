@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from pyairtable import Api
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Cc, Email, Mail
+from sendgrid_utils import apply_sandbox_if_enabled
 
 
 load_dotenv(override=True)
@@ -15,10 +16,10 @@ from airtable_constants import (
     TBL_EMAIL_QUEUE,
     EQ_PRIMARY_EMAIL, EQ_SUBJECT, EQ_BODY, EQ_CC_EMAILS,
     EQ_EMAIL_TYPE, EQ_EMAIL_STATUS, EQ_RECORD_STATUS, EQ_SENT_AT,
-    EQ_VENDOR_LINK, EQ_CLIENT_LINK,
+    EQ_VENDOR_LINK, EQ_CLIENT_LINK, EQ_REMINDER_STATUS,
     C_REQUIREMENTS_STATUS,
-    EMAIL_TYPE_INITIAL_REQUEST, EMAIL_TYPE_DEFICIENCY_REQUEST,
-    STATUS_PENDING, STATUS_ACTIVE, STATUS_SENT,
+    EMAIL_TYPE_INITIAL_REQUEST,
+    STATUS_QUEUED, STATUS_ACTIVE, STATUS_SENT,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -83,6 +84,26 @@ def _coerce_client_name(raw_value) -> str:
 
 
 def send_initial_vendor_requests() -> None:
+    """Send queued "Initial Request" emails.
+
+    Scope note (duplicate-send fix): this module used to also send
+    "Deficiency Request" rows, in parallel with module_10_vendor_email_sender.py
+    draining the same queue off a different status field (Email Status here
+    vs. Reminder Status there) — every Initial Request / Deficiency Request
+    email was sent twice as a result. Reminder Status is the field read/written
+    by every other Email Queue producer/consumer in the codebase (module_15,
+    module_19, module_22, processor.py, etc.), so it's now the single source
+    of truth for "has this row been sent" — this module reads/writes Reminder
+    Status instead of Email Status, and is scoped to "Initial Request" only
+    (its Requirements-Status-received guard and 30-day dedup guard only ever
+    applied to that type anyway). module_10_vendor_email_sender.py explicitly
+    excludes "Initial Request" so the two senders can never claim the same
+    row. "Deficiency Request" rows are now sent solely by module_10, which
+    already recognized that Email Type and requires no change to send it.
+    Email Status is still written on a successful send (kept in sync, not
+    read by anything anymore) purely so the Airtable UI doesn't show a
+    permanently-stale "Pending" value for rows this module sends.
+    """
     if not all([AIRTABLE_API_KEY, AIRTABLE_BASE_ID, SENDGRID_API_KEY, SENDGRID_FROM_EMAIL]):
         raise RuntimeError(
             "Missing required environment variables: AIRTABLE_API_KEY, AIRTABLE_BASE_ID, "
@@ -94,9 +115,9 @@ def send_initial_vendor_requests() -> None:
     sendgrid = SendGridAPIClient(api_key=SENDGRID_API_KEY)
 
     formula = (
-        "AND("  # Minimal safe send criteria using current Email Queue schema.
-        f"{{{EQ_EMAIL_STATUS}}}='{STATUS_PENDING}',"
-        f"OR({{{EQ_EMAIL_TYPE}}}='{EMAIL_TYPE_INITIAL_REQUEST}',{{{EQ_EMAIL_TYPE}}}='{EMAIL_TYPE_DEFICIENCY_REQUEST}'),"
+        "AND("
+        f"{{{EQ_REMINDER_STATUS}}}='{STATUS_QUEUED}',"
+        f"{{{EQ_EMAIL_TYPE}}}='{EMAIL_TYPE_INITIAL_REQUEST}',"
         f"{{{EQ_RECORD_STATUS}}}='{STATUS_ACTIVE}',"
         f"{{{EQ_PRIMARY_EMAIL}}}!=''"
         ")"
@@ -202,8 +223,34 @@ def send_initial_vendor_requests() -> None:
                 message.personalizations[0].add_cc([Cc(email) for email in cc_values])
             message.reply_to = Email(_cfg.INBOUND_EMAIL)
 
+            # --- Freshness re-check: re-fetch immediately before sending ---
+            # Airtable's REST API has no compare-and-swap / conditional update,
+            # so this can't be a true atomic claim — but re-reading the record
+            # right before the send (rather than trusting the batch fetched at
+            # the top of this run) shrinks the window in which an overlapping
+            # invocation of this same script could send the same row twice
+            # down to just this one record, instead of the whole batch.
+            try:
+                current = email_queue_table.get(record_id)
+                current_status = current.get("fields", {}).get(EQ_REMINDER_STATUS)
+            except Exception as exc:
+                logger.error(
+                    "record_id=%s freshness re-check failed, skipping to be safe: %s",
+                    record_id, exc,
+                )
+                skipped += 1
+                continue
+            if current_status != STATUS_QUEUED:
+                skipped += 1
+                logger.info(
+                    "record_id=%s no longer Queued (now %r) — already claimed, skipping",
+                    record_id, current_status,
+                )
+                continue
+
+            apply_sandbox_if_enabled(message)
             response = sendgrid.send(message)
-            if response.status_code == 202:
+            if response.status_code in (202, 200):
                 sent_successfully += 1
                 logger.info(
                     "record_id=%s email_type=%s recipient=%s success=sent",
@@ -215,6 +262,7 @@ def send_initial_vendor_requests() -> None:
                     email_queue_table.update(
                         record_id,
                         {
+                            EQ_REMINDER_STATUS: STATUS_SENT,
                             EQ_EMAIL_STATUS: STATUS_SENT,
                             EQ_SENT_AT: datetime.now(timezone.utc).isoformat(),
                         },

@@ -18,9 +18,11 @@ from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail, Email, To, Cc, Content
 from email_template import build_email_html
 import config as _cfg
+from sendgrid_utils import apply_sandbox_if_enabled
 from airtable_constants import (
     TBL_EMAIL_QUEUE, EQ_PRIMARY_EMAIL, EQ_SUBJECT, EQ_BODY, EQ_CC_EMAILS,
-    EQ_REMINDER_STATUS, EQ_SEND_AFTER, STATUS_QUEUED, STATUS_SENT, STATUS_FAILED,
+    EQ_REMINDER_STATUS, EQ_SEND_AFTER, EQ_EMAIL_TYPE, STATUS_QUEUED, STATUS_SENT,
+    STATUS_FAILED, EMAIL_TYPE_INITIAL_REQUEST,
 )
 
 # Email Queue Email Type values that belong to a follow-up ladder. Module_10
@@ -61,7 +63,20 @@ def send_queued_emails(api):
     sg = SendGridAPIClient(api_key=os.getenv("SENDGRID_API_KEY"))
     from_email = Email(os.getenv("SENDGRID_FROM_EMAIL"), "Carolina Compliance Solutions")
     table = api.table(BASE_ID, TBL_EMAIL_QUEUE)
-    records = table.all(formula=f"AND({{{EQ_REMINDER_STATUS}}} = '{STATUS_QUEUED}', {{{EQ_SEND_AFTER}}} <= NOW())")
+    # "Initial Request" rows are sent exclusively by
+    # module_18_vendor_initial_request_sender.py (it applies a
+    # requirements-received guard and a 30-day dedup check that this module
+    # doesn't know about) — excluded here so the two senders can never claim
+    # the same row. This, plus both modules now keying off the same
+    # Reminder Status field, is the fix for the duplicate-send bug where
+    # Initial Request / Deficiency Request emails were sent by both senders.
+    records = table.all(
+        formula=(
+            f"AND({{{EQ_REMINDER_STATUS}}} = '{STATUS_QUEUED}', "
+            f"{{{EQ_SEND_AFTER}}} <= NOW(), "
+            f"{{{EQ_EMAIL_TYPE}}} != '{EMAIL_TYPE_INITIAL_REQUEST}')"
+        )
+    )
     record_count = len(records)
     logging.info(f"Found {record_count} queued email record(s).")
     if record_count == 0:
@@ -102,8 +117,26 @@ def send_queued_emails(api):
             if cc_emails:
                 mail.personalizations[0].add_cc(cc_emails)
 
+            # --- Freshness re-check: re-fetch immediately before sending ---
+            # Airtable's REST API has no compare-and-swap / conditional
+            # update, so this isn't a true atomic claim — but re-reading the
+            # record right before the send shrinks the window in which an
+            # overlapping invocation of this same script could send the same
+            # row twice down to just this one record, instead of the whole
+            # batch fetched at the top of this run.
+            try:
+                current = table.get(record['id'])
+                current_status = current.get('fields', {}).get(EQ_REMINDER_STATUS)
+            except Exception as exc:
+                logging.error(f"Freshness re-check failed for {record['id']}, skipping to be safe: {exc}")
+                continue
+            if current_status != STATUS_QUEUED:
+                logging.info(f"{record['id']} no longer Queued (now {current_status!r}) — already claimed, skipping")
+                continue
+
+            apply_sandbox_if_enabled(mail)
             response = sg.send(mail)
-            if response.status_code == 202:
+            if response.status_code in (202, 200):
                 update_email_status(api, record['id'], STATUS_SENT)
                 _maybe_stamp_ladder(api, fields)
             else:

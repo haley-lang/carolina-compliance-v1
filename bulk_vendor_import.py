@@ -236,6 +236,7 @@ def _send_import_summary(client_name, imported_names, skipped_names, failed_name
         from sendgrid import SendGridAPIClient
         from sendgrid.helpers.mail import Mail, Email
         from legal_disclaimer import EMAIL_DISCLAIMER
+        from sendgrid_utils import apply_sandbox_if_enabled
 
         sg = SendGridAPIClient(api_key=sendgrid_api_key)
         message = Mail(
@@ -245,6 +246,7 @@ def _send_import_summary(client_name, imported_names, skipped_names, failed_name
             plain_text_content=body + EMAIL_DISCLAIMER,
         )
         message.reply_to = Email(config.reply_to_for("internal"))
+        apply_sandbox_if_enabled(message)
         sg.send(message)
         logger.info("Import summary email sent to %s", to_email)
     except Exception as e:

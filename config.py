@@ -46,6 +46,11 @@ COI_REVIEW_CONFIDENCE_THRESHOLD = float(
     os.getenv("COI_REVIEW_CONFIDENCE_THRESHOLD", "0.95")
 )
 
+# Pilot safety net — set to "true" to suppress all SendGrid delivery.
+# SendGrid accepts the request and logs it in the Activity Feed but delivers nothing.
+# Must be explicitly set to "false" (or removed) to re-enable real sends.
+SENDGRID_SANDBOX_MODE: bool = os.getenv("SENDGRID_SANDBOX_MODE", "true").strip().lower() == "true"
+
 
 def validate_config():
     required = {

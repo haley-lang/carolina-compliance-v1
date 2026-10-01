@@ -166,6 +166,7 @@ def send_summary_email(today_str: str, results: list, failures: list,
         from sendgrid import SendGridAPIClient
         from sendgrid.helpers.mail import Mail, Email
         from legal_disclaimer import EMAIL_DISCLAIMER
+        from sendgrid_utils import apply_sandbox_if_enabled
 
         sg = SendGridAPIClient(api_key=sendgrid_api_key)
         message = Mail(
@@ -175,6 +176,7 @@ def send_summary_email(today_str: str, results: list, failures: list,
             plain_text_content=body + EMAIL_DISCLAIMER,
         )
         message.reply_to = Email(config.reply_to_for("internal"))
+        apply_sandbox_if_enabled(message)
         sg.send(message)
         logger.info("Backup summary email sent to %s", config.OWNER_EMAIL)
     except Exception as e:
