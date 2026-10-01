@@ -74,19 +74,19 @@ def test_build_fields_writes_auto_approved_for_high_confidence():
     assert fields["Review Reason"] == "N/A"
 
 
-def test_build_fields_writes_pending_review_for_low_confidence():
+def test_build_fields_writes_low_confidence_processing_status():
     data = _base_data()
     data["confidence"] = 0.5
     fields = build_fields("acme.json", data, json.dumps(data), is_possible_duplicate=False)
-    assert fields["Processing Status"] == "Pending Review"
+    assert fields["Processing Status"] == "Low Confidence"
     assert fields["Review Status"] == "Pending Review"
     assert fields["Review Reason"] == "Low Confidence"
 
 
-def test_build_fields_writes_pending_review_for_duplicate():
+def test_build_fields_writes_duplicate_processing_status():
     data = _base_data()
     data["confidence"] = 0.99  # high — would auto-approve, but duplicate trumps
     fields = build_fields("acme.json", data, json.dumps(data), is_possible_duplicate=True)
-    assert fields["Processing Status"] == "Pending Review"
+    assert fields["Processing Status"] == "Duplicate"
     assert fields["Review Status"] == "Pending Review"
     assert fields["Review Reason"] == "Possible Duplicate"

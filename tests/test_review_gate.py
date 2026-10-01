@@ -14,7 +14,9 @@ from review_gate import (
     REVIEW_REASON_BOTH,
     REVIEW_REASON_POSSIBLE_DUPLICATE,
     PROCESSING_STATUS_IMPORTED,
-    PROCESSING_STATUS_PENDING_REVIEW,
+    PROCESSING_STATUS_DUPLICATE,
+    PROCESSING_STATUS_LOW_CONFIDENCE,
+    PROCESSING_STATUS_NEEDS_REVIEW,
 )
 
 
@@ -36,47 +38,47 @@ def test_auto_approved_at_exact_threshold():
 
 def test_low_confidence_just_below_threshold():
     assert compute_review_status(confidence=0.949, is_possible_duplicate=False, threshold=0.95) == (
-        REVIEW_STATUS_PENDING_REVIEW, REVIEW_REASON_LOW_CONFIDENCE, PROCESSING_STATUS_PENDING_REVIEW,
+        REVIEW_STATUS_PENDING_REVIEW, REVIEW_REASON_LOW_CONFIDENCE, PROCESSING_STATUS_LOW_CONFIDENCE,
     )
 
 
 def test_low_confidence_none_value():
     """confidence=None → Low Confidence (fail-safe)."""
     assert compute_review_status(confidence=None, is_possible_duplicate=False) == (
-        REVIEW_STATUS_PENDING_REVIEW, REVIEW_REASON_LOW_CONFIDENCE, PROCESSING_STATUS_PENDING_REVIEW,
+        REVIEW_STATUS_PENDING_REVIEW, REVIEW_REASON_LOW_CONFIDENCE, PROCESSING_STATUS_LOW_CONFIDENCE,
     )
 
 
 def test_low_confidence_zero():
     """0.0 (triage path) → Low Confidence."""
     assert compute_review_status(confidence=0.0, is_possible_duplicate=False) == (
-        REVIEW_STATUS_PENDING_REVIEW, REVIEW_REASON_LOW_CONFIDENCE, PROCESSING_STATUS_PENDING_REVIEW,
+        REVIEW_STATUS_PENDING_REVIEW, REVIEW_REASON_LOW_CONFIDENCE, PROCESSING_STATUS_LOW_CONFIDENCE,
     )
 
 
 def test_low_confidence_non_numeric():
     """Defensive: 'high' string → Low Confidence."""
     assert compute_review_status(confidence="high", is_possible_duplicate=False) == (
-        REVIEW_STATUS_PENDING_REVIEW, REVIEW_REASON_LOW_CONFIDENCE, PROCESSING_STATUS_PENDING_REVIEW,
+        REVIEW_STATUS_PENDING_REVIEW, REVIEW_REASON_LOW_CONFIDENCE, PROCESSING_STATUS_LOW_CONFIDENCE,
     )
 
 
 def test_low_confidence_bool_excluded():
     """bool is int subclass; True should NOT coerce to 1.0 and auto-approve."""
     assert compute_review_status(confidence=True, is_possible_duplicate=False) == (
-        REVIEW_STATUS_PENDING_REVIEW, REVIEW_REASON_LOW_CONFIDENCE, PROCESSING_STATUS_PENDING_REVIEW,
+        REVIEW_STATUS_PENDING_REVIEW, REVIEW_REASON_LOW_CONFIDENCE, PROCESSING_STATUS_LOW_CONFIDENCE,
     )
 
 
 def test_possible_duplicate_takes_precedence_over_low_confidence():
     assert compute_review_status(confidence=0.5, is_possible_duplicate=True) == (
-        REVIEW_STATUS_PENDING_REVIEW, REVIEW_REASON_POSSIBLE_DUPLICATE, PROCESSING_STATUS_PENDING_REVIEW,
+        REVIEW_STATUS_PENDING_REVIEW, REVIEW_REASON_POSSIBLE_DUPLICATE, PROCESSING_STATUS_DUPLICATE,
     )
 
 
 def test_possible_duplicate_takes_precedence_over_auto_approved():
     assert compute_review_status(confidence=0.99, is_possible_duplicate=True) == (
-        REVIEW_STATUS_PENDING_REVIEW, REVIEW_REASON_POSSIBLE_DUPLICATE, PROCESSING_STATUS_PENDING_REVIEW,
+        REVIEW_STATUS_PENDING_REVIEW, REVIEW_REASON_POSSIBLE_DUPLICATE, PROCESSING_STATUS_DUPLICATE,
     )
 
 
@@ -137,7 +139,7 @@ def test_downgrade_auto_approved_to_pending_review_when_client_in_manual_window(
     incoming_table.update.assert_called_once_with("recXYZ", {
         "Review Status": "Pending Review",
         "Review Reason": "Onboarding Window",
-        "Processing Status": "Pending Review",
+        "Processing Status": "Needs Review",
     }, typecast=True)
 
 
@@ -145,7 +147,7 @@ def test_upgrade_low_confidence_to_both_when_client_in_manual_window():
     incoming_table = MagicMock()
     clients = [_make_client("cliABC", "Manual Review Window")]
     extraction_fields = {
-        "Processing Status": "Pending Review",
+        "Processing Status": "Low Confidence",
         "Review Status": "Pending Review",
         "Review Reason": "Low Confidence",
     }
@@ -206,10 +208,10 @@ def test_no_change_when_client_has_no_review_mode():
 
 
 def test_gate_skips_writes_for_pending_review_when_no_client_matched():
-    """Pending Review record with no client match → skip downstream writes anyway."""
+    """Low Confidence record with no client match → skip downstream writes anyway."""
     incoming_table = MagicMock()
     extraction_fields = {
-        "Processing Status": "Pending Review",
+        "Processing Status": "Low Confidence",
         "Review Status": "Pending Review",
         "Review Reason": "Low Confidence",
     }
