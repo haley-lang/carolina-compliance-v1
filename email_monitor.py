@@ -16,6 +16,7 @@ import time
 from utils import safe_filename, parse_email_date
 from airtable_client import (
     create_document_record, get_table, update_document_pdf_r2_key,
+    find_document_by_message_id,
 )
 from email_classifier import (
     classify_email, write_classification_to_airtable, SKIP_EVENTS,
@@ -60,6 +61,51 @@ def _cleanup_old_uploads(upload_dir: Path, max_age_seconds: int = 24 * 60 * 60) 
         logger.info("[uploads-cleanup] removed %d file(s) older than %dh",
                     deleted, max_age_seconds // 3600)
     return deleted
+
+
+# Must match extractor.EXTRACT_DIR — the extractor treats a file as "already
+# extracted" when extracted/<stem>.json exists, regardless of file contents.
+EXTRACT_DIR = Path("extracted")
+
+
+def _unique_upload_path(upload_dir: Path, safe_name: str,
+                        extract_dir: Path = EXTRACT_DIR) -> Path:
+    """Pick a save path that collides with neither uploads/ nor extracted/.
+
+    The extractor skips any upload whose stem already has an extracted JSON,
+    so a new certificate that happens to share a file name with an earlier one
+    (e.g. two subs both sending "COI.pdf") would be silently skipped forever.
+    Appending a counter until both locations are free prevents that.
+
+    The counter is always applied to the ORIGINAL stem (x_1, x_2, x_3), not the
+    previous candidate's stem (x_1_1, x_1_1_1).
+    """
+    base = Path(safe_name)
+    stem, ext = base.stem, base.suffix
+    dest = upload_dir / safe_name
+    counter = 1
+    while dest.exists() or (extract_dir / f"{dest.stem}.json").exists():
+        dest = upload_dir / f"{stem}_{counter}{ext}"
+        counter += 1
+    return dest
+
+
+def _archive_message(server, msg_id) -> None:
+    """Mark a message Seen and move it from INBOX to the Processed label.
+
+    Used for messages we deliberately skip (already ingested). Each step is
+    best-effort; a failure here must never abort intake of other messages.
+    """
+    try:
+        server.add_flags(msg_id, [b"\\Seen"])
+    except Exception as exc:
+        print(f"[email_monitor] add_flags failed for msg_id={msg_id}: {exc}")
+    try:
+        server.copy([msg_id], "Processed")
+        server.delete_messages([msg_id])
+        server.expunge()
+    except Exception as exc:
+        print(f"[email_monitor] Move to Processed failed for msg_id={msg_id}: {exc}")
 
 
 def decode_mime_words(value: str) -> str:
@@ -228,13 +274,10 @@ def fetch_unread_emails(server: IMAPClient) -> list[dict]:
                     continue
 
                 safe_name = safe_filename(filename)
-                dest = upload_dir / safe_name
 
-                # Avoid overwriting — append a counter if needed
-                counter = 1
-                while dest.exists():
-                    dest = upload_dir / f"{dest.stem}_{counter}{ext}"
-                    counter += 1
+                # Avoid overwriting AND avoid names the extractor would skip
+                # as "already extracted" — see _unique_upload_path.
+                dest = _unique_upload_path(upload_dir, safe_name)
 
                 try:
                     payload = part.get_payload(decode=True)
@@ -329,6 +372,30 @@ if __name__ == "__main__":
             if entry.get("save_error"):
                 print(f"[email_monitor] Attachment save error: {entry['save_error']}")
             try:
+                # ── Duplicate guard (same Message-ID already ingested) ───
+                # Two intake runners can fetch the same UNSEEN message before
+                # either has marked it Seen. If a record with this Message-ID
+                # already exists, drop our copy instead of creating a second
+                # Incoming Documents row (and a second extraction).
+                _existing = None
+                if entry.get("message_id"):
+                    try:
+                        _existing = find_document_by_message_id(entry["message_id"])
+                    except Exception as _dup_exc:
+                        print(f"[email_monitor] Duplicate check failed (continuing): {_dup_exc}")
+                if _existing:
+                    print(
+                        f"[email_monitor] Duplicate of Incoming Documents "
+                        f"{_existing.get('id')} (Message-ID match) — skipping"
+                    )
+                    for _p in entry["attachments"]:
+                        try:
+                            Path(_p).unlink()
+                        except OSError:
+                            pass
+                    _archive_message(server, entry["msg_id"])
+                    continue
+
                 record = create_document_record(
                     sender=entry["sender"],
                     subject=entry["subject"],

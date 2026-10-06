@@ -17,6 +17,15 @@ def get_table():
     return _table
 
 
+def find_document_by_message_id(message_id: str):
+    """Return the Incoming Documents record whose Source Email Message ID
+    matches, or None. Used to avoid ingesting the same email twice."""
+    if not message_id:
+        return None
+    escaped = message_id.replace("\\", "\\\\").replace("'", "\\'")
+    return get_table().first(formula=f"{{Source Email Message ID}}='{escaped}'")
+
+
 def create_document_record(
     sender: str,
     subject: str,
