@@ -273,6 +273,16 @@ def _import_single_file(json_path: Path, base_id: str, token: str) -> dict:
     logger.info("Creating record in Airtable table '%s'...", INCOMING_EXTRACTIONS_TABLE)
     record = push_to_airtable(base_id, token, fields)
     logger.info("Record created — Airtable ID: %s", record["id"])
+
+    # Keep the page this was read from on the row (non-fatal if it fails).
+    try:
+        from pyairtable import Api
+        import source_page
+        source_page.attach_source_page(
+            Api(token).table(base_id, INCOMING_EXTRACTIONS_TABLE), record["id"], json_path.name,
+        )
+    except Exception as _sp_exc:
+        logger.warning("Source page attach skipped for %s: %s", json_path.name, _sp_exc)
     return record
 
 
