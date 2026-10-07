@@ -907,6 +907,34 @@ def get_existing_policy_by_number(policies_table, policy_number: str) -> Optiona
     return policies_table.first(formula=formula)
 
 
+def get_existing_policy_for_term(policies_table, policy_number: str, effective_raw: str) -> Optional[dict]:
+    """Return the existing policy record for this exact policy TERM, or None.
+
+    A term is identified by policy number plus effective date, so a renewal that
+    keeps the same policy number is a new term and never overwrites the earlier
+    one (audits need a certificate for every term).
+
+    - Incoming effective date missing/unparseable: fall back to number-only
+      matching (previous behavior).
+    - Record on file has no effective date: treated as the same term, because
+      its term cannot be told apart.
+    """
+    safe_num = policy_number.replace("'", "\\'")
+    formula = f"{{Policy Number}} = '{safe_num}'"
+    new_effective = _parse_date_safe(effective_raw)
+    if new_effective is None:
+        return policies_table.first(formula=formula)
+
+    undated = None
+    for record in policies_table.all(formula=formula):
+        on_file = _parse_date_safe(str(record.get("fields", {}).get("Effective Date") or ""))
+        if on_file == new_effective:
+            return record
+        if on_file is None and undated is None:
+            undated = record
+    return undated
+
+
 def get_existing_policies_by_vendor_and_type(
     policies_table, vendor_record_id: str, policy_type: str
 ) -> list:
@@ -1402,9 +1430,10 @@ def process_policies(
         if not policy_number:
             logger.warning("Policy %d has no policy number.", idx)
 
+        effective_raw = (policy.get("effective_date") or "").strip()
         existing_policy = None
         if policy_number:
-            existing_policy = get_existing_policy_by_number(policies_table, policy_number)
+            existing_policy = get_existing_policy_for_term(policies_table, policy_number, effective_raw)
         if existing_policy:
             refreshed_fields = {
                 "Status": computed_status,
@@ -1465,30 +1494,41 @@ def process_policies(
             continue
 
         # ── Renewal detection: check for existing policies of same type ──────
-        effective_raw = (policy.get("effective_date") or "").strip()
         new_effective = _parse_date_safe(effective_raw)
+        same_type_policies = []
+        is_historical = False  # an earlier term than one already on file (backlog certificate)
 
         if policy_type and vendor_record_id:
             same_type_policies = get_existing_policies_by_vendor_and_type(
                 policies_table, vendor_record_id, policy_type
             )
             if same_type_policies and new_effective:
-                # Check if this is a renewal (newer) or a duplicate (older/same)
+                # Same start date as an existing policy of this type = duplicate.
+                # Earlier start date = an earlier term: keep it as history, never discard it.
                 is_duplicate = False
                 for existing in same_type_policies:
                     existing_effective_raw = existing["fields"].get("Effective Date", "")
                     existing_effective = _parse_date_safe(existing_effective_raw)
-                    if existing_effective and new_effective <= existing_effective:
+                    if existing_effective and new_effective == existing_effective:
                         logger.info(
-                            "Policy %d (%s) effective %s is not newer than existing %s (ID: %s) — skipping as duplicate.",
+                            "Policy %d (%s) effective %s matches existing %s (ID: %s) — skipping as duplicate.",
                             idx, policy_type, effective_raw, existing_effective_raw, existing["id"],
                         )
                         touched_ids.append(existing["id"])
                         is_duplicate = True
                         break
+                    if existing_effective and new_effective < existing_effective:
+                        is_historical = True
                 if is_duplicate:
                     continue
 
+                if is_historical:
+                    logger.info(
+                        "Policy %d (%s) effective %s is an earlier term than one on file — storing as Superseded history.",
+                        idx, policy_type, effective_raw,
+                    )
+
+            if same_type_policies and new_effective and not is_historical:
                 # New policy is newer — mark all existing same-type policies as Superseded
                 for existing in same_type_policies:
                     try:
@@ -1522,6 +1562,8 @@ def process_policies(
             fields["Effective Date"] = effective_raw
         if expiration_raw:
             fields["Expiration Date"] = expiration_raw
+        if is_historical:
+            fields["Status"] = "Superseded"
 
         # Claims-made fields from extraction
         policy_basis = (policy.get("policy_basis") or "").strip().lower()
@@ -1558,7 +1600,7 @@ def process_policies(
         # ── Carrier continuity check on renewals ─────────────────────────
         # same_type_policies is set above in the renewal detection block.
         # If it exists and had records, this is a renewal — run the check.
-        if 'same_type_policies' in dir() and same_type_policies:
+        if same_type_policies and not is_historical:
             try:
                 # Pick the most recent superseded policy for comparison
                 superseded = sorted(
