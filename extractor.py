@@ -19,6 +19,8 @@ import time
 from dotenv import load_dotenv
 import anthropic
 
+import pdf_bundle
+
 
 def call_claude_with_retry(func, *args, max_retries=3, retry_delay=10, **kwargs):
     """Wrap a Claude API call with retry logic for 500/529 errors.
@@ -738,7 +740,18 @@ def _process_single_file(file_path: Path) -> dict:
     # Page classification for PDFs
     page_map = {}
     if file_path.suffix.lower() == ".pdf":
-        page_map = classify_pdf_pages(file_path)
+        # A scanned PDF has no text layer, so the text classifier sees every page
+        # as "other". Skip it and let the model read the page images instead.
+        try:
+            scanned = not pdf_bundle.pdf_has_text_layer(file_path)
+        except Exception as exc:
+            log.warning("Text-layer check failed for %s: %s", file_path.name, exc)
+            scanned = False
+        if scanned:
+            log.info("%s has no text layer (scanned) — reading page images directly",
+                     file_path.name)
+        else:
+            page_map = classify_pdf_pages(file_path)
         if page_map:
             has_acord_25 = any(v == PAGE_TYPE_ACORD_25 for v in page_map.values())
             has_endorsement = any(v == PAGE_TYPE_ENDORSEMENT for v in page_map.values())
@@ -781,6 +794,26 @@ def _process_single_file(file_path: Path) -> dict:
     return data
 
 
+def _expand_bundle(file_path: Path) -> list[Path]:
+    """Split a multi-certificate PDF into one file per certificate.
+
+    Returns the files to extract: the new per-certificate files (original moved
+    to uploads/_originals), or [file_path] when no split is needed.
+    """
+    if file_path.suffix.lower() != ".pdf":
+        return [file_path]
+    try:
+        parts = pdf_bundle.split_pdf(file_path, file_path.parent, classify=classify_pdf_pages)
+    except Exception as exc:
+        log.exception("Could not split %s — extracting it as one document: %s",
+                      file_path.name, exc)
+        return [file_path]
+    if not parts:
+        return [file_path]
+    pdf_bundle.archive_original(file_path, file_path.parent)
+    return parts
+
+
 def run():
     log.info("=== Module 2: Document Extractor started ===")
 
@@ -799,7 +832,9 @@ def run():
             return
 
         # Batch mode: process all pending files in uploads/
-        pending = get_all_pending_files(UPLOAD_DIR)
+        pending = []
+        for _f in get_all_pending_files(UPLOAD_DIR):
+            pending.extend(_expand_bundle(_f))
         if not pending:
             log.info("No pending files to extract. Done.")
             return
