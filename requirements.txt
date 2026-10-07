@@ -3,7 +3,7 @@ pandas
 numpy
 pyairtable
 python-dotenv
-anthropic
+anthropic==0.88.0
 sendgrid
 pdf2image
 Pillow

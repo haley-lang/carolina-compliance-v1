@@ -607,7 +607,6 @@ def _run_second_pass_policy_extraction(client: anthropic.Anthropic, content: lis
         system=SECOND_PASS_POLICY_PROMPT,
         messages=[{"role": "user", "content": content}],
         max_tokens=1200,
-        temperature=0,
     )
     raw = response.content[0].text.strip()
     log.debug("Raw second-pass Claude response:\n%s", raw)
@@ -621,7 +620,6 @@ def _run_dedicated_acord_policy_table_reader(client: anthropic.Anthropic, conten
         system=DEDICATED_ACORD_POLICY_TABLE_PROMPT,
         messages=[{"role": "user", "content": content}],
         max_tokens=1500,
-        temperature=0,
     )
     raw = response.content[0].text.strip()
     log.debug("Raw dedicated policy-table response:\n%s", raw)
@@ -690,7 +688,6 @@ def extract_document(file_path: Path, page_map: dict = None) -> dict:
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": content}],
         max_tokens=2000,
-        temperature=0,
     )
 
     raw = response.content[0].text.strip()
