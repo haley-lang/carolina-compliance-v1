@@ -37,7 +37,7 @@ def build_page_map(folder: Path, work: Path) -> dict:
             continue
         out = work / norm(pdf.name)
         out.mkdir(parents=True, exist_ok=True)
-        for part in pdf_bundle.split_pdf(str(pdf), str(out)) or []:
+        for part in pdf_bundle.split_pdf(pdf, out) or []:
             pages[norm(Path(part).name)] = Path(part)
     return pages
 
