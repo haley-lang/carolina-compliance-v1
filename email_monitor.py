@@ -31,27 +31,42 @@ print("EMAIL MONITOR STARTED")
 logger = logging.getLogger(__name__)
 
 
-def _cleanup_old_uploads(upload_dir: Path, max_age_seconds: int = 24 * 60 * 60) -> int:
+def _cleanup_old_uploads(
+    upload_dir: Path,
+    max_age_seconds: int = 24 * 60 * 60,
+    extracted_dir: Path = Path("extracted"),
+    unextracted_max_age_seconds: int = 7 * 24 * 60 * 60,
+) -> int:
     """Delete files in upload_dir older than max_age_seconds. Returns count deleted.
+
+    A file that has NOT been extracted yet (no <stem>.json in extracted_dir) is
+    kept for up to unextracted_max_age_seconds (7 days) so a failed or skipped
+    extraction can be retried instead of silently losing the certificate. Files
+    kept this way are logged as warnings.
 
     Skips dotfiles (e.g. .gitkeep) and subdirectories. Permission errors are
     logged + skipped rather than raised — one un-deletable file should not
     abort the rest of the cleanup.
-
-    Safe to call at the top of every cron-imap-poll cycle: by the time a file
-    is 24h old, the extractor has consumed it in a prior cycle and the
-    canonical copy lives in R2 (modulo the failure modes documented in
-    backlog_r2_upload_retry_before_cleanup memory).
     """
     if not upload_dir.exists():
         return 0
     cutoff = time.time() - max_age_seconds
     deleted = 0
+    unextracted_cutoff = time.time() - unextracted_max_age_seconds
     for f in upload_dir.iterdir():
         if not f.is_file() or f.name.startswith("."):
             continue
         try:
             if f.stat().st_mtime < cutoff:
+                if (
+                    not (Path(extracted_dir) / f"{f.stem}.json").exists()
+                    and f.stat().st_mtime >= unextracted_cutoff
+                ):
+                    logger.warning(
+                        "[uploads-cleanup] KEEPING %s — older than %dh but not extracted yet",
+                        f.name, max_age_seconds // 3600,
+                    )
+                    continue
                 f.unlink()
                 deleted += 1
                 logger.info("[uploads-cleanup] deleted %s", f.name)

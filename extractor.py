@@ -858,6 +858,12 @@ def run():
 
         log.info("=== Batch complete: %d succeeded, %d failed out of %d ===",
                  succeeded, failed, len(pending))
+        missing = [f.name for f in pending if not (EXTRACT_DIR / (f.stem + ".json")).exists()]
+        if missing:
+            log.error("[extractor][RECONCILE] MISMATCH: expected %d extraction(s), %d have no result: %s",
+                      len(pending), len(missing), missing)
+            sys.exit(1)
+        log.info("[extractor][RECONCILE] OK: all %d file(s) have an extraction", len(pending))
 
     except FileNotFoundError as exc:
         log.error("File error: %s", exc)

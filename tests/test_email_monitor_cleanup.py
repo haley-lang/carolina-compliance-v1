@@ -23,7 +23,8 @@ def test_cleanup_deletes_files_just_over_24h(tmp_path):
     old = tmp_path / "old.pdf"
     _make_file(old, age_seconds=(24 * 60 * 60) + 60)
 
-    deleted = _cleanup_old_uploads(tmp_path)
+    ex = tmp_path / "ex"; ex.mkdir(); (ex / "old.json").write_text("{}")
+    deleted = _cleanup_old_uploads(tmp_path, extracted_dir=ex)
     assert deleted == 1
     assert not old.exists()
 
@@ -97,3 +98,20 @@ def test_cleanup_no_op_when_uploads_dir_missing(tmp_path):
     missing = tmp_path / "does_not_exist"
     deleted = _cleanup_old_uploads(missing)
     assert deleted == 0
+
+
+def test_cleanup_keeps_old_unextracted_file(tmp_path):
+    """Older than 24h but never extracted: kept (retry possible)."""
+    f = tmp_path / "never_extracted.pdf"
+    _make_file(f, age_seconds=(48 * 60 * 60))
+    ex = tmp_path / "ex"; ex.mkdir()
+    assert _cleanup_old_uploads(tmp_path, extracted_dir=ex) == 0
+    assert f.exists()
+
+
+def test_cleanup_deletes_unextracted_after_7_days(tmp_path):
+    f = tmp_path / "ancient.pdf"
+    _make_file(f, age_seconds=(8 * 24 * 60 * 60))
+    ex = tmp_path / "ex"; ex.mkdir()
+    assert _cleanup_old_uploads(tmp_path, extracted_dir=ex) == 1
+    assert not f.exists()
