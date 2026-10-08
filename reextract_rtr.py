@@ -32,7 +32,8 @@ import pdf_bundle
 from airtable_importer import INCOMING_EXTRACTIONS_TABLE, clean_base_id
 from review_gate import REVIEW_STATUS_REJECTED
 
-PRIOR_RAW_JSON_FIELD_ID = "fldTGsebc6o2ll5Pu"
+PRIOR_RAW_JSON_FIELD_NAME = "Prior Raw JSON (superseded)"  # read: table.all() returns field names
+PRIOR_RAW_JSON_FIELD_ID = "fldTGsebc6o2ll5Pu"             # write: ID is rename-safe
 
 # $ per million tokens for claude-sonnet-5-5 (same table as eval_extractor.py)
 _PRICE_IN, _PRICE_OUT = 2.0, 10.0
@@ -133,7 +134,7 @@ def run(cert_folder: Path, apply: bool, table) -> dict:
             total_cost += _estimate_cost(3500, 1200)
             new_fields = _build_refresh_fields(data)
             old_raw = f.get("Raw JSON") or ""
-            has_backup = bool(f.get(PRIOR_RAW_JSON_FIELD_ID))
+            has_backup = bool(f.get(PRIOR_RAW_JSON_FIELD_NAME))
 
             if apply:
                 update = dict(new_fields)
