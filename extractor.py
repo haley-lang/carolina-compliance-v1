@@ -54,8 +54,8 @@ UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "uploads"))
 EXTRACT_DIR = Path("extracted")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
-# One place to change the model. Set EXTRACTION_MODEL on Railway to switch; unset = the previous default.
-EXTRACTION_MODEL = os.getenv("EXTRACTION_MODEL", "").strip() or "claude-opus-4-5"
+# One place to change the model. Set EXTRACTION_MODEL env var on Railway to override; default is claude-sonnet-5-5.
+EXTRACTION_MODEL = os.getenv("EXTRACTION_MODEL", "").strip() or "claude-sonnet-5-5"
 
 
 def _response_text(response) -> str:
@@ -84,7 +84,21 @@ CANCELLATION_KEYWORDS = (
 
 # ── Extraction prompt ─────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are a document analysis assistant specializing in insurance documents.
+# Checkbox guidance shared with eval_extractor.py — edit here, not there.
+CHECKBOX_RULES = """\
+- CHECKBOX POSITION (ACORD 25, general liability row): the row reads "[box] CLAIMS-MADE  [box] OCCUR".
+  Each box belongs to the word on its RIGHT. The box immediately LEFT of the word OCCUR is the occurrence box;
+  the box immediately LEFT of the word CLAIMS-MADE is the claims-made box. An X in the box between the two words
+  means OCCUR is checked, NOT claims-made. Set policy_basis to "claims-made" ONLY when the X is in the box before
+  the word CLAIMS-MADE. Set policy_basis to null for Automobile, Workers Compensation and any row that has no such boxes.
+- UMBRELLA LIAB / EXCESS LIAB row reads "[box] OCCUR  [box] CLAIMS-MADE". Set policy_basis for umbrella and excess rows from the checked OCCUR or CLAIMS-MADE box on that row, using the same box-to-the-left-of-the-word rule. Return null only if neither box is checked.
+- ADDL INSD and SUBR WVD: base additional_insured_checked and waiver_of_subrogation_checked ONLY on what is written
+  in those two narrow columns for that row. Blank means false. Do not infer them from the description of operations.
+- EMPTY ROWS: return a policy row only if something is written in it (policy number, carrier, dates or limits).
+  Do not return rows for coverage lines that are blank on the form.
+"""
+
+_SYSTEM_PROMPT_TEMPLATE = """You are a document analysis assistant specializing in insurance documents.
 Extract structured data from the provided document image(s) and return ONLY valid JSON — no prose, no markdown fences.
 
 Rules:
@@ -191,6 +205,14 @@ Return this exact JSON structure:
     }
   ]
 }"""
+
+# CHECKBOX_RULES inserted just before "- RETROACTIVE DATE:" so every pipeline
+# extraction gets the box-reading guidance without a separate prompt variant.
+SYSTEM_PROMPT = _SYSTEM_PROMPT_TEMPLATE.replace(
+    "- RETROACTIVE DATE:",
+    CHECKBOX_RULES + "- RETROACTIVE DATE:",
+    1,
+)
 
 SECOND_PASS_POLICY_PROMPT = """You are a document analysis assistant specializing in insurance documents.
 Return ONLY valid JSON — no prose, no markdown fences.

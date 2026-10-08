@@ -30,23 +30,16 @@ PRICES = {
 }
 DEFAULT_MODELS = "claude-opus-4-5,claude-opus-5-5,claude-sonnet-5-5"
 
-CHECKBOX_RULES = """
-- CHECKBOX POSITION (ACORD 25, general liability row): the row reads "[box] CLAIMS-MADE  [box] OCCUR".
-  Each box belongs to the word on its RIGHT. The box immediately LEFT of the word OCCUR is the occurrence box;
-  the box immediately LEFT of the word CLAIMS-MADE is the claims-made box. An X in the box between the two words
-  means OCCUR is checked, NOT claims-made. Set policy_basis to "claims-made" ONLY when the X is in the box before
-  the word CLAIMS-MADE. Set policy_basis to null for Automobile, Workers Compensation and any row that has no such boxes.
-- ADDL INSD and SUBR WVD: base additional_insured_checked and waiver_of_subrogation_checked ONLY on what is written
-  in those two narrow columns for that row. Blank means false. Do not infer them from the description of operations.
-- EMPTY ROWS: return a policy row only if something is written in it (policy number, carrier, dates or limits).
-  Do not return rows for coverage lines that are blank on the form.
-"""
-
-
 def prompt_variants(base: str) -> dict:
-    marker = "- RETROACTIVE DATE:"
-    v2 = base.replace(marker, CHECKBOX_RULES.strip("\n") + "\n" + marker, 1) if marker in base else base + CHECKBOX_RULES
-    return {"current": base, "checkbox_v2": v2}
+    """Return the two prompt variants used during eval.
+
+    "checkbox_v2" is base unchanged — CHECKBOX_RULES are already embedded in
+    extractor.SYSTEM_PROMPT (the source of truth).  "current" strips them so
+    we can compare against old extractions made without those rules.
+    """
+    import extractor as _ext  # late import — consistent with this file's pattern
+    current = base.replace(_ext.CHECKBOX_RULES, "", 1)
+    return {"current": current, "checkbox_v2": base}
 
 
 def estimate_cost(model: str, in_tok: int, out_tok: int) -> float:
