@@ -53,6 +53,14 @@ load_dotenv()
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "uploads"))
 EXTRACT_DIR = Path("extracted")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+
+# One place to change the model. Set EXTRACTION_MODEL on Railway to switch; unset = the previous default.
+EXTRACTION_MODEL = os.getenv("EXTRACTION_MODEL", "").strip() or "claude-opus-4-5"
+
+
+def _response_text(response) -> str:
+    """Text of a model reply. Skips non-text blocks (some models return a "thinking" block first)."""
+    return "".join(b.text for b in response.content if getattr(b, "type", "") == "text").strip()
 SUPPORTED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png"}
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -633,12 +641,12 @@ def _parse_json_response(raw: str) -> dict:
 def _run_second_pass_policy_extraction(client: anthropic.Anthropic, content: list[dict]) -> dict:
     response = call_claude_with_retry(
         client.messages.create,
-        model="claude-opus-4-5",
+        model=EXTRACTION_MODEL,
         system=SECOND_PASS_POLICY_PROMPT,
         messages=[{"role": "user", "content": content}],
         max_tokens=1200,
     )
-    raw = response.content[0].text.strip()
+    raw = _response_text(response)
     log.debug("Raw second-pass Claude response:\n%s", raw)
     return _parse_json_response(raw)
 
@@ -646,12 +654,12 @@ def _run_second_pass_policy_extraction(client: anthropic.Anthropic, content: lis
 def _run_dedicated_acord_policy_table_reader(client: anthropic.Anthropic, content: list[dict]) -> dict:
     response = call_claude_with_retry(
         client.messages.create,
-        model="claude-opus-4-5",
+        model=EXTRACTION_MODEL,
         system=DEDICATED_ACORD_POLICY_TABLE_PROMPT,
         messages=[{"role": "user", "content": content}],
         max_tokens=1500,
     )
-    raw = response.content[0].text.strip()
+    raw = _response_text(response)
     log.debug("Raw dedicated policy-table response:\n%s", raw)
     return _parse_json_response(raw)
 
@@ -711,16 +719,16 @@ def extract_document(file_path: Path, page_map: dict = None) -> dict:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     content = build_message_content(file_path, page_map=page_map)
 
-    log.info("Sending request to Anthropic (model: claude-opus-4-5)…")
+    log.info("Sending request to Anthropic (model: %s)…", EXTRACTION_MODEL)
     response = call_claude_with_retry(
         client.messages.create,
-        model="claude-opus-4-5",
+        model=EXTRACTION_MODEL,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": content}],
         max_tokens=2000,
     )
 
-    raw = response.content[0].text.strip()
+    raw = _response_text(response)
     log.debug("Raw Claude response:\n%s", raw)
 
     try:

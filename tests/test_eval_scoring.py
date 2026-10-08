@@ -57,3 +57,12 @@ def test_summary_counts_checkbox_errors():
     out["policies"][0]["additional_insured_checked"] = True
     sm = es.summarize({"f1_06": es.score_page(page, out)})
     assert sm["checkbox_errors"]["ai"] == 1 and sm["pages_perfect"] == 0
+
+
+def test_compare_extractions_flags_only_real_differences():
+    a = perfect_output(GOLD["f1_07"])
+    b = perfect_output(GOLD["f1_07"])
+    assert es.compare_extractions(a, b) == []
+    b["policies"][0]["policy_basis"] = "claims-made"
+    b["policies"].append({"policy_type": "UMBRELLA LIAB"})  # empty row ignored
+    assert es.compare_extractions(a, b) == ["GL.basis: 'occurrence' vs 'claims-made'"]

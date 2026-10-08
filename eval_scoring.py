@@ -101,3 +101,37 @@ def summarize(page_scores: dict) -> dict:
     return {"checks": total, "correct": right, "accuracy": round(100.0 * right / total, 1) if total else 0.0,
             "pages_perfect": sum(1 for s in page_scores.values() if not s["errors"]),
             "pages": len(page_scores), "checkbox_errors": {k: v[0] for k, v in box.items()}}
+
+
+def compare_extractions(a: dict, b: dict) -> list:
+    """List the differences between two extractions of the same page (a = existing, b = new).
+    Uses the same normalization as scoring. Empty rows are ignored."""
+    diffs = []
+    if str(a.get("document_type") or "").lower() != str(b.get("document_type") or "").lower():
+        diffs.append(f"document_type: {a.get('document_type')!r} vs {b.get('document_type')!r}")
+
+    def rows(x):
+        out = {}
+        for p in (x.get("policies") or []):
+            if isinstance(p, dict) and not _is_empty(p):
+                out.setdefault(family(p.get("policy_type")), []).append(p)
+        return out
+
+    ra, rb = rows(a), rows(b)
+    for fam in sorted(set(ra) | set(rb)):
+        la, lb = ra.get(fam, []), rb.get(fam, [])
+        if len(la) != len(lb):
+            diffs.append(f"{fam}: {len(la)} row(s) vs {len(lb)} row(s)")
+            continue
+        for pa, pb in zip(la, lb):
+            pairs = (("number", norm_number(pa.get("policy_number")), norm_number(pb.get("policy_number"))),
+                     ("eff", norm_date(pa.get("effective_date")), norm_date(pb.get("effective_date"))),
+                     ("exp", norm_date(pa.get("expiration_date")), norm_date(pb.get("expiration_date"))),
+                     ("basis", norm_basis(pa.get("policy_basis")), norm_basis(pb.get("policy_basis"))),
+                     ("ai", bool(pa.get("additional_insured_checked")), bool(pb.get("additional_insured_checked"))),
+                     ("wos", bool(pa.get("waiver_of_subrogation_checked")), bool(pb.get("waiver_of_subrogation_checked"))),
+                     ("pnc", bool(pa.get("primary_noncontributory_checked")), bool(pb.get("primary_noncontributory_checked"))))
+            for name, x, y in pairs:
+                if x != y:
+                    diffs.append(f"{fam}.{name}: {x!r} vs {y!r}")
+    return diffs

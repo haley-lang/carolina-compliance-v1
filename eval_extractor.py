@@ -99,8 +99,9 @@ def main():
                     t0 = time.time()
                     try:
                         resp = client.messages.create(model=model, system=variants[pname],
-                                                      messages=[{"role": "user", "content": content}], max_tokens=2000)
-                        raw = resp.content[0].text.strip()
+                                                      messages=[{"role": "user", "content": content}], max_tokens=6000)
+                        # Some models return a "thinking" block first; only the text blocks hold the answer.
+                        raw = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
                         data = extractor._parse_json_response(raw)
                         data = extractor.normalize_policy_dates(data)
                         spend[key] += estimate_cost(model, resp.usage.input_tokens, resp.usage.output_tokens)
