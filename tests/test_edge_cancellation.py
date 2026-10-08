@@ -29,7 +29,7 @@ class TestCancellationDetection:
     def test_reinstatement_takes_priority(self):
         """Reinstatement keywords should override cancellation."""
         from extractor import apply_simple_document_classification
-        data = {"document_type": "COI", "named_insured": "Test Corp reinstatement"}
+        data = {"document_type": "notice of cancellation and reinstatement", "named_insured": "Test Corp"}
         result = apply_simple_document_classification(data, Path("doc.pdf"))
         assert result["document_type"] == "reinstatement"
 

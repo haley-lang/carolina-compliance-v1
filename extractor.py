@@ -476,13 +476,41 @@ def detect_cancellation_notice(*text_chunks: str) -> bool:
     return any(keyword in combined_text for keyword in CANCELLATION_KEYWORDS)
 
 
+_POLICY_CONTENT_KEYS = ("policy_number", "carrier", "effective_date", "expiration_date", "coverage_limits")
+
+
+def drop_empty_policies(data: dict) -> dict:
+    """Remove policy entries where every identifying field is blank.
+
+    The model sometimes returns a row for every coverage line printed on the form
+    (Umbrella, Excess, Auto...) even when that row has nothing in it. Those would
+    otherwise become empty policy records. A row with any of policy number,
+    carrier, dates or limits is kept.
+    """
+    policies = data.get("policies")
+    if not isinstance(policies, list):
+        return data
+    kept = [
+        p for p in policies
+        if isinstance(p, dict) and any(str(p.get(k) or "").strip() for k in _POLICY_CONTENT_KEYS)
+    ]
+    dropped = len(policies) - len(kept)
+    if dropped:
+        log.info("Dropped %d empty policy row(s) with no policy number, carrier, dates or limits.", dropped)
+    data["policies"] = kept
+    return data
+
+
 def apply_simple_document_classification(data: dict, source_file: Path) -> dict:
     """Apply lightweight keyword-based document classification."""
+    # Only the file name and the document_type the model returned are searched.
+    # The rest of the extraction (description of operations, insured name, etc.)
+    # must NOT be searched: ordinary certificates routinely say "30 day notice of
+    # cancellation" in the description, which used to turn them into cancellation
+    # notices.
     searchable = [
         source_file.name,
         data.get("document_type") or "",
-        data.get("named_insured") or "",
-        json.dumps(data, ensure_ascii=False),
     ]
 
     combined_text = " ".join(str(chunk or "") for chunk in searchable).lower()
@@ -781,6 +809,7 @@ def _process_single_file(file_path: Path) -> dict:
     data = extract_document(file_path, page_map=page_map)
     data = normalize_policy_dates(data)
     data = apply_simple_document_classification(data, file_path)
+    data = drop_empty_policies(data)
     if page_map:
         data["_page_map"] = page_map
     out_path = save_extraction(data, file_path)
