@@ -1,0 +1,49 @@
+{
+  "_note": "Hand-verified against the page images by Claude (not yet re-checked by Haley). Page ids match the PDF names in the gold folder. Dates are YYYY-MM-DD. basis: occurrence / claims-made / null. ai/wos/pnc are the ADDL INSD / SUBR WVD columns and description wording.",
+  "pages": {
+    "f1_01": {"doc_type": "COI", "policies": [
+      {"family": "GL", "number": "CPP0059775", "eff": "2026-07-29", "exp": "2027-07-29", "basis": "occurrence", "ai": false, "wos": false, "pnc": false},
+      {"family": "WC", "number": "WCP1028001", "eff": "2026-07-29", "exp": "2027-07-29", "basis": null, "ai": false, "wos": false, "pnc": false}]},
+    "f1_02": {"doc_type": "COI", "policies": [
+      {"family": "GL", "number": "BGNC0032795801", "eff": "2026-03-06", "exp": "2027-03-06", "basis": "occurrence", "ai": false, "wos": false, "pnc": false},
+      {"family": "WC", "number": "WCB1045320", "eff": "2026-08-13", "exp": "2027-08-13", "basis": null, "ai": false, "wos": false, "pnc": false}]},
+    "f1_03": {"doc_type": "COI", "policies": [
+      {"family": "GL", "number": "BGNC0032795800", "eff": "2025-03-06", "exp": "2026-03-06", "basis": "occurrence", "ai": false, "wos": false, "pnc": false},
+      {"family": "WC", "number": "1AUINC160154526000", "eff": "2025-03-08", "exp": "2026-03-08", "basis": null, "ai": false, "wos": false, "pnc": false}]},
+    "f1_04": {"doc_type": "COI", "policies": [
+      {"family": "GL", "number": "GL 1256797", "eff": "2024-07-24", "exp": "2025-07-24", "basis": "occurrence", "ai": false, "wos": false, "pnc": false}]},
+    "f1_05": {"doc_type": "COI", "policies": [
+      {"family": "GL", "number": "Q61-0524623", "eff": "2026-02-27", "exp": "2027-02-27", "basis": "occurrence", "ai": false, "wos": false, "pnc": false}]},
+    "f1_06": {"doc_type": "COI", "policies": [
+      {"family": "GL", "number": "BWG68831084", "eff": "2025-02-07", "exp": "2026-02-07", "basis": "occurrence", "ai": false, "wos": false, "pnc": false}]},
+    "f1_07": {"doc_type": "COI", "policies": [
+      {"family": "GL", "number": "MWZY31222326", "eff": "2026-03-01", "exp": "2027-03-01", "basis": "occurrence", "ai": true, "wos": true, "pnc": true},
+      {"family": "AUTO", "number": "MWTB31222226", "eff": "2026-03-01", "exp": "2027-03-01", "basis": null, "ai": true, "wos": true, "pnc": true},
+      {"family": "WC", "number": "MWC31222426", "eff": "2026-03-01", "exp": "2027-03-01", "basis": null, "ai": false, "wos": true, "pnc": false}]},
+    "f1_08": {"doc_type": "COI", "policies": [
+      {"family": "GL", "number": "MWZY31222326", "eff": "2026-03-01", "exp": "2027-03-01", "basis": "occurrence", "ai": true, "wos": true, "pnc": true},
+      {"family": "AUTO", "number": "MWTB31222226", "eff": "2026-03-01", "exp": "2027-03-01", "basis": null, "ai": true, "wos": true, "pnc": true},
+      {"family": "WC", "number": "MWC31222426", "eff": "2026-03-01", "exp": "2027-03-01", "basis": null, "ai": false, "wos": true, "pnc": false}]},
+    "f0_11": {"doc_type": "COI", "policies": [
+      {"family": "GL", "number": "Q61-0338745", "eff": "2024-11-09", "exp": "2025-11-09", "basis": "occurrence", "ai": false, "wos": false, "pnc": false},
+      {"family": "WC", "number": "Q95-0900787", "eff": "2024-11-09", "exp": "2025-11-09", "basis": null, "ai": false, "wos": false, "pnc": false}]},
+    "f0_19": {"doc_type": "COI", "policies": [
+      {"family": "GL", "number": "NPP6108824", "eff": "2025-05-25", "exp": "2026-05-25", "basis": "occurrence", "ai": false, "wos": false, "pnc": false},
+      {"family": "WC", "number": "6ZZUB-1K38457-5-25", "eff": "2025-05-25", "exp": "2026-05-25", "basis": null, "ai": false, "wos": false, "pnc": false}]},
+    "f0_26": {"doc_type": "COI", "policies": [
+      {"family": "GL", "number": "MWZY31307126", "eff": "2026-06-30", "exp": "2027-06-30", "basis": "occurrence", "ai": false, "wos": false, "pnc": false},
+      {"family": "AUTO", "number": "MWTB 313070-26", "eff": "2026-06-30", "exp": "2027-06-30", "basis": null, "ai": false, "wos": false, "pnc": false},
+      {"family": "WC", "number": "MWC31557126", "eff": "2026-06-30", "exp": "2027-06-30", "basis": null, "ai": false, "wos": false, "pnc": false},
+      {"family": "EXCESS_WC", "number": "MWXS31557226", "eff": "2026-06-30", "exp": "2027-06-30", "basis": null, "ai": false, "wos": false, "pnc": false}]},
+    "f0_30": {"doc_type": "COI", "policies": [
+      {"family": "GL", "number": "BGNC0025316303", "eff": "2025-04-17", "exp": "2026-04-17", "basis": "occurrence", "ai": false, "wos": false, "pnc": false},
+      {"family": "WC", "number": "R2WC624384", "eff": "2025-06-16", "exp": "2026-06-16", "basis": null, "ai": false, "wos": false, "pnc": false}]},
+    "f0_38": {"doc_type": "COI", "policies": [
+      {"family": "GL", "number": "CSU 0247205", "eff": "2026-01-22", "exp": "2027-01-22", "basis": "occurrence", "ai": false, "wos": false, "pnc": false},
+      {"family": "WC", "number": "6S62UB-A448439-9-26", "eff": "2026-05-19", "exp": "2027-05-19", "basis": null, "ai": false, "wos": false, "pnc": false}]},
+    "f0_47": {"doc_type": "COI", "policies": [
+      {"family": "GL", "number": "Q61-0299209", "eff": "2025-07-25", "exp": "2026-07-25", "basis": "occurrence", "ai": false, "wos": false, "pnc": false},
+      {"family": "AUTO", "number": "Q09-1531691", "eff": "2025-09-15", "exp": "2026-09-15", "basis": null, "ai": false, "wos": false, "pnc": false},
+      {"family": "WC", "number": "Q73-0041406", "eff": "2025-07-25", "exp": "2026-07-25", "basis": null, "ai": false, "wos": false, "pnc": false}]}
+  }
+}
