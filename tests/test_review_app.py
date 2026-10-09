@@ -1,6 +1,7 @@
 """Tests for review_app.py — login, flags, approve, corrections, and safety invariants."""
 import json
 import os
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -8,12 +9,13 @@ import pytest
 # Set env var before importing review_app
 os.environ.setdefault("REVIEW_PASSWORD", "test_review_pass")
 
+_TEST_CSRF = "test_csrf_token_32chars_padding_00"
+
 
 @pytest.fixture
 def app():
     import review_app
     review_app.app.config["TESTING"] = True
-    review_app.app.config["WTF_CSRF_ENABLED"] = False
     return review_app.app
 
 
@@ -22,14 +24,32 @@ def client(app):
     return app.test_client()
 
 
+@pytest.fixture(autouse=True)
+def clear_rate_limit():
+    import review_app
+    review_app._login_failures.clear()
+    yield
+    review_app._login_failures.clear()
+
+
+@pytest.fixture
+def csrf_client(client):
+    """Unauthenticated client with a CSRF token pre-seeded."""
+    with client.session_transaction() as sess:
+        sess["csrf_token"] = _TEST_CSRF
+    return client
+
+
 @pytest.fixture
 def authed_client(client):
     with client.session_transaction() as sess:
         sess["authenticated"] = True
+        sess["logged_in_at"] = time.time()
+        sess["csrf_token"] = _TEST_CSRF
     return client
 
 
-# ── Login ─────────────────────────────────────────────────────────────────────
+# ── Login / auth redirects ─────────────────────────────────────────────────────
 
 def test_unauthed_queue_redirects_to_login(client):
     resp = client.get("/queue", follow_redirects=False)
@@ -44,20 +64,131 @@ def test_unauthed_detail_redirects_to_login(client):
 
 
 def test_unauthed_action_redirects_to_login(client):
+    # login_required runs before csrf_protect, so unauthenticated → redirect not 403
     resp = client.post("/action/recABC", data={"action": "approve"}, follow_redirects=False)
     assert resp.status_code == 302
     assert "/login" in resp.headers["Location"]
 
 
-def test_wrong_password_rejected(client):
-    resp = client.post("/login", data={"password": "wrong"}, follow_redirects=True)
+def test_wrong_password_rejected(csrf_client):
+    resp = csrf_client.post(
+        "/login",
+        data={"password": "wrong", "csrf_token": _TEST_CSRF},
+        follow_redirects=True,
+    )
     assert b"Wrong password" in resp.data
 
 
-def test_correct_password_grants_access(client):
-    resp = client.post("/login", data={"password": "test_review_pass"}, follow_redirects=False)
+def test_correct_password_grants_access(csrf_client):
+    resp = csrf_client.post(
+        "/login",
+        data={"password": "test_review_pass", "csrf_token": _TEST_CSRF},
+        follow_redirects=False,
+    )
     assert resp.status_code == 302
     assert "/queue" in resp.headers["Location"]
+
+
+# ── CSRF protection ───────────────────────────────────────────────────────────
+
+def test_login_post_without_csrf_returns_403(client):
+    resp = client.post("/login", data={"password": "test_review_pass"})
+    assert resp.status_code == 403
+
+
+def test_login_post_with_wrong_csrf_returns_403(client):
+    with client.session_transaction() as sess:
+        sess["csrf_token"] = _TEST_CSRF
+    resp = client.post("/login", data={"password": "test_review_pass", "csrf_token": "wrongtoken"})
+    assert resp.status_code == 403
+
+
+def test_action_post_without_csrf_returns_403(authed_client, mock_ie_table, mock_corr_table):
+    rec = _make_rec()
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table), \
+         patch("review_app._corrections_table", return_value=mock_corr_table):
+        resp = authed_client.post("/action/recTEST", data={"action": "approve"})
+    assert resp.status_code == 403
+
+
+def test_action_post_with_correct_csrf_succeeds(authed_client, mock_ie_table, mock_corr_table):
+    rec = _make_rec()
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table), \
+         patch("review_app._corrections_table", return_value=mock_corr_table):
+        resp = authed_client.post("/action/recTEST", data={
+            "csrf_token": _TEST_CSRF,
+            "action": "reject",
+            "why": "",
+        }, follow_redirects=False)
+    assert resp.status_code == 302
+
+
+# ── Rate limiting ─────────────────────────────────────────────────────────────
+
+def test_fifth_failure_is_still_allowed(csrf_client):
+    """Exactly 5 failures — the 5th attempt should NOT yet be locked out."""
+    import review_app
+    for _ in range(4):
+        csrf_client.post("/login", data={"password": "bad", "csrf_token": _TEST_CSRF})
+    resp = csrf_client.post(
+        "/login",
+        data={"password": "bad", "csrf_token": _TEST_CSRF},
+        follow_redirects=True,
+    )
+    assert b"Wrong password" in resp.data
+    assert b"Too many failed" not in resp.data
+
+
+def test_sixth_failure_triggers_lockout(csrf_client):
+    """After 5 failures, the 6th attempt should be locked out."""
+    import review_app
+    for _ in range(5):
+        csrf_client.post("/login", data={"password": "bad", "csrf_token": _TEST_CSRF})
+    resp = csrf_client.post(
+        "/login",
+        data={"password": "bad", "csrf_token": _TEST_CSRF},
+        follow_redirects=True,
+    )
+    assert b"Too many failed" in resp.data
+    assert resp.status_code == 429
+
+
+def test_correct_password_clears_failures(csrf_client):
+    import review_app
+    for _ in range(4):
+        csrf_client.post("/login", data={"password": "bad", "csrf_token": _TEST_CSRF})
+    csrf_client.post(
+        "/login",
+        data={"password": "test_review_pass", "csrf_token": _TEST_CSRF},
+    )
+    ip = "127.0.0.1"
+    assert ip not in review_app._login_failures
+
+
+# ── Session timeout ───────────────────────────────────────────────────────────
+
+def test_expired_session_redirects_to_login(client):
+    with client.session_transaction() as sess:
+        sess["authenticated"] = True
+        sess["logged_in_at"] = time.time() - 3700  # 61 minutes ago
+        sess["csrf_token"] = _TEST_CSRF
+    resp = client.get("/queue", follow_redirects=False)
+    assert resp.status_code == 302
+    assert "/login" in resp.headers["Location"]
+
+
+def test_fresh_session_not_expired(client):
+    with client.session_transaction() as sess:
+        sess["authenticated"] = True
+        sess["logged_in_at"] = time.time()
+        sess["csrf_token"] = _TEST_CSRF
+
+    with patch("review_app._ie_table") as mock_table:
+        mock_table.return_value.all.return_value = []
+        resp = client.get("/queue")
+    assert resp.status_code == 200
 
 
 # ── compute_flags ─────────────────────────────────────────────────────────────
@@ -199,27 +330,35 @@ def mock_corr_table():
     return MagicMock()
 
 
+def _approve_data(**overrides):
+    """Return a complete approve form dict with CSRF token pre-filled."""
+    base = {
+        "csrf_token": _TEST_CSRF,
+        "action": "approve",
+        "why": "",
+        "named_insured": "RTR LLC",
+        "certificate_holder": "GC Inc",
+        "policy_0_policy_type": "Commercial General Liability",
+        "policy_0_policy_number": "GL-001",
+        "policy_0_carrier": "Hartford",
+        "policy_0_effective_date": "2025-01-01",
+        "policy_0_expiration_date": "2026-01-01",
+        "policy_0_coverage_limits": "$1M",
+        "policy_0_policy_basis": "occurrence",
+        "policy_0_additional_insured_checked": "false",
+        "policy_0_waiver_of_subrogation_checked": "false",
+        "policy_0_primary_noncontributory_checked": "false",
+    }
+    base.update(overrides)
+    return base
+
+
 def test_approve_no_edits_sets_approved(authed_client, mock_ie_table, mock_corr_table):
     rec = _make_rec()
     mock_ie_table.get.return_value = rec
     with patch("review_app._ie_table", return_value=mock_ie_table), \
          patch("review_app._corrections_table", return_value=mock_corr_table):
-        resp = authed_client.post("/action/recTEST", data={
-            "action": "approve",
-            "why": "",
-            "named_insured": "RTR LLC",
-            "certificate_holder": "GC Inc",
-            "policy_0_policy_type": "Commercial General Liability",
-            "policy_0_policy_number": "GL-001",
-            "policy_0_carrier": "Hartford",
-            "policy_0_effective_date": "2025-01-01",
-            "policy_0_expiration_date": "2026-01-01",
-            "policy_0_coverage_limits": "$1M",
-            "policy_0_policy_basis": "occurrence",
-            "policy_0_additional_insured_checked": "false",
-            "policy_0_waiver_of_subrogation_checked": "false",
-            "policy_0_primary_noncontributory_checked": "false",
-        })
+        authed_client.post("/action/recTEST", data=_approve_data())
 
     update_args = mock_ie_table.update.call_args
     fields_written = update_args[0][1]
@@ -233,22 +372,9 @@ def test_approve_with_edit_sets_approved_edited(authed_client, mock_ie_table, mo
     mock_ie_table.get.return_value = rec
     with patch("review_app._ie_table", return_value=mock_ie_table), \
          patch("review_app._corrections_table", return_value=mock_corr_table):
-        resp = authed_client.post("/action/recTEST", data={
-            "action": "approve",
-            "why": "typo",
-            "named_insured": "RTR LLC",
-            "certificate_holder": "GC Inc",
-            "policy_0_policy_type": "Commercial General Liability",
-            "policy_0_policy_number": "GL-002",   # changed
-            "policy_0_carrier": "Hartford",
-            "policy_0_effective_date": "2025-01-01",
-            "policy_0_expiration_date": "2026-01-01",
-            "policy_0_coverage_limits": "$1M",
-            "policy_0_policy_basis": "occurrence",
-            "policy_0_additional_insured_checked": "false",
-            "policy_0_waiver_of_subrogation_checked": "false",
-            "policy_0_primary_noncontributory_checked": "false",
-        })
+        authed_client.post("/action/recTEST", data=_approve_data(
+            policy_0_policy_number="GL-002",
+        ))
 
     fields_written = mock_ie_table.update.call_args[0][1]
     assert fields_written["Review Status"] == "Approved + Edited"
@@ -260,26 +386,14 @@ def test_approve_each_changed_field_writes_one_correction(authed_client, mock_ie
     mock_ie_table.get.return_value = rec
     with patch("review_app._ie_table", return_value=mock_ie_table), \
          patch("review_app._corrections_table", return_value=mock_corr_table):
-        authed_client.post("/action/recTEST", data={
-            "action": "approve",
-            "why": "fixing",
-            "named_insured": "RTR LLC (edited)",   # changed
-            "certificate_holder": "GC Inc",
-            "policy_0_policy_type": "Commercial General Liability",
-            "policy_0_policy_number": "GL-002",   # changed
-            "policy_0_carrier": "Hartford",
-            "policy_0_effective_date": "2025-01-01",
-            "policy_0_expiration_date": "2026-01-01",
-            "policy_0_coverage_limits": "$1M",
-            "policy_0_policy_basis": "occurrence",
-            "policy_0_additional_insured_checked": "false",
-            "policy_0_waiver_of_subrogation_checked": "false",
-            "policy_0_primary_noncontributory_checked": "false",
-        })
+        authed_client.post("/action/recTEST", data=_approve_data(
+            named_insured="RTR LLC (edited)",
+            policy_0_policy_number="GL-002",
+            why="fixing",
+        ))
 
     # Two fields changed → two Corrections rows
     assert mock_corr_table.create.call_count == 2
-    # Each row should have Learning Status = "New"
     for call in mock_corr_table.create.call_args_list:
         assert call[0][0]["Learning Status"] == "New"
 
@@ -289,22 +403,10 @@ def test_approve_correction_row_has_required_fields(authed_client, mock_ie_table
     mock_ie_table.get.return_value = rec
     with patch("review_app._ie_table", return_value=mock_ie_table), \
          patch("review_app._corrections_table", return_value=mock_corr_table):
-        authed_client.post("/action/recTEST", data={
-            "action": "approve",
-            "why": "the reason",
-            "named_insured": "RTR LLC",
-            "certificate_holder": "GC Inc",
-            "policy_0_policy_type": "Commercial General Liability",
-            "policy_0_policy_number": "GL-NEW",   # changed
-            "policy_0_carrier": "Hartford",
-            "policy_0_effective_date": "2025-01-01",
-            "policy_0_expiration_date": "2026-01-01",
-            "policy_0_coverage_limits": "$1M",
-            "policy_0_policy_basis": "occurrence",
-            "policy_0_additional_insured_checked": "false",
-            "policy_0_waiver_of_subrogation_checked": "false",
-            "policy_0_primary_noncontributory_checked": "false",
-        })
+        authed_client.post("/action/recTEST", data=_approve_data(
+            policy_0_policy_number="GL-NEW",
+            why="the reason",
+        ))
 
     row = mock_corr_table.create.call_args[0][0]
     assert row["Source Filename"] == "cert01.json"
@@ -324,7 +426,9 @@ def test_reject_never_touches_processing_status(authed_client, mock_ie_table, mo
     mock_ie_table.get.return_value = rec
     with patch("review_app._ie_table", return_value=mock_ie_table), \
          patch("review_app._corrections_table", return_value=mock_corr_table):
-        authed_client.post("/action/recTEST", data={"action": "reject", "why": ""})
+        authed_client.post("/action/recTEST", data={
+            "csrf_token": _TEST_CSRF, "action": "reject", "why": "",
+        })
 
     fields_written = mock_ie_table.update.call_args[0][1]
     assert "Processing Status" not in fields_written
@@ -336,7 +440,9 @@ def test_escalate_never_touches_processing_status(authed_client, mock_ie_table, 
     mock_ie_table.get.return_value = rec
     with patch("review_app._ie_table", return_value=mock_ie_table), \
          patch("review_app._corrections_table", return_value=mock_corr_table):
-        authed_client.post("/action/recTEST", data={"action": "escalate", "why": ""})
+        authed_client.post("/action/recTEST", data={
+            "csrf_token": _TEST_CSRF, "action": "escalate", "why": "",
+        })
 
     fields_written = mock_ie_table.update.call_args[0][1]
     assert "Processing Status" not in fields_written
@@ -348,21 +454,7 @@ def test_approve_never_touches_processing_status(authed_client, mock_ie_table, m
     mock_ie_table.get.return_value = rec
     with patch("review_app._ie_table", return_value=mock_ie_table), \
          patch("review_app._corrections_table", return_value=mock_corr_table):
-        authed_client.post("/action/recTEST", data={
-            "action": "approve", "why": "",
-            "named_insured": "RTR LLC",
-            "certificate_holder": "GC Inc",
-            "policy_0_policy_type": "Commercial General Liability",
-            "policy_0_policy_number": "GL-001",
-            "policy_0_carrier": "Hartford",
-            "policy_0_effective_date": "2025-01-01",
-            "policy_0_expiration_date": "2026-01-01",
-            "policy_0_coverage_limits": "$1M",
-            "policy_0_policy_basis": "occurrence",
-            "policy_0_additional_insured_checked": "false",
-            "policy_0_waiver_of_subrogation_checked": "false",
-            "policy_0_primary_noncontributory_checked": "false",
-        })
+        authed_client.post("/action/recTEST", data=_approve_data())
 
     fields_written = mock_ie_table.update.call_args[0][1]
     assert "Processing Status" not in fields_written
@@ -376,21 +468,7 @@ def test_approve_never_overwrites_prior_raw_json(authed_client, mock_ie_table, m
     mock_ie_table.get.return_value = rec
     with patch("review_app._ie_table", return_value=mock_ie_table), \
          patch("review_app._corrections_table", return_value=mock_corr_table):
-        authed_client.post("/action/recTEST", data={
-            "action": "approve", "why": "",
-            "named_insured": "RTR LLC",
-            "certificate_holder": "GC Inc",
-            "policy_0_policy_type": "Commercial General Liability",
-            "policy_0_policy_number": "GL-001",
-            "policy_0_carrier": "Hartford",
-            "policy_0_effective_date": "2025-01-01",
-            "policy_0_expiration_date": "2026-01-01",
-            "policy_0_coverage_limits": "$1M",
-            "policy_0_policy_basis": "occurrence",
-            "policy_0_additional_insured_checked": "false",
-            "policy_0_waiver_of_subrogation_checked": "false",
-            "policy_0_primary_noncontributory_checked": "false",
-        })
+        authed_client.post("/action/recTEST", data=_approve_data())
 
     fields_written = mock_ie_table.update.call_args[0][1]
     assert "Prior Raw JSON (superseded)" not in fields_written

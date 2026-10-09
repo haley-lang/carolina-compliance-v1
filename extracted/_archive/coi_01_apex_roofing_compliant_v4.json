@@ -1,0 +1,61 @@
+{
+  "document_type": "COI",
+  "named_insured": "Apex Roofing Services, LLC",
+  "certificate_holder": "Bridges Construction Group, LLC",
+  "certificate_date": "2026-04-29",
+  "contact_emails": [
+    "marcus@carolinarisk.fake"
+  ],
+  "description_of_operations": "Bridges Construction Group, LLC is included as Additional Insured for ongoing and completed operations on a primary and non-contributory basis as required by written contract. Waiver of Subrogation applies in favor of Bridges Construction Group, LLC as required by written contract. RE: All operations performed by named insured for certificate holder.",
+  "confidence": 0.95,
+  "policies": [
+    {
+      "policy_type": "COMMERCIAL GENERAL LIABILITY",
+      "policy_number": "GL-7842-2026-A",
+      "policy_number_invalid": false,
+      "carrier": "Travelers Indemnity Company",
+      "effective_date": "2026-01-15",
+      "expiration_date": "2027-01-15",
+      "coverage_limits": "EACH OCCURRENCE $1,000,000, DAMAGE TO RENTED PREMISES (Ea occurrence) $300,000, MED EXP (Any one person) $5,000, PERSONAL & ADV INJURY $1,000,000, GENERAL AGGREGATE $2,000,000, PRODUCTS - COMP/OP AGG $2,000,000",
+      "policy_basis": "occurrence",
+      "retro_date": null,
+      "tail_coverage_evidenced": false,
+      "additional_insured_checked": true,
+      "waiver_of_subrogation_checked": true,
+      "primary_noncontributory_checked": true
+    },
+    {
+      "policy_type": "AUTOMOBILE LIABILITY",
+      "policy_number": "BA-7842-2026-A",
+      "policy_number_invalid": false,
+      "carrier": "Travelers Indemnity Company",
+      "effective_date": "2026-01-15",
+      "expiration_date": "2027-01-15",
+      "coverage_limits": "COMBINED SINGLE LIMIT (Ea accident) $1,000,000",
+      "policy_basis": null,
+      "retro_date": null,
+      "tail_coverage_evidenced": false,
+      "additional_insured_checked": true,
+      "waiver_of_subrogation_checked": true,
+      "primary_noncontributory_checked": true
+    },
+    {
+      "policy_type": "WORKERS COMPENSATION AND EMPLOYERS' LIABILITY",
+      "policy_number": "WC-7842-2026-A",
+      "policy_number_invalid": false,
+      "carrier": "Travelers Indemnity Company",
+      "effective_date": "2026-01-15",
+      "expiration_date": "2027-01-15",
+      "coverage_limits": "PER STATUTE, E.L. EACH ACCIDENT $1,000,000, E.L. DISEASE - EA EMPLOYEE $1,000,000, E.L. DISEASE - POLICY LIMIT $1,000,000",
+      "policy_basis": null,
+      "retro_date": null,
+      "tail_coverage_evidenced": false,
+      "additional_insured_checked": false,
+      "waiver_of_subrogation_checked": true,
+      "primary_noncontributory_checked": true
+    }
+  ],
+  "_page_map": {
+    "1": "acord_25"
+  }
+}

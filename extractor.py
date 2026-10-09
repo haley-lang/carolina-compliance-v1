@@ -508,27 +508,93 @@ def detect_cancellation_notice(*text_chunks: str) -> bool:
 
 
 _POLICY_CONTENT_KEYS = ("policy_number", "carrier", "effective_date", "expiration_date", "coverage_limits")
+_DOLLAR_AMOUNT_RE = re.compile(r'\$\s*([\d,]+(?:\.\d+)?)')
+
+
+def _is_zero_or_blank_limits(limits) -> bool:
+    """Return True if coverage_limits is blank or contains only $0 dollar amounts."""
+    v = str(limits or "").strip()
+    if not v:
+        return True
+    amounts = _DOLLAR_AMOUNT_RE.findall(v)
+    if not amounts:
+        return True
+    return all(float(a.replace(",", "")) == 0.0 for a in amounts)
+
+
+def _has_any_checked_box(p: dict) -> bool:
+    return bool(
+        p.get("additional_insured_checked")
+        or p.get("waiver_of_subrogation_checked")
+        or p.get("primary_noncontributory_checked")
+    )
+
+
+def _is_phantom_by_limits(p: dict) -> bool:
+    """Condition A: $0/blank limits + no carrier + no checked boxes."""
+    if str(p.get("carrier") or "").strip():
+        return False
+    if _has_any_checked_box(p):
+        return False
+    return _is_zero_or_blank_limits(p.get("coverage_limits"))
+
+
+def _is_phantom_by_duplicate_number(p: dict, pool: list) -> bool:
+    """Condition B: same policy_number + both dates as another row of different type,
+    with no carrier and no real limits."""
+    num = str(p.get("policy_number") or "").strip()
+    if not num:
+        return False
+    if str(p.get("carrier") or "").strip():
+        return False
+    if not _is_zero_or_blank_limits(p.get("coverage_limits")):
+        return False
+    eff = str(p.get("effective_date") or "").strip()
+    exp = str(p.get("expiration_date") or "").strip()
+    pt = (p.get("policy_type") or "").strip()
+    for other in pool:
+        if other is p:
+            continue
+        if not isinstance(other, dict):
+            continue
+        if (str(other.get("policy_number") or "").strip() == num
+                and str(other.get("effective_date") or "").strip() == eff
+                and str(other.get("expiration_date") or "").strip() == exp
+                and (other.get("policy_type") or "").strip() != pt):
+            return True
+    return False
 
 
 def drop_empty_policies(data: dict) -> dict:
-    """Remove policy entries where every identifying field is blank.
+    """Remove policy entries that are blank or phantom (model-copied placeholders).
 
-    The model sometimes returns a row for every coverage line printed on the form
-    (Umbrella, Excess, Auto...) even when that row has nothing in it. Those would
-    otherwise become empty policy records. A row with any of policy number,
-    carrier, dates or limits is kept.
+    Pass 1: drop rows where every identifying field is blank.
+    Pass 2: drop rows with $0/blank limits + no carrier + no checked boxes.
+    Pass 3: drop rows whose policy_number+dates duplicate another row of a different
+            policy_type, when they also have no carrier and no real limits.
     """
     policies = data.get("policies")
     if not isinstance(policies, list):
         return data
-    kept = [
+
+    after1 = [
         p for p in policies
         if isinstance(p, dict) and any(str(p.get(k) or "").strip() for k in _POLICY_CONTENT_KEYS)
     ]
-    dropped = len(policies) - len(kept)
-    if dropped:
-        log.info("Dropped %d empty policy row(s) with no policy number, carrier, dates or limits.", dropped)
-    data["policies"] = kept
+    after2 = [p for p in after1 if not _is_phantom_by_limits(p)]
+    after3 = [p for p in after2 if not _is_phantom_by_duplicate_number(p, after2)]
+
+    n_blank = len(policies) - len(after1)
+    n_limits = len(after1) - len(after2)
+    n_dupes = len(after2) - len(after3)
+    total = n_blank + n_limits + n_dupes
+
+    if total:
+        log.info(
+            "Dropped %d empty/phantom policy row(s): %d blank, %d zero-limits, %d duplicate-number.",
+            total, n_blank, n_limits, n_dupes,
+        )
+    data["policies"] = after3
     return data
 
 

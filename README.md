@@ -381,3 +381,42 @@ The script will:
 5. Skip policies that already have an open task with the same name
 6. Create a task linked to the policy and vendor for each actionable policy
 7. Log a summary of tasks created, duplicates skipped, and policies with no date
+
+---
+
+## Review App — Railway Deployment
+
+`review_app.py` is a Flask app for reviewing the Incoming Extractions queue. It
+lets a reviewer approve, reject, or escalate extracted COI records, with inline
+editing and second-read disagreement highlighting.
+
+### Railway service setup
+
+Create a **new Railway service** (do not add it to the existing pipeline service).
+
+**Start command:**
+
+```
+gunicorn review_app:app --bind 0.0.0.0:$PORT --workers 1
+```
+
+Single worker is intentional — the in-process login rate-limit table is not shared
+across workers. If you need more concurrency, move the rate-limit state to Redis.
+
+**Required environment variables** (set in Railway service → Variables):
+
+| Variable | Description |
+|---|---|
+| `REVIEW_PASSWORD` | The login password for the review UI. Pick a strong random string. |
+| `SESSION_SECRET_KEY` | 32+ character random hex string used to sign session cookies. Generate with: `python -c "import secrets; print(secrets.token_hex(32))"` |
+| `FLASK_HTTPS` | Set to `1` to enable the `Secure` cookie flag (required for HTTPS deployments). |
+| `AIRTABLE_API_KEY` | Same key used by the main pipeline. |
+| `AIRTABLE_BASE_ID` | Same base ID used by the main pipeline. |
+
+**Shared Variables note:** If `AIRTABLE_API_KEY` and `AIRTABLE_BASE_ID` are defined
+as Railway Shared Variables, you must explicitly attach them to this new service in
+the Railway UI (Variables → Add Reference). Shared Variables are opt-in per service.
+
+### Health check
+
+Railway's health check should use the `/login` route (GET returns 200).

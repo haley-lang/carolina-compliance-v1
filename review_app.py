@@ -1,4 +1,4 @@
-"""Local Flask review app for the Incoming Extractions queue.
+"""Flask review app for the Incoming Extractions queue.
 
 Start:
     REVIEW_PASSWORD=secret .venv/bin/python review_app.py
@@ -6,7 +6,9 @@ Start:
 Requires REVIEW_PASSWORD to be set. Reads the same AIRTABLE_API_KEY /
 AIRTABLE_BASE_ID as the rest of the pipeline from .env.
 
-DO NOT deploy — local only.
+For production deploy (Railway) also set:
+    SESSION_SECRET_KEY — random 32+ byte hex string
+    FLASK_HTTPS=1      — enables Secure cookie flag
 
 What Approve triggers downstream:
     Approve changes Review Status to "Approved" or "Approved + Edited".
@@ -19,6 +21,8 @@ What Approve triggers downstream:
 import json
 import os
 import re
+import secrets
+import time
 from datetime import datetime, timezone
 from functools import wraps
 
@@ -46,6 +50,14 @@ AI_DISAGREEMENTS_FIELD_ID = "fldbiX9zZHdF3RGDQ"
 PRIOR_RAW_JSON_FIELD_NAME = "Prior Raw JSON (superseded)"
 SOURCE_PAGE_FIELD = "Source Page"
 
+SESSION_TIMEOUT_SECONDS = 3600       # 60-minute idle timeout
+_RATE_LIMIT_MAX_FAILURES = 5         # failed attempts before lockout
+_RATE_LIMIT_WINDOW_SECONDS = 900     # 15-minute rolling window
+_RATE_LIMIT_LOCKOUT_SECONDS = 900    # 15-minute lockout duration
+
+# Per-process login failure tracking: IP → {"failures": [timestamps], "locked_until": float}
+_login_failures: dict = {}
+
 try:
     from extractor import EXTRACTION_MODEL
 except Exception:
@@ -64,6 +76,65 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SESSION_SECRET_KEY") or (REVIEW_PASSWORD + "_review_secret_v1")
 app.jinja_env.globals["enumerate"] = enumerate
 
+_https_mode = os.environ.get("FLASK_HTTPS", "").lower() in ("1", "true", "yes")
+app.config["SESSION_COOKIE_SECURE"] = _https_mode
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+
+
+# ── CSRF ─────────────────────────────────────────────────────────────────────
+
+def _csrf_token() -> str:
+    """Return (and create if needed) the per-session CSRF token."""
+    if "csrf_token" not in session:
+        session["csrf_token"] = secrets.token_hex(32)
+    return session["csrf_token"]
+
+app.jinja_env.globals["csrf_token"] = _csrf_token
+
+
+def csrf_protect(f):
+    """Decorator: reject POST requests that don't carry the correct session CSRF token."""
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if request.method == "POST":
+            submitted = request.form.get("csrf_token", "")
+            expected = session.get("csrf_token", "")
+            if not submitted or not expected or not secrets.compare_digest(submitted, expected):
+                abort(403)
+        return f(*args, **kwargs)
+    return wrapper
+
+
+# ── Rate limiter ─────────────────────────────────────────────────────────────
+
+def _client_ip() -> str:
+    return request.remote_addr or "unknown"
+
+
+def _is_rate_limited(ip: str) -> bool:
+    now = time.time()
+    entry = _login_failures.get(ip, {"failures": [], "locked_until": 0.0})
+    if now < entry["locked_until"]:
+        return True
+    entry["failures"] = [t for t in entry["failures"] if now - t < _RATE_LIMIT_WINDOW_SECONDS]
+    _login_failures[ip] = entry
+    return False
+
+
+def _record_login_failure(ip: str) -> None:
+    now = time.time()
+    entry = _login_failures.get(ip, {"failures": [], "locked_until": 0.0})
+    entry["failures"].append(now)
+    entry["failures"] = [t for t in entry["failures"] if now - t < _RATE_LIMIT_WINDOW_SECONDS]
+    if len(entry["failures"]) >= _RATE_LIMIT_MAX_FAILURES:
+        entry["locked_until"] = now + _RATE_LIMIT_LOCKOUT_SECONDS
+    _login_failures[ip] = entry
+
+
+def _clear_login_failures(ip: str) -> None:
+    _login_failures.pop(ip, None)
+
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
 
@@ -72,20 +143,50 @@ def login_required(f):
     def wrapper(*args, **kwargs):
         if not session.get("authenticated"):
             return redirect(url_for("login_page"))
+        logged_in_at = session.get("logged_in_at", 0)
+        if time.time() - logged_in_at > SESSION_TIMEOUT_SECONDS:
+            session.clear()
+            flash("Session expired. Please log in again.", "warning")
+            return redirect(url_for("login_page"))
         return f(*args, **kwargs)
     return wrapper
 
 
 @app.route("/login", methods=["GET", "POST"])
+@csrf_protect
 def login_page():
     if session.get("authenticated"):
         return redirect(url_for("queue"))
     if request.method == "POST":
+        ip = _client_ip()
+        if _is_rate_limited(ip):
+            flash("Too many failed attempts. Try again in 15 minutes.", "danger")
+            return render_template("login.html"), 429
         if request.form.get("password") == REVIEW_PASSWORD:
+            _clear_login_failures(ip)
             session["authenticated"] = True
+            session["logged_in_at"] = time.time()
             return redirect(url_for("queue"))
+        _record_login_failure(ip)
         flash("Wrong password.", "danger")
     return render_template("login.html")
+
+
+# ── Error handlers ────────────────────────────────────────────────────────────
+
+@app.errorhandler(403)
+def forbidden(e):
+    return "403 Forbidden", 403
+
+
+@app.errorhandler(404)
+def not_found(e):
+    return "404 Not Found", 404
+
+
+@app.errorhandler(500)
+def server_error(e):
+    return "500 Internal Server Error", 500
 
 
 @app.route("/logout")
@@ -354,6 +455,7 @@ def detail(record_id):
 
 @app.route("/action/<record_id>", methods=["POST"])
 @login_required
+@csrf_protect
 def action(record_id):
     table = _ie_table()
     rec = table.get(record_id)

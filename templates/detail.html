@@ -48,6 +48,7 @@
   {% endif %}
 
   <form method="post" action="/action/{{ record_id }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
   <div class="row g-3">
 

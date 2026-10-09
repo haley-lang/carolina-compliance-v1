@@ -1,0 +1,38 @@
+{
+  "document_type": "COI",
+  "named_insured": "Lexi Ava",
+  "certificate_holder": "Bridgez Trucking",
+  "certificate_date": "2026-03-01",
+  "contact_emails": [
+    "haleycamponcca@gmail.com"
+  ],
+  "policies": [
+    {
+      "policy_type": "COMMERCIAL GENERAL LIABILITY",
+      "policy_number": "127804390",
+      "policy_number_invalid": false,
+      "carrier": "Your Mom",
+      "effective_date": "2025-10-01",
+      "expiration_date": "2026-10-01",
+      "coverage_limits": "EACH OCCURRENCE $100,000"
+    },
+    {
+      "policy_type": "AUTOMOBILE LIABILITY",
+      "policy_number": "172904u5t",
+      "policy_number_invalid": false,
+      "carrier": "Your Dad",
+      "effective_date": "2024-10-01",
+      "expiration_date": "2025-10-01",
+      "coverage_limits": "COMBINED SINGLE LIMIT (Ea accident) $1,000,000"
+    },
+    {
+      "policy_type": "WORKERS COMPENSATION AND EMPLOYERS' LIABILITY",
+      "policy_number": null,
+      "policy_number_invalid": false,
+      "carrier": null,
+      "effective_date": null,
+      "expiration_date": null,
+      "coverage_limits": "PER STATUTE OTH-ER $500,000"
+    }
+  ]
+}
