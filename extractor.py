@@ -748,7 +748,6 @@ def extract_document(file_path: Path, page_map: dict = None) -> dict:
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": content}],
         max_tokens=2000,
-        temperature=0,
     )
 
     raw = _response_text(response)
