@@ -191,6 +191,38 @@ def test_fresh_session_not_expired(client):
     assert resp.status_code == 200
 
 
+# ── Brand / rendering ─────────────────────────────────────────────────────────
+
+def test_login_page_includes_brand_fonts(client):
+    """Login page must load both Instrument Serif and Plus Jakarta Sans."""
+    resp = client.get("/login")
+    assert resp.status_code == 200
+    assert b"Instrument+Serif" in resp.data
+    assert b"Plus+Jakarta+Sans" in resp.data
+
+
+def test_queue_page_includes_brand_fonts(client):
+    """Queue page must load both brand fonts."""
+    with client.session_transaction() as sess:
+        sess["authenticated"] = True
+        sess["logged_in_at"] = time.time()
+        sess["csrf_token"] = _TEST_CSRF
+
+    with patch("review_app._ie_table") as mock_table:
+        mock_table.return_value.all.return_value = []
+        resp = client.get("/queue")
+
+    assert resp.status_code == 200
+    assert b"Instrument+Serif" in resp.data
+    assert b"Plus+Jakarta+Sans" in resp.data
+
+
+def test_login_page_includes_review_css(client):
+    """Login page must reference the custom stylesheet."""
+    resp = client.get("/login")
+    assert b"review.css" in resp.data
+
+
 # ── compute_flags ─────────────────────────────────────────────────────────────
 
 from review_app import compute_flags

@@ -176,17 +176,26 @@ def login_page():
 
 @app.errorhandler(403)
 def forbidden(e):
-    return "403 Forbidden", 403
+    return render_template("error.html",
+        code=403,
+        title="You don't have permission to see this.",
+        message="If you think that's wrong, try signing in again."), 403
 
 
 @app.errorhandler(404)
 def not_found(e):
-    return "404 Not Found", 404
+    return render_template("error.html",
+        code=404,
+        title="We couldn't find that page.",
+        message="It may have moved, or the link might be out of date."), 404
 
 
 @app.errorhandler(500)
 def server_error(e):
-    return "500 Internal Server Error", 500
+    return render_template("error.html",
+        code=500,
+        title="Something went wrong on our end.",
+        message="Try refreshing — if it keeps happening, let Haley know."), 500
 
 
 @app.route("/logout")

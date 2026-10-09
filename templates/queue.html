@@ -3,100 +3,129 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CCS Review Queue</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
-  <style>
-    .flag-badge { font-size: .72em; }
-    .conf-danger { color: #dc3545; font-weight: 600; }
-    .conf-warn   { color: #856404; }
-  </style>
+  <title>CCS — Review Queue</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='ccs_icon.svg') }}">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='review.css') }}">
 </head>
 <body>
-<nav class="navbar navbar-dark bg-dark px-3">
-  <span class="navbar-brand fw-bold">CCS Review</span>
-  <a href="/logout" class="btn btn-sm btn-outline-light">Log out</a>
+
+<nav class="topnav">
+  <a href="/queue" class="topnav-logo" aria-label="Carolina Compliance Solutions">
+    <img src="{{ url_for('static', filename='ccs_logo_dark.svg') }}" alt="CCS">
+  </a>
+  <div class="topnav-links">
+    <a href="/queue" class="nav-link">Queue</a>
+    <a href="/logout" class="btn btn-gold btn-sm">Sign out</a>
+  </div>
 </nav>
 
-<div class="container-fluid mt-3 px-4">
+<div class="page-wrap">
+
+  <!-- Stats band -->
+  <div class="stats-band" role="region" aria-label="Queue summary">
+    <div class="stat-item">
+      <span class="stat-num">{{ counts.pending }}</span>
+      <span class="stat-label">to review</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-num">{{ counts.ai_disagreed }}</span>
+      <span class="stat-label">needs your eyes</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-num">{{ counts.approved }}</span>
+      <span class="stat-label">approved</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-num">{{ counts.rejected }}</span>
+      <span class="stat-label">rejected</span>
+    </div>
+  </div>
 
   <!-- Filter chips -->
-  <div class="d-flex gap-2 flex-wrap mb-3">
+  <div class="filter-chips" role="navigation" aria-label="Filter queue">
     {% for chip_id, label in [
-        ('pending',     'All pending'),
-        ('ai_disagreed','AI disagreed'),
-        ('needs_look',  'Needs a look'),
-        ('approved',    'Approved'),
-        ('rejected',    'Rejected'),
+        ('pending',      'To review'),
+        ('ai_disagreed', 'Needs your eyes'),
+        ('needs_look',   'Worth a quick look'),
+        ('approved',     'Approved'),
+        ('rejected',     'Rejected'),
     ] %}
     <a href="?filter={{ chip_id }}"
-       class="btn btn-sm {% if chip == chip_id %}btn-primary{% else %}btn-outline-secondary{% endif %}">
-      {{ label }}
-      <span class="badge {% if chip == chip_id %}bg-light text-dark{% else %}bg-secondary{% endif %} ms-1">
-        {{ counts[chip_id] }}
-      </span>
+       class="chip {% if chip == chip_id %}chip-active{% else %}chip-inactive{% endif %}"
+       aria-current="{{ 'page' if chip == chip_id else 'false' }}">
+      {{ label }}<span class="chip-count">{{ counts[chip_id] }}</span>
     </a>
     {% endfor %}
   </div>
 
-  <table class="table table-hover table-sm align-middle">
-    <thead class="table-light">
+  <!-- Queue table -->
+  <div class="card">
+    <table class="queue-table" aria-label="Certificate queue">
+      <thead>
+        <tr>
+          <th>Named Insured</th>
+          <th>File</th>
+          <th>Status</th>
+          <th>Confidence</th>
+          <th>Policies</th>
+          <th>Flags</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for row in rows %}
       <tr>
-        <th>Named Insured</th>
-        <th>Filename</th>
-        <th>Status</th>
-        <th>Confidence</th>
-        <th>Policies</th>
-        <th>Flags</th>
-        <th></th>
-      </tr>
-    </thead>
-    <tbody>
-    {% for row in rows %}
-    <tr>
-      <td class="fw-semibold">{{ row.named_insured or '—' }}</td>
-      <td class="text-muted" style="font-size:.82em">{{ row.source_filename }}</td>
-      <td>
-        <span class="badge
-          {% if row.review_status == 'Auto-Approved' %}bg-success
-          {% elif row.review_status == 'Pending Review' %}bg-warning text-dark
-          {% elif row.review_status in ('Approved', 'Approved + Edited') %}bg-success
-          {% elif row.review_status == 'Rejected' %}bg-danger
-          {% elif row.review_status == 'Escalated to GC' %}bg-info text-dark
-          {% else %}bg-secondary{% endif %}">
-          {{ row.review_status }}
-        </span>
-        {% if row.review_reason and row.review_reason != 'N/A' %}
-          <span class="badge bg-light text-secondary border ms-1" style="font-size:.75em">{{ row.review_reason }}</span>
-        {% endif %}
-      </td>
-      <td>
-        {% if row.confidence is not none %}
-          <span class="{% if row.confidence < 0.85 %}conf-danger{% elif row.confidence < 0.95 %}conf-warn{% endif %}">
-            {{ "%.0f"|format(row.confidence * 100) }}%
+        <td class="fw-600">{{ row.named_insured or '—' }}</td>
+        <td class="small text-secondary">{{ row.source_filename }}</td>
+        <td>
+          <span class="badge
+            {% if row.review_status in ('Approved', 'Approved + Edited', 'Auto-Approved') %}badge-approved
+            {% elif row.review_status == 'Pending Review' %}badge-pending
+            {% elif row.review_status == 'Rejected' %}badge-rejected
+            {% elif row.review_status == 'Escalated to GC' %}badge-escalated
+            {% else %}badge-muted{% endif %}">
+            {{ row.review_status }}
           </span>
-        {% else %}—{% endif %}
-      </td>
-      <td>{{ row.policies_count }}</td>
-      <td>
-        {% if row.flags.ai_disagreed %}<span class="badge bg-warning text-dark flag-badge me-1" title="AI reads disagreed">AI ⚡</span>{% endif %}
-        {% if row.flags.missing_fields %}<span class="badge bg-danger flag-badge me-1" title="Missing policy number or dates">Missing</span>{% endif %}
-        {% if row.flags.low_confidence %}<span class="badge bg-secondary flag-badge me-1" title="Confidence < 85%">Low conf</span>{% endif %}
-        {% if row.flags.non_coi %}<span class="badge bg-info text-dark flag-badge me-1" title="Document type is not COI">Non-COI</span>{% endif %}
-        {% if row.flags.changed_vs_prior %}<span class="badge bg-dark flag-badge me-1" title="Checkbox or policy count changed vs prior extraction">Changed</span>{% endif %}
-        {% if row.flags.multi_company %}<span class="badge bg-light text-dark border flag-badge me-1" title="Named insured may be multiple companies">Multi-co</span>{% endif %}
-      </td>
-      <td>
-        <a href="/detail/{{ row.id }}" class="btn btn-sm btn-outline-primary py-0">Review →</a>
-      </td>
-    </tr>
-    {% endfor %}
-    {% if not rows %}
-    <tr>
-      <td colspan="7" class="text-center text-muted py-5">No records in this filter.</td>
-    </tr>
-    {% endif %}
-    </tbody>
-  </table>
+          {% if row.review_reason and row.review_reason != 'N/A' %}
+            <span class="badge badge-muted" style="margin-left:4px">{{ row.review_reason }}</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if row.confidence is not none %}
+            <span class="{% if row.confidence < 0.85 %}conf-low{% elif row.confidence < 0.95 %}conf-warn{% else %}conf-high{% endif %}">
+              {{ "%.0f"|format(row.confidence * 100) }}%
+            </span>
+          {% else %}—{% endif %}
+        </td>
+        <td>{{ row.policies_count }}</td>
+        <td>
+          {% if row.flags.ai_disagreed %}<span class="flag flag-warn">The two AI reads disagree</span>{% endif %}
+          {% if row.flags.missing_fields %}<span class="flag flag-alert">Missing a policy number</span>{% endif %}
+          {% if row.flags.low_confidence %}<span class="flag flag-muted">Low confidence</span>{% endif %}
+          {% if row.flags.non_coi %}<span class="flag flag-blue">Not a certificate</span>{% endif %}
+          {% if row.flags.changed_vs_prior %}<span class="flag flag-muted">Changed since last read</span>{% endif %}
+          {% if row.flags.multi_company %}<span class="flag flag-muted">More than one company named</span>{% endif %}
+        </td>
+        <td>
+          <a href="/detail/{{ row.id }}" class="btn btn-secondary btn-sm">Review →</a>
+        </td>
+      </tr>
+      {% endfor %}
+      {% if not rows %}
+      <tr>
+        <td colspan="7">
+          <div class="empty-state">
+            <p>Nothing waiting for you. Nice work.</p>
+          </div>
+        </td>
+      </tr>
+      {% endif %}
+      </tbody>
+    </table>
+  </div>
 
 </div>
 </body>

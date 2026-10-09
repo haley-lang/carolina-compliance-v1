@@ -1,0 +1,11 @@
+<svg width="80" height="80" viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Navy background rounded square -->
+  <rect width="80" height="80" rx="14" fill="#1B3A5C"/>
+  <!-- Shield -->
+  <path d="M40 8C40 8 18 16 16 18C16 18 14 20 14 26C14 42 20 62 40 72C60 62 66 42 66 26C66 20 64 18 64 18C62 16 40 8 40 8Z" fill="#4A90D9"/>
+  <path d="M40 12C40 12 21 19 19.5 20.5C19.5 20.5 18 22 18 27C18 41 23.5 59 40 68C56.5 59 62 41 62 27C62 22 60.5 20.5 60.5 20.5C59 19 40 12 40 12Z" fill="#5A9FE8"/>
+  <path d="M40 17C40 17 24 23.5 23 24.5C23 24.5 22 26 22 30C22 42 26 57 40 65C54 57 58 42 58 30C58 26 57 24.5 57 24.5C56 23.5 40 17 40 17Z" fill="#4A90D9"/>
+  <path d="M40 17C40 17 24 23.5 23 24.5C23 24.5 22 26 22 30C22 30 22 27 24 25.5C26 24 40 18.5 40 18.5V17Z" fill="white" opacity="0.15"/>
+  <!-- Checkmark -->
+  <polyline points="28,42 36,52 54,32" stroke="white" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>
