@@ -65,7 +65,7 @@ def fake_split_page(tmp_path):
 
 @pytest.fixture(autouse=True)
 def patch_split_pdf(fake_split_page):
-    with patch("pdf_bundle.split_pdf", return_value=[str(fake_split_page)]):
+    with patch("pdf_bundle.certificate_files", return_value=[fake_split_page]):
         yield
 
 

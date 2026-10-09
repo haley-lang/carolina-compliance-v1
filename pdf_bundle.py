@@ -94,6 +94,44 @@ def split_pdf(pdf_path: Path, out_dir: Path,
     return created
 
 
+def certificate_files(pdf_path: Path, out_dir: Path,
+                      classify: Optional[Callable[[Path], Dict[int, str]]] = None
+                      ) -> List[Path]:
+    """Return the certificate PDFs produced from pdf_path.
+
+    Unlike split_pdf(), this function always returns a non-empty list for
+    valid PDFs:
+    - Single-page PDFs are returned as-is: [pdf_path].
+    - Multi-page bundles are split; the list of split files is returned.
+    - Multi-page PDFs that couldn't be divided into separate groups are
+      returned as-is: [pdf_path] (treated as one certificate).
+    - Oversized files (> MAX_BUNDLE_PAGES) return [] — those need manual review.
+    - Any file that cannot be opened returns [].
+
+    Use this instead of split_pdf() when you need to enumerate certificate
+    files from a folder, including single-page PDFs that need no splitting.
+    """
+    from pypdf import PdfReader
+
+    try:
+        page_count = len(PdfReader(str(pdf_path)).pages)
+    except Exception as exc:
+        log.warning("Could not read %s: %s", pdf_path.name, exc)
+        return []
+
+    if page_count == 0:
+        return []
+    if page_count > MAX_BUNDLE_PAGES:
+        log.warning("%s has %d pages (> %d) — skipping; needs manual review",
+                    pdf_path.name, page_count, MAX_BUNDLE_PAGES)
+        return []
+    if page_count == 1:
+        return [pdf_path]
+
+    parts = split_pdf(pdf_path, out_dir, classify)
+    return parts if parts else [pdf_path]
+
+
 def archive_original(pdf_path: Path, upload_dir: Path) -> Path:
     """Move a split bundle out of the pending folder so it is not read again."""
     dest_dir = upload_dir / ORIGINALS_DIRNAME

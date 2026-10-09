@@ -50,14 +50,19 @@ def _norm(name: str) -> str:
 
 
 def _build_page_map(folder: Path, work: Path) -> dict:
-    """normalized stem -> split PDF path for every certificate page in folder."""
+    """normalized stem -> certificate PDF path for every cert in folder.
+
+    Uses pdf_bundle.certificate_files() so single-page PDFs are included
+    (split_pdf returns [] for them, which previously caused them to be silently
+    skipped).
+    """
     pages = {}
     for pdf in sorted(folder.glob("*")):
         if pdf.suffix.lower() != ".pdf":
             continue
         out = work / _norm(pdf.name)
         out.mkdir(parents=True, exist_ok=True)
-        for part in pdf_bundle.split_pdf(pdf, out) or []:
+        for part in pdf_bundle.certificate_files(pdf, out):
             pages[_norm(Path(part).name)] = Path(part)
     return pages
 

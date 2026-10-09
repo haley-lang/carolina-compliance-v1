@@ -78,3 +78,62 @@ def test_archive_original_moves_file_and_avoids_collision(tmp_path):
 
 def test_blank_pages_have_no_text_layer(tmp_path):
     assert pdf_bundle.pdf_has_text_layer(_blank_pdf(tmp_path / "b.pdf", 2)) is False
+
+
+# ── certificate_files ─────────────────────────────────────────────────────────
+
+def test_certificate_files_single_page_returns_original(tmp_path):
+    """Single-page PDF must return [pdf_path], not []."""
+    src = _blank_pdf(tmp_path / "cert.pdf", 1)
+    result = pdf_bundle.certificate_files(src, tmp_path)
+    assert result == [src]
+
+
+def test_certificate_files_single_page_does_not_split(tmp_path):
+    """No split files should be written for a single-page PDF."""
+    src = _blank_pdf(tmp_path / "cert.pdf", 1)
+    before = set(tmp_path.iterdir())
+    pdf_bundle.certificate_files(src, tmp_path)
+    after = set(tmp_path.iterdir())
+    assert after == before  # nothing new created
+
+
+def test_certificate_files_multi_page_bundle_returns_parts(tmp_path):
+    """Multi-page scanned bundle should be split and return the parts."""
+    src = _blank_pdf(tmp_path / "bundle.pdf", 3)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    result = pdf_bundle.certificate_files(src, out_dir)
+    assert len(result) == 3
+    assert all(p.exists() for p in result)
+    assert all(p != src for p in result)
+
+
+def test_certificate_files_oversized_returns_empty(tmp_path, monkeypatch):
+    """Files exceeding MAX_BUNDLE_PAGES should return [] (manual review needed)."""
+    src = _blank_pdf(tmp_path / "huge.pdf", 5)
+    monkeypatch.setattr(pdf_bundle, "MAX_BUNDLE_PAGES", 3)
+    assert pdf_bundle.certificate_files(src, tmp_path) == []
+
+
+def test_certificate_files_unsplittable_multi_page_returns_original(tmp_path, monkeypatch):
+    """A 2-page PDF classified as one cert (no split) should return [pdf_path]."""
+    src = _blank_pdf(tmp_path / "two.pdf", 2)
+    monkeypatch.setattr(pdf_bundle, "pdf_has_text_layer", lambda p: True)
+    # Classify both pages as endorsement (no acord_25 → split_pdf returns [])
+    result = pdf_bundle.certificate_files(
+        src, tmp_path, classify=lambda p: {1: "endorsement", 2: "endorsement"}
+    )
+    assert result == [src]
+
+
+def test_certificate_files_zero_page_returns_empty(tmp_path, monkeypatch):
+    """A PDF that reports 0 pages returns []."""
+    from unittest.mock import MagicMock, patch
+    src = tmp_path / "empty.pdf"
+    src.write_bytes(b"%PDF-1.4")
+    mock_reader = MagicMock()
+    mock_reader.pages = []
+    with patch("pypdf.PdfReader", return_value=mock_reader):
+        result = pdf_bundle.certificate_files(src, tmp_path)
+    assert result == []

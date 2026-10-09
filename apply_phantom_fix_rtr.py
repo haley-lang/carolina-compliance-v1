@@ -43,7 +43,11 @@ def _norm(name: str) -> str:
 
 
 def _collect_rtr_stems(folder: Path) -> set:
-    """Return normalized stems for every certificate page split from folder."""
+    """Return normalized stems for every certificate PDF in folder.
+
+    Uses pdf_bundle.certificate_files() so single-page PDFs are included;
+    split_pdf alone returns [] for them and they would be silently skipped.
+    """
     stems = set()
     with tempfile.TemporaryDirectory() as tmp:
         for pdf in sorted(folder.glob("*")):
@@ -51,7 +55,7 @@ def _collect_rtr_stems(folder: Path) -> set:
                 continue
             out = Path(tmp) / _norm(pdf.name)
             out.mkdir(parents=True, exist_ok=True)
-            for part in pdf_bundle.split_pdf(pdf, out) or []:
+            for part in pdf_bundle.certificate_files(pdf, out):
                 stems.add(_norm(Path(part).name))
     return stems
 
