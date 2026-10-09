@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Review: {{ f.get('Source Filename', record_id) }}</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+  <style>
+    .disagree-cell { background: #fff3cd !important; outline: 2px solid #ffc107; }
+    .policy-table td, .policy-table th { font-size: .85em; }
+    .policy-table input, .policy-table select { font-size: .85em; }
+    pre.prior-json { font-size: .75em; max-height: 300px; overflow-y: auto; background: #f8f9fa; padding: 1rem; border-radius: .375rem; }
+    .source-img-wrap { position: sticky; top: 70px; }
+  </style>
+</head>
+<body>
+
+<nav class="navbar navbar-dark bg-dark px-3">
+  <a href="/queue" class="btn btn-sm btn-outline-light me-2">← Queue</a>
+  <span class="navbar-brand fw-bold">{{ f.get('Named Insured') or record_id }}</span>
+  <a href="/logout" class="btn btn-sm btn-outline-light ms-auto">Log out</a>
+</nav>
+
+<div class="container-fluid mt-3 px-4">
+
+  <!-- Corrections logged flash -->
+  {% if corrections_logged is not none %}
+  <div class="alert alert-success py-2">
+    {% if corrections_logged > 0 %}
+      Corrections logged: {{ corrections_logged }} — review status updated.
+    {% else %}
+      Approved with no edits.
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <!-- Flags bar -->
+  {% if flags.values() | list | select | list %}
+  <div class="mb-2 d-flex gap-2 flex-wrap align-items-center">
+    <span class="text-muted small fw-semibold">Flags:</span>
+    {% if flags.ai_disagreed %}<span class="badge bg-warning text-dark">AI reads disagreed ⚡</span>{% endif %}
+    {% if flags.missing_fields %}<span class="badge bg-danger">Missing policy fields</span>{% endif %}
+    {% if flags.low_confidence %}<span class="badge bg-secondary">Low confidence (&lt;85%)</span>{% endif %}
+    {% if flags.non_coi %}<span class="badge bg-info text-dark">Non-COI document</span>{% endif %}
+    {% if flags.changed_vs_prior %}<span class="badge bg-dark">Changed vs prior extraction</span>{% endif %}
+    {% if flags.multi_company %}<span class="badge bg-light text-dark border">Multi-company named insured</span>{% endif %}
+  </div>
+  {% endif %}
+
+  <form method="post" action="/action/{{ record_id }}">
+
+  <div class="row g-3">
+
+    <!-- Left: source page image -->
+    <div class="col-md-5">
+      <div class="source-img-wrap">
+        <div class="card">
+          <div class="card-header py-2 small fw-semibold text-muted">Source page</div>
+          <div class="card-body p-2 text-center">
+            {% if source_page_url %}
+              <img src="{{ source_page_url }}" class="img-fluid" alt="Source certificate page"
+                   style="max-height:700px; object-fit:contain">
+            {% else %}
+              <p class="text-muted py-5 mb-0">No source page attached.</p>
+            {% endif %}
+          </div>
+          <div class="card-footer py-1" style="font-size:.75em">
+            <span class="text-muted">{{ f.get('Source Filename', '—') }}</span>
+            {% if f.get('Confidence Score') is not none %}
+              &nbsp;·&nbsp;Confidence: <strong>{{ "%.0f"|format(f['Confidence Score'] * 100) }}%</strong>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right: editable fields -->
+    <div class="col-md-7">
+
+      <!-- Top-level fields -->
+      <div class="card mb-3">
+        <div class="card-header py-2 small fw-semibold text-muted">Certificate details</div>
+        <div class="card-body">
+          <div class="row g-2">
+            <div class="col-sm-6">
+              <label class="form-label small mb-1 fw-semibold">Named Insured</label>
+              <input type="text" name="named_insured"
+                     class="form-control form-control-sm {% if (-1, 'named_insured') in highlight_cells %}disagree-cell{% endif %}"
+                     value="{{ raw_data.get('named_insured') or '' }}">
+              {% if (-1, 'named_insured') in highlight_cells and second_data %}
+                <div class="text-warning small mt-1">⚡ Read 2: {{ second_data.get('named_insured') or '(blank)' }}</div>
+              {% endif %}
+            </div>
+            <div class="col-sm-6">
+              <label class="form-label small mb-1 fw-semibold">Certificate Holder</label>
+              <input type="text" name="certificate_holder"
+                     class="form-control form-control-sm"
+                     value="{{ raw_data.get('certificate_holder') or '' }}">
+            </div>
+            <div class="col-sm-4">
+              <label class="form-label small mb-1 fw-semibold">Document Type</label>
+              <input type="text" class="form-control form-control-sm bg-light" readonly
+                     value="{{ raw_data.get('document_type') or '—' }}">
+            </div>
+            <div class="col-sm-4">
+              <label class="form-label small mb-1 fw-semibold">Contact Emails</label>
+              <input type="text" class="form-control form-control-sm bg-light" readonly
+                     value="{{ (raw_data.get('contact_emails') or []) | join(', ') }}">
+            </div>
+            <div class="col-sm-4">
+              <label class="form-label small mb-1 fw-semibold">Cert Date</label>
+              <input type="text" class="form-control form-control-sm bg-light" readonly
+                     value="{{ raw_data.get('certificate_date') or '—' }}">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Policy table -->
+      <div class="card mb-3">
+        <div class="card-header py-2 small fw-semibold text-muted">
+          Policies ({{ (raw_data.get('policies') or []) | length }})
+        </div>
+        <div class="card-body p-0">
+          {% set policies = raw_data.get('policies') or [] %}
+          {% if policies %}
+          <div class="table-responsive">
+          <table class="table table-bordered table-sm policy-table mb-0">
+            <thead class="table-light">
+              <tr>
+                <th>#</th>
+                <th>Type</th>
+                <th>Number</th>
+                <th>Carrier</th>
+                <th>Eff</th>
+                <th>Exp</th>
+                <th>Limits</th>
+                <th>Basis</th>
+                <th title="Additional Insured">AI</th>
+                <th title="Waiver of Subrogation">WoS</th>
+                <th title="Primary & Non-Contributory">P&N</th>
+              </tr>
+            </thead>
+            <tbody>
+            {% for i, p in policies | enumerate %}
+            <tr>
+              <td class="text-muted">{{ i + 1 }}</td>
+              <td>
+                <input type="text" name="policy_{{ i }}_policy_type"
+                       class="form-control form-control-sm"
+                       value="{{ p.get('policy_type') or '' }}" style="min-width:120px">
+              </td>
+              <td>
+                <input type="text" name="policy_{{ i }}_policy_number"
+                       class="form-control form-control-sm {% if (i, 'policy_number') in highlight_cells %}disagree-cell{% endif %}"
+                       value="{{ p.get('policy_number') or '' }}" style="min-width:110px">
+                {% if (i, 'policy_number') in highlight_cells and second_data and second_data.get('policies') and i < (second_data.get('policies') | length) %}
+                  <div class="text-warning" style="font-size:.7em">⚡ {{ second_data['policies'][i].get('policy_number') or '(blank)' }}</div>
+                {% endif %}
+              </td>
+              <td>
+                <input type="text" name="policy_{{ i }}_carrier"
+                       class="form-control form-control-sm {% if (i, 'carrier') in highlight_cells %}disagree-cell{% endif %}"
+                       value="{{ p.get('carrier') or '' }}" style="min-width:100px">
+              </td>
+              <td>
+                <input type="text" name="policy_{{ i }}_effective_date"
+                       class="form-control form-control-sm {% if (i, 'effective_date') in highlight_cells %}disagree-cell{% endif %}"
+                       value="{{ p.get('effective_date') or '' }}" style="min-width:90px">
+              </td>
+              <td>
+                <input type="text" name="policy_{{ i }}_expiration_date"
+                       class="form-control form-control-sm {% if (i, 'expiration_date') in highlight_cells %}disagree-cell{% endif %}"
+                       value="{{ p.get('expiration_date') or '' }}" style="min-width:90px">
+              </td>
+              <td>
+                <input type="text" name="policy_{{ i }}_coverage_limits"
+                       class="form-control form-control-sm"
+                       value="{{ p.get('coverage_limits') or '' }}" style="min-width:130px">
+              </td>
+              <td>
+                <select name="policy_{{ i }}_policy_basis" class="form-select form-select-sm {% if (i, 'policy_basis') in highlight_cells %}disagree-cell{% endif %}" style="min-width:100px">
+                  <option value="" {% if not p.get('policy_basis') %}selected{% endif %}>—</option>
+                  <option value="occurrence" {% if p.get('policy_basis') == 'occurrence' %}selected{% endif %}>Occurrence</option>
+                  <option value="claims-made" {% if p.get('policy_basis') == 'claims-made' %}selected{% endif %}>Claims-made</option>
+                </select>
+              </td>
+              <td class="text-center">
+                <select name="policy_{{ i }}_additional_insured_checked"
+                        class="form-select form-select-sm {% if (i, 'additional_insured_checked') in highlight_cells %}disagree-cell{% endif %}">
+                  <option value="true"  {% if p.get('additional_insured_checked') %}selected{% endif %}>Y</option>
+                  <option value="false" {% if not p.get('additional_insured_checked') %}selected{% endif %}>N</option>
+                </select>
+              </td>
+              <td class="text-center">
+                <select name="policy_{{ i }}_waiver_of_subrogation_checked"
+                        class="form-select form-select-sm {% if (i, 'waiver_of_subrogation_checked') in highlight_cells %}disagree-cell{% endif %}">
+                  <option value="true"  {% if p.get('waiver_of_subrogation_checked') %}selected{% endif %}>Y</option>
+                  <option value="false" {% if not p.get('waiver_of_subrogation_checked') %}selected{% endif %}>N</option>
+                </select>
+              </td>
+              <td class="text-center">
+                <select name="policy_{{ i }}_primary_noncontributory_checked"
+                        class="form-select form-select-sm {% if (i, 'primary_noncontributory_checked') in highlight_cells %}disagree-cell{% endif %}">
+                  <option value="true"  {% if p.get('primary_noncontributory_checked') %}selected{% endif %}>Y</option>
+                  <option value="false" {% if not p.get('primary_noncontributory_checked') %}selected{% endif %}>N</option>
+                </select>
+              </td>
+            </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+          </div>
+          {% else %}
+            <p class="text-muted p-3 mb-0">No policies extracted.</p>
+          {% endif %}
+        </div>
+      </div>
+
+      <!-- AI disagreements -->
+      {% if ai_disagrees %}
+      <div class="card mb-3 border-warning">
+        <div class="card-header py-2 bg-warning bg-opacity-25 small fw-semibold">
+          ⚡ AI reads disagreed on {{ ai_disagrees | length }} field(s)
+        </div>
+        <ul class="list-group list-group-flush">
+          {% for d in ai_disagrees %}
+          <li class="list-group-item py-1 small font-monospace">{{ d }}</li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+
+      <!-- Prior extraction collapsible -->
+      {% if prior_data %}
+      <div class="card mb-3">
+        <div class="card-header py-2 small fw-semibold d-flex align-items-center">
+          <button class="btn btn-sm btn-link p-0 text-decoration-none text-muted"
+                  type="button" data-bs-toggle="collapse" data-bs-target="#prior-collapse">
+            What AI said before ▾
+          </button>
+        </div>
+        <div class="collapse" id="prior-collapse">
+          <div class="card-body p-2">
+            <div class="mb-2 small">
+              <strong>Named Insured:</strong> {{ prior_data.get('named_insured') or '—' }}<br>
+              <strong>Document Type:</strong> {{ prior_data.get('document_type') or '—' }}<br>
+              <strong>Policies:</strong> {{ (prior_data.get('policies') or []) | length }}
+            </div>
+            {% set prior_pols = prior_data.get('policies') or [] %}
+            {% if prior_pols %}
+            <table class="table table-bordered table-sm policy-table mb-2">
+              <thead class="table-light">
+                <tr><th>Type</th><th>Number</th><th>Eff</th><th>Exp</th><th>AI</th><th>WoS</th></tr>
+              </thead>
+              <tbody>
+              {% for p in prior_pols %}
+              <tr>
+                <td>{{ p.get('policy_type') or '—' }}</td>
+                <td>{{ p.get('policy_number') or '—' }}</td>
+                <td>{{ p.get('effective_date') or '—' }}</td>
+                <td>{{ p.get('expiration_date') or '—' }}</td>
+                <td>{{ 'Y' if p.get('additional_insured_checked') else 'N' }}</td>
+                <td>{{ 'Y' if p.get('waiver_of_subrogation_checked') else 'N' }}</td>
+              </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- Action bar -->
+      <div class="card border-0">
+        <div class="card-body bg-light rounded p-3">
+          <div class="mb-3">
+            <label class="form-label small fw-semibold mb-1">Why (optional note)</label>
+            <textarea name="why" class="form-control form-control-sm" rows="2"
+                      placeholder="Reason for this action, or what was corrected"></textarea>
+          </div>
+          <div class="d-flex gap-2 flex-wrap">
+            <button type="submit" name="action" value="approve"
+                    class="btn btn-success">✓ Approve</button>
+            <button type="submit" name="action" value="reject"
+                    class="btn btn-danger">✗ Reject</button>
+            <button type="submit" name="action" value="escalate"
+                    class="btn btn-info text-dark">↗ Escalate to GC</button>
+          </div>
+          <div class="mt-2 small text-muted">
+            Approve sets Review Status to Approved (or Approved + Edited if changes were made).
+            Processing Status is not changed — re-processing requires a separate step.
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /right col -->
+  </div><!-- /row -->
+  </form>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
