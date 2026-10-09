@@ -48,6 +48,7 @@ REVIEW_REASON_LOW_CONFIDENCE = "Low Confidence"
 REVIEW_REASON_ONBOARDING_WINDOW = "Onboarding Window"
 REVIEW_REASON_BOTH = "Both"
 REVIEW_REASON_POSSIBLE_DUPLICATE = "Possible Duplicate"
+REVIEW_REASON_AI_DISAGREEMENT = "AI Disagreement"
 
 # Processing Status values (single-select on Incoming Extractions)
 PROCESSING_STATUS_IMPORTED = "Imported"
@@ -63,6 +64,7 @@ REVIEW_MODE_THRESHOLD = "Threshold Review"
 def compute_review_status(
     confidence,
     is_possible_duplicate: bool,
+    has_ai_disagreements: bool = False,
     threshold=None,
 ) -> tuple:
     """Decide (review_status, review_reason, processing_status) at intake.
@@ -73,6 +75,8 @@ def compute_review_status(
             (fail-safe: when in doubt, send to review).
         is_possible_duplicate: True if check_duplicate_extraction returned
             a matching prior record.
+        has_ai_disagreements: True when the two-read check found at least one
+            field that differed between the primary and second extraction.
         threshold: confidence floor for auto-approve. None → reads
             config.COI_REVIEW_CONFIDENCE_THRESHOLD (default 0.95).
 
@@ -81,8 +85,9 @@ def compute_review_status(
 
     Precedence (highest to lowest):
         1. is_possible_duplicate → Possible Duplicate
-        2. confidence missing or < threshold → Low Confidence
-        3. otherwise → Auto-Approved
+        2. has_ai_disagreements → AI Disagreement
+        3. confidence missing or < threshold → Low Confidence
+        4. otherwise → Auto-Approved
     """
     # Possible Duplicate trumps everything else
     if is_possible_duplicate:
@@ -90,6 +95,14 @@ def compute_review_status(
             REVIEW_STATUS_PENDING_REVIEW,
             REVIEW_REASON_POSSIBLE_DUPLICATE,
             PROCESSING_STATUS_DUPLICATE,
+        )
+
+    # AI disagreement between reads → needs review even if confidence is high
+    if has_ai_disagreements:
+        return (
+            REVIEW_STATUS_PENDING_REVIEW,
+            REVIEW_REASON_AI_DISAGREEMENT,
+            PROCESSING_STATUS_NEEDS_REVIEW,
         )
 
     # Resolve threshold (env var → config default)

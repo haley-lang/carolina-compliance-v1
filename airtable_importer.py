@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 EXTRACTED_DIR = Path("extracted")
 INCOMING_EXTRACTIONS_TABLE = "Incoming Extractions"
 
+# Field IDs for two-read quality-assurance fields (rename-safe writes)
+SECOND_READ_JSON_FIELD_ID = "fldJFX9EN6j40cdXD"
+AI_DISAGREEMENTS_FIELD_ID = "fldbiX9zZHdF3RGDQ"
+
 
 def get_all_pending_jsons(directory: Path, already_imported: set[str]) -> list[Path]:
     """Return all .json files in directory that haven't been imported yet.
@@ -104,13 +108,17 @@ def load_json_safe(path: Path) -> dict:
 
 
 def build_fields(source_filename: str, data: dict, raw_json: str,
-                 is_possible_duplicate: bool = False) -> dict:
+                 is_possible_duplicate: bool = False,
+                 second_read=None,
+                 ai_disagreements=None) -> dict:
     """Map extracted JSON fields to Airtable field names.
 
     is_possible_duplicate: passed by caller after check_duplicate_extraction
     runs against the Incoming Extractions table. Drives review_gate's
     intake-time decision. Defaults to False so callers that don't yet do
     the duplicate check (e.g. unit tests) still work.
+    second_read: the raw dict from the second extraction call (_second_read).
+    ai_disagreements: list of diff strings, or "Second read failed", or None.
     """
     from review_gate import compute_review_status
 
@@ -133,13 +141,25 @@ def build_fields(source_filename: str, data: dict, raw_json: str,
         else None
     )
 
+    has_ai_disagreements = isinstance(ai_disagreements, list) and len(ai_disagreements) > 0
+
     # 1E: review-gate decision at intake time.
     review_status, review_reason, processing_status = compute_review_status(
         confidence=confidence_value,
         is_possible_duplicate=is_possible_duplicate,
+        has_ai_disagreements=has_ai_disagreements,
     )
 
-    return {
+    # Serialize second read and disagreements for Airtable
+    second_read_json = json.dumps(second_read, indent=2) if second_read is not None else None
+    if isinstance(ai_disagreements, list):
+        ai_disagrees_str = "\n".join(ai_disagreements) if ai_disagreements else None
+    elif ai_disagreements:
+        ai_disagrees_str = str(ai_disagreements)
+    else:
+        ai_disagrees_str = None
+
+    fields = {
         "Source Filename": source_filename,
         "Document Type": data.get("document_type") or "",
         "Named Insured": data.get("named_insured") or "",
@@ -153,6 +173,11 @@ def build_fields(source_filename: str, data: dict, raw_json: str,
         "Review Status": review_status,
         "Review Reason": review_reason,
     }
+    if second_read_json is not None:
+        fields[SECOND_READ_JSON_FIELD_ID] = second_read_json
+    if ai_disagrees_str is not None:
+        fields[AI_DISAGREEMENTS_FIELD_ID] = ai_disagrees_str
+    return fields
 
 
 def clean_base_id(raw: str) -> str:
@@ -267,8 +292,15 @@ def _import_single_file(json_path: Path, base_id: str, token: str) -> dict:
             json_path.name, _dup_exc,
         )
 
-    raw_json = json.dumps(data, indent=2)
-    fields = build_fields(json_path.name, data, raw_json, is_possible_duplicate=is_possible_duplicate)
+    # Strip two-read metadata before building Raw JSON; pass them separately
+    # so downstream code reading Raw JSON never sees underscore keys.
+    second_read = data.get("_second_read")
+    ai_disagrees = data.get("_ai_disagreements")
+    clean_data = {k: v for k, v in data.items() if k not in ("_second_read", "_ai_disagreements")}
+    raw_json = json.dumps(clean_data, indent=2)
+    fields = build_fields(json_path.name, clean_data, raw_json,
+                          is_possible_duplicate=is_possible_duplicate,
+                          second_read=second_read, ai_disagreements=ai_disagrees)
 
     logger.info("Creating record in Airtable table '%s'...", INCOMING_EXTRACTIONS_TABLE)
     record = push_to_airtable(base_id, token, fields)

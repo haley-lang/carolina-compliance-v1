@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 import anthropic
 
 import pdf_bundle
+import eval_scoring
 
 
 def call_claude_with_retry(func, *args, max_retries=3, retry_delay=10, **kwargs):
@@ -531,6 +532,44 @@ def drop_empty_policies(data: dict) -> dict:
     return data
 
 
+# ── Policy type normalization ─────────────────────────────────────────────────
+
+_POLICY_TYPE_CANONICAL = {
+    "GL":        "Commercial General Liability",
+    "AUTO":      "Commercial Auto",
+    "WC":        "Workers Compensation",
+    "UMBRELLA":  "Umbrella Liability",
+    "EXCESS":    "Excess Liability",
+    "EXCESS_WC": "Excess Workers Compensation",
+}
+
+# Abbreviations that eval_scoring.family() doesn't catch (no substring match)
+_POLICY_TYPE_ABBREVS = {
+    "WC": "Workers Compensation",
+}
+
+
+def normalize_policy_types(data: dict) -> dict:
+    """Map policy_type variants to canonical labels using the family classifier."""
+    policies = data.get("policies")
+    if not isinstance(policies, list):
+        return data
+    for policy in policies:
+        if not isinstance(policy, dict):
+            continue
+        pt = policy.get("policy_type")
+        pt_upper = (pt or "").strip().upper()
+        # Check known abbreviations that family() can't resolve, then fall back to family
+        canonical = _POLICY_TYPE_ABBREVS.get(pt_upper)
+        if canonical is None:
+            fam = eval_scoring.family(pt)
+            canonical = _POLICY_TYPE_CANONICAL.get(fam)
+        if canonical and (pt or "").strip() != canonical:
+            log.debug("Normalized policy_type: %r → %r", pt, canonical)
+            policy["policy_type"] = canonical
+    return data
+
+
 def apply_simple_document_classification(data: dict, source_file: Path) -> dict:
     """Apply lightweight keyword-based document classification."""
     # Only the file name and the document_type the model returned are searched.
@@ -728,6 +767,20 @@ def _merge_dedicated_policy_table_fields(primary_data: dict, secondary_data: dic
     return ", ".join(updated) if updated else "none"
 
 
+def _compare_reads(primary: dict, secondary: dict) -> list:
+    """Compare two independent extractions; return human-readable diff strings.
+
+    Wraps eval_scoring.compare_extractions (which normalizes policy numbers,
+    dates, basis, and checkbox fields by policy family) and adds named_insured.
+    """
+    diffs = eval_scoring.compare_extractions(primary, secondary)
+    ni_a = (primary.get("named_insured") or "").strip().lower()
+    ni_b = (secondary.get("named_insured") or "").strip().lower()
+    if ni_a != ni_b:
+        diffs.append(f"named_insured: {primary.get('named_insured')!r} vs {secondary.get('named_insured')!r}")
+    return diffs
+
+
 # ── Core extraction ───────────────────────────────────────────────────────────
 
 def extract_document(file_path: Path, page_map: dict = None) -> dict:
@@ -769,6 +822,30 @@ def extract_document(file_path: Path, page_map: dict = None) -> dict:
             log.warning("Dedicated policy-table reader returned non-JSON output: %s", exc)
         except Exception as exc:
             log.warning("Dedicated policy-table reader failed: %s", exc)
+
+    # ── Second read ───────────────────────────────────────────────────────────
+    try:
+        log.info("Running second read (model: %s)…", EXTRACTION_MODEL)
+        response2 = call_claude_with_retry(
+            client.messages.create,
+            model=EXTRACTION_MODEL,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": content}],
+            max_tokens=2000,
+        )
+        raw2 = _response_text(response2)
+        second_data = _parse_json_response(raw2)
+        diffs = _compare_reads(data, second_data)
+        data["_second_read"] = second_data
+        data["_ai_disagreements"] = diffs
+        if diffs:
+            log.info("Second read: %d disagreement(s): %s", len(diffs), "; ".join(diffs))
+        else:
+            log.info("Second read: no disagreements")
+    except Exception as exc:
+        log.warning("Second read failed: %s", exc)
+        data["_second_read"] = None
+        data["_ai_disagreements"] = "Second read failed"
 
     return data
 
@@ -837,6 +914,7 @@ def _process_single_file(file_path: Path) -> dict:
                 return triage_data
 
     data = extract_document(file_path, page_map=page_map)
+    data = normalize_policy_types(data)
     data = normalize_policy_dates(data)
     data = apply_simple_document_classification(data, file_path)
     data = drop_empty_policies(data)

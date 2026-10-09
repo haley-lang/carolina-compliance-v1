@@ -34,6 +34,8 @@ from review_gate import REVIEW_STATUS_REJECTED
 
 PRIOR_RAW_JSON_FIELD_NAME = "Prior Raw JSON (superseded)"  # read: table.all() returns field names
 PRIOR_RAW_JSON_FIELD_ID = "fldTGsebc6o2ll5Pu"             # write: ID is rename-safe
+SECOND_READ_JSON_FIELD_ID = "fldJFX9EN6j40cdXD"
+AI_DISAGREEMENTS_FIELD_ID = "fldbiX9zZHdF3RGDQ"
 
 # $ per million tokens for claude-sonnet-5-5 (same table as eval_extractor.py)
 _PRICE_IN, _PRICE_OUT = 2.0, 10.0
@@ -62,32 +64,51 @@ def _build_page_map(folder: Path, work: Path) -> dict:
 
 def _build_refresh_fields(data: dict) -> dict:
     """Fields dict for the Airtable update. Status fields are excluded."""
-    contact_emails = data.get("contact_emails") or []
+    # Strip two-read metadata before building Raw JSON
+    second_read = data.get("_second_read")
+    ai_disagrees = data.get("_ai_disagreements")
+    clean_data = {k: v for k, v in data.items() if k not in ("_second_read", "_ai_disagreements")}
+
+    contact_emails = clean_data.get("contact_emails") or []
     contact_emails_str = (
         ", ".join(str(e) for e in contact_emails)
         if isinstance(contact_emails, list)
         else str(contact_emails)
     )
 
-    policies = data.get("policies") or []
+    policies = clean_data.get("policies") or []
     policies_count = len(policies) if isinstance(policies, list) else 0
 
-    raw_confidence = data.get("confidence")
+    raw_confidence = clean_data.get("confidence")
     confidence_value = (
         float(raw_confidence)
         if isinstance(raw_confidence, (int, float)) and not isinstance(raw_confidence, bool)
         else None
     )
 
-    return {
-        "Raw JSON": json.dumps(data, indent=2),
-        "Document Type": data.get("document_type") or "",
-        "Named Insured": data.get("named_insured") or "",
-        "Certificate Holder": data.get("certificate_holder") or "",
+    # Serialize second read and disagreements
+    second_read_json = json.dumps(second_read, indent=2) if second_read is not None else None
+    if isinstance(ai_disagrees, list):
+        ai_disagrees_str = "\n".join(ai_disagrees) if ai_disagrees else None
+    elif ai_disagrees:
+        ai_disagrees_str = str(ai_disagrees)
+    else:
+        ai_disagrees_str = None
+
+    fields = {
+        "Raw JSON": json.dumps(clean_data, indent=2),
+        "Document Type": clean_data.get("document_type") or "",
+        "Named Insured": clean_data.get("named_insured") or "",
+        "Certificate Holder": clean_data.get("certificate_holder") or "",
         "Contact Emails": contact_emails_str,
         "Policies Count": policies_count,
         "Confidence Score": confidence_value,
     }
+    if second_read_json is not None:
+        fields[SECOND_READ_JSON_FIELD_ID] = second_read_json
+    if ai_disagrees_str is not None:
+        fields[AI_DISAGREEMENTS_FIELD_ID] = ai_disagrees_str
+    return fields
 
 
 def run(cert_folder: Path, apply: bool, table) -> dict:
@@ -123,6 +144,7 @@ def run(cert_folder: Path, apply: bool, table) -> dict:
 
             try:
                 data = extractor.extract_document(path)
+                data = extractor.normalize_policy_types(data)
                 data = extractor.normalize_policy_dates(data)
                 data = extractor.apply_simple_document_classification(data, path)
                 data = extractor.drop_empty_policies(data)

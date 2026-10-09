@@ -13,6 +13,7 @@ from review_gate import (
     REVIEW_REASON_ONBOARDING_WINDOW,
     REVIEW_REASON_BOTH,
     REVIEW_REASON_POSSIBLE_DUPLICATE,
+    REVIEW_REASON_AI_DISAGREEMENT,
     PROCESSING_STATUS_IMPORTED,
     PROCESSING_STATUS_DUPLICATE,
     PROCESSING_STATUS_LOW_CONFIDENCE,
@@ -108,6 +109,39 @@ def test_compute_review_status_handles_all_inputs_none_or_default():
     assert compute_review_status(confidence=1.0, is_possible_duplicate=False) == (
         REVIEW_STATUS_AUTO_APPROVED, REVIEW_REASON_NA, PROCESSING_STATUS_IMPORTED,
     )
+
+
+# ── AI Disagreement gate ──────────────────────────────────────────────────────
+
+
+def test_ai_disagreement_routes_to_pending_review():
+    assert compute_review_status(
+        confidence=0.99, is_possible_duplicate=False, has_ai_disagreements=True
+    ) == (REVIEW_STATUS_PENDING_REVIEW, REVIEW_REASON_AI_DISAGREEMENT, PROCESSING_STATUS_NEEDS_REVIEW)
+
+
+def test_ai_disagreement_overrides_high_confidence():
+    """has_ai_disagreements=True must beat confidence=1.0."""
+    status, reason, _ = compute_review_status(
+        confidence=1.0, is_possible_duplicate=False, has_ai_disagreements=True
+    )
+    assert status == REVIEW_STATUS_PENDING_REVIEW
+    assert reason == REVIEW_REASON_AI_DISAGREEMENT
+
+
+def test_duplicate_trumps_ai_disagreement():
+    """Possible Duplicate has higher precedence than AI Disagreement."""
+    _, reason, proc = compute_review_status(
+        confidence=0.99, is_possible_duplicate=True, has_ai_disagreements=True
+    )
+    assert reason == REVIEW_REASON_POSSIBLE_DUPLICATE
+    assert proc == PROCESSING_STATUS_DUPLICATE
+
+
+def test_no_disagreements_does_not_affect_auto_approve():
+    assert compute_review_status(
+        confidence=0.99, is_possible_duplicate=False, has_ai_disagreements=False
+    ) == (REVIEW_STATUS_AUTO_APPROVED, REVIEW_REASON_NA, PROCESSING_STATUS_IMPORTED)
 
 
 # ── apply_onboarding_window_gate — 4 tests ───────────────────────────────────

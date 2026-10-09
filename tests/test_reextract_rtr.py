@@ -74,6 +74,7 @@ def mock_extract():
     """Patches all extractor functions; yields the extract_document mock."""
     m = MagicMock(return_value=dict(SAMPLE_EXTRACTION))
     with patch("extractor.extract_document", m), \
+         patch("extractor.normalize_policy_types", side_effect=lambda d: d), \
          patch("extractor.normalize_policy_dates", side_effect=lambda d: d), \
          patch("extractor.apply_simple_document_classification", side_effect=lambda d, f: d), \
          patch("extractor.drop_empty_policies", side_effect=lambda d: d):
