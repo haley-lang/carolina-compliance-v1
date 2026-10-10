@@ -487,6 +487,11 @@ def queue():
         "rejected": sum(1 for r in batch_rows if r["review_status"] in REJECTED_SET),
     }
 
+    # Store queue order in session for next/previous navigation
+    session["queue_ids"] = [r["id"] for r in filtered]
+    session["queue_batch"] = batch
+    session["queue_chip"] = chip
+
     return render_template("queue.html", rows=filtered, chip=chip, counts=counts, batch=batch)
 
 
@@ -543,6 +548,20 @@ def detail(record_id):
         if _base_id else ""
     )
 
+    # Next/previous navigation from session queue
+    queue_ids = session.get("queue_ids") or []
+    queue_batch = session.get("queue_batch", "rtr")
+    queue_chip = session.get("queue_chip", "pending")
+    prev_id = None
+    next_id = None
+    queue_position = None
+    queue_total = len(queue_ids)
+    if record_id in queue_ids:
+        idx = queue_ids.index(record_id)
+        queue_position = idx + 1
+        prev_id = queue_ids[idx - 1] if idx > 0 else None
+        next_id = queue_ids[idx + 1] if idx < len(queue_ids) - 1 else None
+
     return render_template(
         "detail.html",
         record_id=record_id,
@@ -556,6 +575,12 @@ def detail(record_id):
         flags=flags,
         corrections_logged=corrections_logged,
         airtable_url=airtable_url,
+        prev_id=prev_id,
+        next_id=next_id,
+        queue_batch=queue_batch,
+        queue_chip=queue_chip,
+        queue_position=queue_position,
+        queue_total=queue_total,
     )
 
 
@@ -581,10 +606,25 @@ def action(record_id):
     why_note = (request.form.get("why") or "").strip()
     now_iso = datetime.now(timezone.utc).isoformat()
 
+    # Determine next cert in queue (if any) before modifying session
+    queue_ids = session.get("queue_ids") or []
+    queue_batch = session.get("queue_batch", "rtr")
+    queue_chip = session.get("queue_chip", "pending")
+    next_id = None
+    if record_id in queue_ids:
+        idx = queue_ids.index(record_id)
+        next_id = queue_ids[idx + 1] if idx < len(queue_ids) - 1 else None
+
     if action_type == "approve":
         corrections_count = _handle_approve(
             table, record_id, source_filename, original_data, why_note, now_iso,
         )
+        if next_id:
+            if corrections_count > 0:
+                flash(f"Approved — {corrections_count} correction(s) logged.", "success")
+            else:
+                flash("Approved with no edits.", "success")
+            return redirect(url_for("detail", record_id=next_id))
         return redirect(url_for("detail", record_id=record_id,
                                 corrections_logged=corrections_count))
 
@@ -593,14 +633,18 @@ def action(record_id):
         if why_note:
             _write_correction(source_filename, record_id, "Review Action",
                               "Pending Review", "Rejected", why_note, now_iso)
-        return redirect(url_for("queue"))
+        if next_id:
+            return redirect(url_for("detail", record_id=next_id))
+        return redirect(url_for("queue", batch=queue_batch, filter=queue_chip))
 
     if action_type == "escalate":
         table.update(record_id, {"Review Status": REVIEW_STATUS_ESCALATED}, typecast=True)
         if why_note:
             _write_correction(source_filename, record_id, "Review Action",
                               "Pending Review", "Escalated to GC", why_note, now_iso)
-        return redirect(url_for("queue"))
+        if next_id:
+            return redirect(url_for("detail", record_id=next_id))
+        return redirect(url_for("queue", batch=queue_batch, filter=queue_chip))
 
     abort(400)
 

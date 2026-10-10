@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import patch
 
 from extractor import (
     apply_simple_document_classification,
@@ -6,6 +7,7 @@ from extractor import (
     _is_zero_or_blank_limits,
     _is_phantom_by_limits,
     _is_phantom_by_duplicate_number,
+    _expand_bundle,
 )
 
 
@@ -260,3 +262,24 @@ def test_drop_phantom_non_list_policies_unchanged():
     data = {"policies": None}
     out = drop_empty_policies(data)
     assert out["policies"] is None
+
+
+# ── _expand_bundle: single-page PDF fallback ──────────────────────────────────
+
+def test_expand_bundle_single_page_pdf_returns_original():
+    """When split_pdf returns [] (single-page PDF), _expand_bundle must return [file_path],
+    not an empty list.  This was the root bug for RTR_COI_page47_resend.pdf."""
+    fake_pdf = Path("/tmp/RTR_COI_page47_resend.pdf")
+    with patch("extractor.pdf_bundle.split_pdf", return_value=[]) as mock_split:
+        result = _expand_bundle(fake_pdf)
+    mock_split.assert_called_once()
+    assert result == [fake_pdf], "single-page PDF must fall back to [file_path], not []"
+
+
+def test_expand_bundle_non_pdf_skips_split():
+    """Non-PDF files bypass split_pdf entirely and return [file_path]."""
+    fake_img = Path("/tmp/cert.png")
+    with patch("extractor.pdf_bundle.split_pdf") as mock_split:
+        result = _expand_bundle(fake_img)
+    mock_split.assert_not_called()
+    assert result == [fake_img]

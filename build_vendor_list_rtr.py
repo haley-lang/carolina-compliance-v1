@@ -1,406 +1,643 @@
 """
 build_vendor_list_rtr.py
-Reads RTR Incoming Extractions rows from Airtable and produces a CSV report
-at /Users/haleybridges/Desktop/RTR Construction LLC/vendor_list_rtr.csv
+Phase 4: Build RTR vendor CSV files from Airtable Incoming Extractions data.
+Read-only — NO Airtable writes.
+
+Outputs:
+  /Users/haleybridges/Desktop/RTR Construction LLC/vendor_list_rtr.csv
+  /Users/haleybridges/Desktop/RTR Construction LLC/vendor_list_rtr_needs_decision.csv
 """
 
 import csv
 import json
-import os
 import re
-import sys
 from collections import defaultdict
-from itertools import combinations
+from datetime import datetime
 from pathlib import Path
 
-from dotenv import load_dotenv
-
-load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=True)
-
-import config
-import eval_scoring
-from airtable_importer import clean_base_id
-from pyairtable import Api
+# ---------------------------------------------------------------------------
+# Field ID constants (Airtable cellValuesByFieldId keys)
+# ---------------------------------------------------------------------------
+FLD_SOURCE_FILENAME = "fldHAwdxnX3yM0s3o"   # string
+FLD_RAW_JSON        = "fldTGsebc6o2ll5Pu"   # string (parse as JSON)
+FLD_REVIEW_STATUS   = "fldYNgd0wiaxzXKS9"   # singleSelect {id, name, color}
+FLD_CONFIDENCE      = "fld1Y2QrenfEEOpsv"   # float
+FLD_NAMED_INSURED   = "fld4X90MLBQIqTNTn"   # string
+FLD_REVIEW_REASON   = "fldJ6cZfcRCT4EWz0"   # singleSelect
 
 # ---------------------------------------------------------------------------
-# Constants
+# Paths
 # ---------------------------------------------------------------------------
-BASE_ID = "appCGgww0Pt7KE04u"
-OUTPUT_PATH = Path("/Users/haleybridges/Desktop/RTR Construction LLC/vendor_list_rtr.csv")
-
-RTR_FILENAME_PREFIXES = (
-    "coi_forms_cert",
-    "coi_forms1_cert",
-    "rtr_coi_",
+DATA_FILE = Path(
+    "/Users/haleybridges/.claude/projects/-Users-haleybridges"
+    "/59ba0420-e2ca-455e-8fee-01267807f0dd/tool-results"
+    "/mcp-claude_ai_Airtable-list_records_for_table-1791593542403.txt"
 )
-RTR_EXACT_FILENAMES = {"n9wc394833_acordapp25_i"}
+OUTPUT_DIR = Path("/Users/haleybridges/Desktop/RTR Construction LLC")
+OUT_MAIN   = OUTPUT_DIR / "vendor_list_rtr.csv"
+OUT_NEEDS  = OUTPUT_DIR / "vendor_list_rtr_needs_decision.csv"
 
-POLICY_FAMILIES = ["GL", "AUTO", "WC", "UMBRELLA", "EXCESS", "EXCESS_WC", "OTHER"]
+# cert18: contact emails flagged as unreliable scan
+CERT18_FILENAME = "COI_forms_cert18.json"
+
 
 # ---------------------------------------------------------------------------
-# Helpers
+# RTR filename filter
+# Billy/RTR: starts with "COI_forms_", "RTR_COI_", "N9WC", "coi.json",
+# or contains "resend" (case-insensitive)
 # ---------------------------------------------------------------------------
 
-def normalize_filename(s: str) -> str:
-    """Lowercase + replace non-alnum with underscore."""
-    return re.sub(r"[^a-z0-9]", "_", (s or "").lower())
+def is_rtr_filename(fn: str) -> bool:
+    fl = fn.lower()
+    if fl.startswith("coi_forms_"):
+        return True
+    if fl.startswith("rtr_coi_"):
+        return True
+    if fl.startswith("n9wc"):
+        return True
+    if fl == "coi.json":
+        return True
+    if "resend" in fl:
+        return True
+    return False
 
 
-def is_rtr_filename(raw_filename: str) -> bool:
-    norm = normalize_filename(raw_filename)
-    for prefix in RTR_FILENAME_PREFIXES:
-        if norm.startswith(prefix):
-            return True
-    return norm in RTR_EXACT_FILENAMES
-
-
-def is_rtr_cert_holder(parsed_json: dict) -> bool:
-    holder = str(parsed_json.get("certificate_holder") or "")
-    return "rtr" in holder.lower()
-
+# ---------------------------------------------------------------------------
+# Vendor name normalization
+# ---------------------------------------------------------------------------
 
 def normalize_vendor_name(raw: str) -> str:
-    """Apply the 6-step normalization described in the spec."""
-    s = (raw or "").strip()
-    # Step 2: replace commas and periods with space
-    s = re.sub(r"[,.]", " ", s)
-    # Step 3: collapse multiple whitespace
+    """
+    Normalize a vendor name:
+      1. Strip leading/trailing whitespace
+      2. Normalize inner spaces to single space
+      3. Detect and canonicalize company suffix (LLC, Inc., etc.)
+      4. Title-case the non-suffix portion
+      5. Preserve dba, /, & as-is
+      6. Strip trailing period from full name if not part of recognized suffix
+    """
+    if not raw or not raw.strip():
+        return "(unknown)"
+
+    s = raw.strip()
     s = re.sub(r"\s+", " ", s)
-    # Step 4: lowercase
-    s = s.lower()
-    # Step 5: normalize suffix variants at end of string
-    s = re.sub(r"l\.?l\.?c\.?\s*$", "llc", s)
-    s = re.sub(r"i\.?n\.?c\.?\s*$", "inc", s)
-    s = re.sub(r"\bco\.\s*$", "co", s)
-    s = re.sub(r"corp\.\s*$", "corp", s)
-    s = re.sub(r"\bltd\.\s*$", "ltd", s)
-    # Step 6: strip again
-    s = s.strip()
+
+    # Suffix patterns applied case-insensitively, anchored to end of string.
+    # Each yields (captured_prefix, canonical_suffix).
+    # Order matters: PLLC before LLC, LLP before LP.
+    suffix_patterns = [
+        (r"^(.*?)\s*P\.?L\.?L\.?C\.?\s*$", "PLLC"),
+        (r"^(.*?)\s*L\.?L\.?P\.?\s*$",     "LLP"),
+        (r"^(.*?)\s*L\.?L\.?C\.?\s*$",     "LLC"),
+        (r"^(.*?)\s*Inc\.?\s*$",            "Inc."),
+        (r"^(.*?)\s*Corp\.?\s*$",           "Corp."),
+        (r"^(.*?)\s*Ltd\.?\s*$",            "Ltd."),
+        (r"^(.*?)\s*L\.?P\.?\s*$",          "LP"),
+        (r"^(.*?)\s*Co\.?\s*$",             "Co."),
+    ]
+
+    suffix_found = None
+    prefix = s
+    for pattern, canonical in suffix_patterns:
+        m = re.match(pattern, s, re.IGNORECASE)
+        if m:
+            prefix = m.group(1).strip()
+            suffix_found = canonical
+            break
+
+    titled = _title_case_words(prefix)
+
+    if suffix_found:
+        s = (titled + " " + suffix_found).strip() if titled else suffix_found
+    else:
+        s = titled
+
+    # Strip trailing period if it's not part of a recognized suffix ending
+    recognized_suffix_endings = ("Inc.", "Corp.", "Ltd.", "Co.", "PLLC", "LLC", "LLP", "LP")
+    if s.endswith(".") and not any(s.endswith(sfx) for sfx in recognized_suffix_endings):
+        s = s[:-1].rstrip()
+
     return s
 
 
-def split_multi_insured(named_insured: str) -> list[str]:
-    """Split on ' and ', ' & ', ' / ' (case-insensitive). Returns list of parts."""
-    parts = re.split(r"(?i)\s+and\s+|\s+&\s+|\s+/\s+", named_insured)
-    return [p.strip() for p in parts if p.strip()]
+def _title_case_word(word: str) -> str:
+    """Title-case a single word, handling dotted abbreviations and apostrophes."""
+    if not word:
+        return word
+    # Dotted abbreviations like "E.E." or "J.K.P." -> keep uppercase
+    if re.match(r'^([A-Za-z]\.)+$', word):
+        return word.upper()
+    if re.match(r'^([A-Za-z]\.)+[A-Za-z]$', word):
+        return word.upper()
+    # Apostrophe handling: "DUANE'S" -> "Duane's"
+    if "'" in word:
+        parts = word.split("'")
+        titled_parts = []
+        for j, part in enumerate(parts):
+            if j == 0:
+                titled_parts.append(part.capitalize())
+            else:
+                titled_parts.append(part.lower())
+        return "'".join(titled_parts)
+    return word.capitalize()
 
 
-def suffix_strip(normalized: str) -> str:
-    """Strip trailing business suffix for duplicate detection."""
-    return re.sub(r"\s+(llc|inc|co|corp|ltd|pllc|pc)\s*$", "", normalized).strip()
+def _title_case_words(s: str) -> str:
+    """Title-case a multi-word string with special-case handling."""
+    if not s:
+        return s
+    words = s.split(" ")
+    result = []
+    small_words = {"a", "an", "the", "of", "and", "or", "in", "on", "at", "to", "for", "with", "by"}
+    for i, word in enumerate(words):
+        if not word:
+            result.append(word)
+            continue
+        lower = word.lower()
+        # Preserve tokens as written
+        if lower == "dba":
+            result.append("dba")
+            continue
+        if lower == "d/b/a":
+            result.append("d/b/a")
+            continue
+        if lower in ("&", "/"):
+            result.append(word)
+            continue
+        # Small connecting words stay lowercase except at position 0
+        if i > 0 and lower in small_words:
+            result.append(lower)
+            continue
+        result.append(_title_case_word(word))
+
+    # Always capitalize the first word
+    if result and result[0]:
+        first = result[0]
+        if first and first[0].islower():
+            result[0] = first[0].upper() + first[1:]
+    return " ".join(result)
+
+
+# ---------------------------------------------------------------------------
+# Policy type normalization
+# ---------------------------------------------------------------------------
+
+def normalize_policy_type(pt: str) -> str:
+    """Map verbose policy type labels to short codes per spec."""
+    if not pt:
+        return ""
+    pt_lower = pt.lower().strip()
+    if "commercial general liability" in pt_lower or "general liability" in pt_lower:
+        return "GL"
+    if (
+        "commercial auto" in pt_lower
+        or "automobile liability" in pt_lower
+        or "auto liability" in pt_lower
+    ):
+        return "Auto"
+    if "workers compensation" in pt_lower or "workers' compensation" in pt_lower:
+        return "WC"
+    if "umbrella liability" in pt_lower or "umbrella liab" in pt_lower:
+        return "Umbrella"
+    if "excess liability" in pt_lower:
+        return "Excess"
+    return pt.strip()
+
+
+# ---------------------------------------------------------------------------
+# Date parsing
+# ---------------------------------------------------------------------------
+
+def parse_date(s: str):
+    """Try multiple date formats. Returns datetime or None."""
+    if not s or not s.strip():
+        return None
+    s = s.strip()
+    # Normalize M/D/YYYY -> MM/DD/YYYY
+    s_norm = re.sub(
+        r"^(\d{1,2})/(\d{1,2})/(\d{2,4})$",
+        lambda m: f"{int(m.group(1)):02d}/{int(m.group(2)):02d}/{m.group(3)}",
+        s,
+    )
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y", "%m/%d/%y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(s_norm, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Variant detection key
+# ---------------------------------------------------------------------------
+
+def ultra_normalize(s: str) -> str:
+    """Remove all punctuation, lowercase, collapse spaces — for variant detection."""
+    return re.sub(r"\s+", "", re.sub(r"[^a-z0-9]", "", s.lower()))
+
+
+# ---------------------------------------------------------------------------
+# Split two-company named insured string
+# ---------------------------------------------------------------------------
+
+def split_two_insureds(raw_ni: str) -> list:
+    """
+    Try to split a named_insured that contains two companies into a list of parts.
+    Returns list of 1 or 2 strings.
+    """
+    if not raw_ni:
+        return ["(unknown)"]
+
+    # Explicit separator: newline
+    if "\n" in raw_ni:
+        parts = [p.strip() for p in raw_ni.split("\n") if p.strip()]
+        if len(parts) >= 2:
+            return parts[:2]
+
+    # Explicit separator: " and " (case-insensitive)
+    m = re.search(r"\s+and\s+", raw_ni, re.IGNORECASE)
+    if m:
+        parts = [raw_ni[:m.start()].strip(), raw_ni[m.end():].strip()]
+        if all(parts):
+            return parts
+
+    # Explicit separator: " & "
+    m = re.search(r"\s+&\s+", raw_ni)
+    if m:
+        parts = [raw_ni[:m.start()].strip(), raw_ni[m.end():].strip()]
+        if all(parts):
+            return parts
+
+    # Implicit: split on suffix boundary followed by capital letter
+    # Pattern: match first occurrence of a company suffix followed by space+capital
+    # Use re.split with a capturing group to identify the boundary
+    pattern = r"(Inc\.|LLC|Corp\.|Ltd\.|PLLC|LLP)\s+(?=[A-Z])"
+    split_parts = re.split(pattern, raw_ni, maxsplit=1)
+    # split_parts = [before_suffix, suffix, after_boundary]
+    if len(split_parts) == 3:
+        part1 = (split_parts[0] + split_parts[1]).strip()
+        part2 = split_parts[2].strip()
+        if part1 and part2:
+            return [part1, part2]
+
+    # No split found — return as single item
+    return [raw_ni.strip()]
+
+
+# ---------------------------------------------------------------------------
+# Load Airtable data from cached file
+# ---------------------------------------------------------------------------
+
+def load_records():
+    with open(DATA_FILE, encoding="utf-8") as f:
+        data = json.load(f)
+    return data.get("records", [])
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-def main():
-    api_key = config.AIRTABLE_API_KEY
-    base_id = clean_base_id(BASE_ID)
-
-    print("Fetching all rows from Incoming Extractions…", flush=True)
-    api = Api(api_key)
-    table = api.table(base_id, "Incoming Extractions")
-    rows = table.all()
-    print(f"  Total rows fetched: {len(rows)}", flush=True)
+def build_files():
+    records = load_records()
+    print(f"Total records loaded: {len(records)}")
 
     # ------------------------------------------------------------------
-    # Filter to RTR rows
+    # Step 1: Filter records
     # ------------------------------------------------------------------
     rtr_rows = []
     skipped_rejected = 0
-    skipped_test = 0
-    skipped_no_json = 0
+    skipped_not_rtr = 0
 
-    for row in rows:
-        fields = row.get("fields", {})
+    for rec in records:
+        fields = rec.get("cellValuesByFieldId", {})
 
-        # Exclusion: Rejected
-        if fields.get("Review Status") == "Rejected":
+        # Review Status
+        rs_raw = fields.get(FLD_REVIEW_STATUS, {})
+        if isinstance(rs_raw, dict):
+            review_status = rs_raw.get("name", "")
+        else:
+            review_status = rs_raw or ""
+
+        # Skip Rejected
+        if review_status == "Rejected":
             skipped_rejected += 1
             continue
 
-        # Exclusion: test/scenario filenames
-        src_filename = fields.get("Source Filename", "")
-        norm_fn = normalize_filename(src_filename)
-        if norm_fn.startswith("scenario_") or norm_fn.startswith("test_"):
-            skipped_test += 1
+        # Source filename
+        src_filename = fields.get(FLD_SOURCE_FILENAME, "") or ""
+
+        # RTR filter
+        if not is_rtr_filename(src_filename):
+            skipped_not_rtr += 1
             continue
 
-        # Exclusion: missing or unparseable Raw JSON
-        raw_json_str = fields.get("Raw JSON")
-        if not raw_json_str:
-            skipped_no_json += 1
-            continue
+        # Parse Raw JSON
+        raw_json_str = fields.get(FLD_RAW_JSON, "") or ""
         try:
-            parsed = json.loads(raw_json_str)
+            parsed = json.loads(raw_json_str) if raw_json_str.strip() else {}
         except (json.JSONDecodeError, TypeError):
-            skipped_no_json += 1
-            continue
+            parsed = {}
 
-        # RTR filter: filename pattern OR cert holder contains RTR
-        if not (is_rtr_filename(src_filename) or is_rtr_cert_holder(parsed)):
-            continue
+        # Named insured: Airtable field is primary source
+        named_insured_at = (fields.get(FLD_NAMED_INSURED, "") or "").strip()
+        # Raw JSON named_insured: used for name_as_printed
+        named_insured_json = str(parsed.get("named_insured") or "").strip()
 
-        rtr_rows.append((fields, parsed))
+        # Use Airtable field first, fall back to JSON
+        named_insured = named_insured_at if named_insured_at else named_insured_json
 
-    print(f"  RTR rows after filtering: {len(rtr_rows)}")
-    print(f"  Skipped — Rejected: {skipped_rejected}, test/scenario: {skipped_test}, no valid JSON: {skipped_no_json}")
+        rtr_rows.append({
+            "src_filename": src_filename,
+            "review_status": review_status,
+            "named_insured": named_insured,
+            "raw_named_insured": named_insured_json,
+            "parsed": parsed,
+        })
+
+    print(f"Skipped (Rejected): {skipped_rejected}")
+    print(f"Skipped (not RTR): {skipped_not_rtr}")
+    print(f"RTR rows to process: {len(rtr_rows)}")
 
     # ------------------------------------------------------------------
-    # Build vendor data structures
+    # Step 2: Aggregate by normalized vendor name
     # ------------------------------------------------------------------
-    # Key: normalized_vendor_name
-    # Value: dict with all aggregated data
     vendors: dict[str, dict] = {}
 
-    non_coi_rows = []  # For section 3
+    for row in rtr_rows:
+        src_filename    = row["src_filename"]
+        review_status   = row["review_status"]
+        named_insured   = row["named_insured"] or "(unknown)"
+        raw_named_insured = row["raw_named_insured"] or named_insured
+        parsed          = row["parsed"]
 
-    for fields, parsed in rtr_rows:
-        src_filename = fields.get("Source Filename", "")
-        raw_named_insured = str(parsed.get("named_insured") or "").strip()
-        document_type = str(parsed.get("document_type") or "").strip()
-        review_status = fields.get("Review Status", "")
-        ai_disagreements = fields.get("AI Disagreements", "")
+        norm = normalize_vendor_name(named_insured)
 
-        # Confidence — try numeric field first, fall back to JSON
-        confidence_raw = fields.get("Confidence") or parsed.get("confidence")
-        try:
-            confidence = float(confidence_raw) if confidence_raw is not None else 1.0
-        except (ValueError, TypeError):
-            confidence = 1.0
+        if norm not in vendors:
+            vendors[norm] = {
+                "vendor_name": norm,
+                "raw_names": set(),
+                "num_certificates": 0,
+                "source_filenames": [],
+                "trades_or_notes": [],
+                "contact_emails": set(),
+                "policy_types": set(),
+                "expiration_dates": [],   # list of (datetime_or_None, raw_str)
+                "statuses": set(),
+            }
 
-        # Track non-COI for section 3
-        if document_type.upper() != "COI":
-            non_coi_rows.append({
-                "source_filename": src_filename,
-                "document_type": document_type,
-                "named_insured": raw_named_insured,
-                "review_status": review_status,
-            })
+        v = vendors[norm]
+        v["num_certificates"] += 1
+        v["raw_names"].add(raw_named_insured)
+        v["source_filenames"].append(src_filename)
+        v["statuses"].add(review_status)
 
-        # Detect multi-company named insured
-        multi = bool(re.search(r"(?i)\s+and\s+|\s+&\s+|\s+/\s+", raw_named_insured))
-        if multi:
-            candidate_parts = split_multi_insured(raw_named_insured)
-        else:
-            candidate_parts = [raw_named_insured] if raw_named_insured else []
+        # trades_or_notes: description_of_operations
+        desc = parsed.get("description_of_operations")
+        if desc and str(desc).strip() and str(desc).strip().lower() not in ("none", "null", ""):
+            trimmed = str(desc).strip()[:200]
+            if trimmed not in v["trades_or_notes"]:
+                v["trades_or_notes"].append(trimmed)
 
-        if not candidate_parts:
-            candidate_parts = ["(unknown)"]
+        # contact_emails
+        emails_raw = parsed.get("contact_emails") or []
+        if isinstance(emails_raw, list):
+            for email in emails_raw:
+                if not email:
+                    continue
+                email_str = str(email).strip()
+                if not email_str:
+                    continue
+                if src_filename == CERT18_FILENAME:
+                    v["contact_emails"].add(f"unreliable scan: {email_str}")
+                else:
+                    v["contact_emails"].add(email_str)
 
-        # Process each candidate vendor name from this certificate
-        for raw_part in candidate_parts:
-            norm = normalize_vendor_name(raw_part)
-            if not norm:
-                norm = "(unknown)"
-
-            if norm not in vendors:
-                vendors[norm] = {
-                    "normalized_vendor_name": norm,
-                    "name_variants": set(),
-                    "num_certificates": 0,
-                    "source_filenames": set(),
-                    # Policy family tracking: family -> (latest_exp_iso, policy_number)
-                    "policies": {fam: None for fam in POLICY_FAMILIES},
-                    # Flags
-                    "multi_company_insured": False,
-                    "non_coi_cert": False,
-                    "low_confidence": False,
-                    "missing_policy_fields": False,
-                    "ai_disagreed": False,
-                }
-
-            v = vendors[norm]
-            v["name_variants"].add(raw_named_insured)
-            v["source_filenames"].add(src_filename)
-            v["num_certificates"] += 1
-
-            # Flags
-            if multi:
-                v["multi_company_insured"] = True
-            if document_type.upper() != "COI":
-                v["non_coi_cert"] = True
-            if confidence < 0.85:
-                v["low_confidence"] = True
-            if ai_disagreements and str(ai_disagreements).strip():
-                v["ai_disagreed"] = True
-
-            # Policies
-            policies = parsed.get("policies") or []
-            if not isinstance(policies, list):
-                policies = []
+        # policy_types and expiration dates
+        policies = parsed.get("policies") or []
+        if isinstance(policies, list):
             for policy in policies:
                 if not isinstance(policy, dict):
                     continue
+                pt = policy.get("policy_type") or ""
+                norm_pt = normalize_policy_type(pt)
+                if norm_pt:
+                    v["policy_types"].add(norm_pt)
 
-                policy_number = str(policy.get("policy_number") or "").strip()
-                eff_date = str(policy.get("effective_date") or "").strip()
-                exp_date = str(policy.get("expiration_date") or "").strip()
+                exp_raw = str(policy.get("expiration_date") or "").strip()
+                if exp_raw and exp_raw.lower() not in ("none", "null", ""):
+                    dt = parse_date(exp_raw)
+                    v["expiration_dates"].append((dt, exp_raw))
 
-                # missing_policy_fields flag
-                if not policy_number or (not eff_date and not exp_date):
-                    v["missing_policy_fields"] = True
-
-                fam = eval_scoring.family(policy.get("policy_type"))
-
-                # Track latest expiration per family
-                if exp_date:
-                    current = v["policies"][fam]
-                    if current is None or exp_date > current[0]:
-                        v["policies"][fam] = (exp_date, policy_number)
+    print(f"Unique normalized vendors: {len(vendors)}")
 
     # ------------------------------------------------------------------
-    # Deduplicate: non-COI rows by source_filename to avoid repeats
+    # Step 3: Build File 1 rows
     # ------------------------------------------------------------------
-    seen_non_coi = set()
-    deduped_non_coi = []
-    for r in non_coi_rows:
-        key = (r["source_filename"], r["document_type"])
-        if key not in seen_non_coi:
-            seen_non_coi.add(key)
-            deduped_non_coi.append(r)
+    # Policy type sort order
+    PT_ORDER = {"GL": 0, "Auto": 1, "WC": 2, "Umbrella": 3, "Excess": 4}
 
-    # ------------------------------------------------------------------
-    # Section 2: Possible duplicates
-    # ------------------------------------------------------------------
-    vendor_names = sorted(vendors.keys())
-    stripped_map: dict[str, list[str]] = defaultdict(list)
-    for name in vendor_names:
-        stripped = suffix_strip(name)
-        if stripped:  # only consider non-empty stripped forms
-            stripped_map[stripped].append(name)
-
-    duplicate_pairs = []
-    for stripped, names in stripped_map.items():
-        if len(names) >= 2:
-            for a, b in combinations(sorted(names), 2):
-                if a != b:
-                    duplicate_pairs.append({
-                        "name_a": a,
-                        "name_b": b,
-                        "reason": f"both strip to '{stripped}' after removing business suffix",
-                    })
-
-    # ------------------------------------------------------------------
-    # Build CSV rows for section 1
-    # ------------------------------------------------------------------
-    vendor_rows = []
-    for norm in sorted(vendors.keys()):
+    file1_rows = []
+    for norm in sorted(vendors.keys(), key=lambda x: x.lower()):
         v = vendors[norm]
-        flags = []
-        if v["multi_company_insured"]:
-            flags.append("multi_company_insured")
-        if v["non_coi_cert"]:
-            flags.append("non_coi_cert")
-        if v["low_confidence"]:
-            flags.append("low_confidence")
-        if v["missing_policy_fields"]:
-            flags.append("missing_policy_fields")
-        if v["ai_disagreed"]:
-            flags.append("ai_disagreed")
 
-        def policy_cols(fam):
-            entry = v["policies"].get(fam)
-            if entry:
-                return entry[0], entry[1]
-            return "", ""
+        # name_as_printed: unique raw names sorted, joined by " / "
+        name_as_printed = " / ".join(sorted(v["raw_names"]))
 
-        gl_exp, gl_pol = policy_cols("GL")
-        auto_exp, auto_pol = policy_cols("AUTO")
-        wc_exp, wc_pol = policy_cols("WC")
-        umb_exp, umb_pol = policy_cols("UMBRELLA")
-        exc_exp, exc_pol = policy_cols("EXCESS")
+        # source_filenames: deduplicated, sorted, joined by " | "
+        seen_fns = []
+        seen_fn_set: set = set()
+        for fn in sorted(v["source_filenames"]):
+            if fn not in seen_fn_set:
+                seen_fns.append(fn)
+                seen_fn_set.add(fn)
+        source_filenames = " | ".join(seen_fns)
 
-        vendor_rows.append({
-            "normalized_vendor_name": norm,
-            "name_variants": "; ".join(sorted(v["name_variants"])),
-            "num_certificates": v["num_certificates"],
-            "source_filenames": "; ".join(sorted(v["source_filenames"])),
-            "gl_latest_exp": gl_exp,
-            "gl_policy_number": gl_pol,
-            "auto_latest_exp": auto_exp,
-            "auto_policy_number": auto_pol,
-            "wc_latest_exp": wc_exp,
-            "wc_policy_number": wc_pol,
-            "umbrella_latest_exp": umb_exp,
-            "umbrella_policy_number": umb_pol,
-            "excess_latest_exp": exc_exp,
-            "excess_policy_number": exc_pol,
-            "flags": "; ".join(flags),
+        # trades_or_notes
+        trades = " | ".join(v["trades_or_notes"]) if v["trades_or_notes"] else ""
+
+        # contact_emails
+        contact_emails = " | ".join(sorted(v["contact_emails"])) if v["contact_emails"] else ""
+
+        # policy_types sorted
+        pts_sorted = sorted(
+            v["policy_types"],
+            key=lambda x: (PT_ORDER.get(x, 99), x),
+        )
+        policy_types = " | ".join(pts_sorted) if pts_sorted else ""
+
+        # earliest_expiration
+        if v["expiration_dates"]:
+            parsed_dates = [(dt, raw) for dt, raw in v["expiration_dates"] if dt is not None]
+            unparsed    = [(dt, raw) for dt, raw in v["expiration_dates"] if dt is None]
+            if parsed_dates:
+                min_dt, _ = min(parsed_dates, key=lambda x: x[0])
+                earliest_expiration = min_dt.strftime("%Y-%m-%d")
+            elif unparsed:
+                earliest_expiration = unparsed[0][1]
+            else:
+                earliest_expiration = ""
+        else:
+            earliest_expiration = ""
+
+        # status
+        status = " / ".join(sorted(v["statuses"]))
+
+        file1_rows.append({
+            "vendor_name":         v["vendor_name"],
+            "name_as_printed":     name_as_printed,
+            "num_certificates":    v["num_certificates"],
+            "source_filenames":    source_filenames,
+            "trades_or_notes":     trades,
+            "contact_emails":      contact_emails,
+            "policy_types":        policy_types,
+            "earliest_expiration": earliest_expiration,
+            "status":              status,
         })
 
     # ------------------------------------------------------------------
-    # Write CSV
+    # Step 4: Build File 2 — Needs Decision
     # ------------------------------------------------------------------
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    file2_rows = []
 
-    with open(OUTPUT_PATH, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
+    # KIND A: Spelling variants
+    # Group vendor names that share the same ultra-normalized key
+    ultra_map: dict[str, list] = defaultdict(list)
+    for norm in vendors:
+        ultra_map[ultra_normalize(norm)].append(norm)
 
-        # Section 1: Vendor List
-        writer.writerow(["VENDOR LIST"])
-        writer.writerow([
-            "normalized_vendor_name", "name_variants", "num_certificates", "source_filenames",
-            "gl_latest_exp", "gl_policy_number",
-            "auto_latest_exp", "auto_policy_number",
-            "wc_latest_exp", "wc_policy_number",
-            "umbrella_latest_exp", "umbrella_policy_number",
-            "excess_latest_exp", "excess_policy_number",
-            "flags",
-        ])
-        for r in vendor_rows:
-            writer.writerow([
-                r["normalized_vendor_name"],
-                r["name_variants"],
-                r["num_certificates"],
-                r["source_filenames"],
-                r["gl_latest_exp"],
-                r["gl_policy_number"],
-                r["auto_latest_exp"],
-                r["auto_policy_number"],
-                r["wc_latest_exp"],
-                r["wc_policy_number"],
-                r["umbrella_latest_exp"],
-                r["umbrella_policy_number"],
-                r["excess_latest_exp"],
-                r["excess_policy_number"],
-                r["flags"],
-            ])
+    variant_groups = {k: v for k, v in ultra_map.items() if len(v) >= 2}
 
-        # Blank row separator
-        writer.writerow([])
+    for key in sorted(variant_groups):
+        norm_list = sorted(variant_groups[key])
+        for norm in norm_list:
+            v = vendors[norm]
+            others = [n for n in norm_list if n != norm]
+            notes = "possible spelling variant of: " + " / ".join(others)
 
-        # Section 2: Possible Duplicates
-        writer.writerow(["POSSIBLE DUPLICATES — NEEDS HALEY'S DECISION"])
-        writer.writerow(["name_a", "name_b", "reason"])
-        for d in duplicate_pairs:
-            writer.writerow([d["name_a"], d["name_b"], d["reason"]])
+            seen_fns_a: list = []
+            seen_fn_set_a: set = set()
+            for fn in sorted(v["source_filenames"]):
+                if fn not in seen_fn_set_a:
+                    seen_fns_a.append(fn)
+                    seen_fn_set_a.add(fn)
 
-        # Blank row separator
-        writer.writerow([])
+            file2_rows.append({
+                "candidate_vendor_name": norm,
+                "raw_names":             " / ".join(sorted(v["raw_names"])),
+                "num_certs":             v["num_certificates"],
+                "source_filenames":      " | ".join(seen_fns_a),
+                "notes":                 notes,
+            })
 
-        # Section 3: Non-COI Documents
-        writer.writerow(["NON-COI DOCUMENTS"])
-        writer.writerow(["source_filename", "document_type", "named_insured", "review_status"])
-        for r in deduped_non_coi:
-            writer.writerow([
-                r["source_filename"],
-                r["document_type"],
-                r["named_insured"],
-                r["review_status"],
-            ])
+    # KIND B: Two insureds on cert33 and cert34 — always output per spec
+    cert_b_targets = sorted(["COI_forms_cert33.json", "COI_forms_cert34.json"])
+
+    for target_fn in cert_b_targets:
+        matching = [r for r in rtr_rows if r["src_filename"] == target_fn]
+        if not matching:
+            # No matching row found — still output a placeholder row
+            file2_rows.append({
+                "candidate_vendor_name": "(not found)",
+                "raw_names":             "",
+                "num_certs":             0,
+                "source_filenames":      target_fn,
+                "notes":                 "two insureds on one certificate, Haley decides",
+            })
+            continue
+
+        row = matching[0]
+        raw_ni = row["raw_named_insured"] or row["named_insured"] or ""
+
+        parts = split_two_insureds(raw_ni)
+
+        if len(parts) >= 2:
+            for part in parts:
+                file2_rows.append({
+                    "candidate_vendor_name": normalize_vendor_name(part),
+                    "raw_names":             raw_ni,
+                    "num_certs":             1,
+                    "source_filenames":      target_fn,
+                    "notes":                 "two insureds on one certificate, Haley decides",
+                })
+        else:
+            # Single name — still output one row per spec
+            file2_rows.append({
+                "candidate_vendor_name": normalize_vendor_name(parts[0]) if parts else "(unknown)",
+                "raw_names":             raw_ni,
+                "num_certs":             1,
+                "source_filenames":      target_fn,
+                "notes":                 "two insureds on one certificate, Haley decides",
+            })
 
     # ------------------------------------------------------------------
-    # Summary
+    # Step 5: Write File 1
     # ------------------------------------------------------------------
-    print(f"\n--- Summary ---")
-    print(f"Total RTR rows found:         {len(rtr_rows)}")
-    print(f"Vendor count (normalized):    {len(vendors)}")
-    print(f"Possible duplicate pairs:     {len(duplicate_pairs)}")
-    print(f"Non-COI document rows:        {len(deduped_non_coi)}")
-    print(f"\nCSV written to: {OUTPUT_PATH}")
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    f1_cols = [
+        "vendor_name", "name_as_printed", "num_certificates",
+        "source_filenames", "trades_or_notes", "contact_emails",
+        "policy_types", "earliest_expiration", "status",
+    ]
+    with open(OUT_MAIN, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=f1_cols)
+        writer.writeheader()
+        writer.writerows(file1_rows)
+
+    print(f"\nFile 1 written: {OUT_MAIN}")
+    print(f"  Vendors: {len(file1_rows)}")
+
+    # ------------------------------------------------------------------
+    # Step 6: Write File 2
+    # ------------------------------------------------------------------
+    f2_cols = [
+        "candidate_vendor_name", "raw_names", "num_certs",
+        "source_filenames", "notes",
+    ]
+    with open(OUT_NEEDS, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=f2_cols)
+        writer.writeheader()
+        writer.writerows(file2_rows)
+
+    print(f"File 2 written: {OUT_NEEDS}")
+    print(f"  Rows: {len(file2_rows)}")
+
+    # ------------------------------------------------------------------
+    # Data quality diagnostics
+    # ------------------------------------------------------------------
+    print("\n--- Data Quality Notes ---")
+    missing_ni = [r["src_filename"] for r in rtr_rows
+                  if not r["named_insured"] or r["named_insured"] == "(unknown)"]
+    if missing_ni:
+        # Deduplicate (N9WC appears twice)
+        uniq = sorted(set(missing_ni))
+        print(f"Certs with no named insured (mapped to '(unknown)'): {uniq}")
+
+    no_exp = [norm for norm, v in vendors.items() if not v["expiration_dates"]]
+    if no_exp:
+        print(f"Vendors with no expiration dates: {no_exp}")
+
+    no_email = [norm for norm, v in vendors.items() if not v["contact_emails"]]
+    print(f"Vendors with no contact emails: {len(no_email)} vendors")
+
+    if variant_groups:
+        print(f"Spelling variant groups (Kind A): {len(variant_groups)}")
+    else:
+        print("Spelling variant groups (Kind A): none detected")
+
+    return len(file1_rows), len(file2_rows)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    main()
+    v_count, r_count = build_files()
+    print(f"\n=== SUMMARY ===")
+    print(f"Vendors in vendor_list_rtr.csv:              {v_count}")
+    print(f"Rows in vendor_list_rtr_needs_decision.csv:  {r_count}")
+    print(f"\nOutput files:")
+    print(f"  {OUT_MAIN}")
+    print(f"  {OUT_NEEDS}")

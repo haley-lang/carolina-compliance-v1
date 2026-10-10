@@ -27,13 +27,39 @@
 
 <div class="page-wrap">
 
-  <!-- Flash messages -->
+  <!-- Flashed messages from action() redirect -->
+  {% for category, message in get_flashed_messages(with_categories=True) %}
+  <div class="flash flash-{{ category }}">{{ message }}</div>
+  {% endfor %}
+
+  <!-- Corrections logged (same-page approve feedback) -->
   {% if corrections_logged is not none %}
   <div class="flash flash-success">
     {% if corrections_logged > 0 %}
       Corrections logged: {{ corrections_logged }} — review status updated.
     {% else %}
       Approved with no edits.
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <!-- Queue navigation bar -->
+  {% if queue_total %}
+  <div class="d-flex gap-8 mb-16" style="align-items:center">
+    {% if prev_id %}
+      <a href="/detail/{{ prev_id }}" class="btn btn-sm btn-secondary">← Previous</a>
+    {% else %}
+      <span class="btn btn-sm btn-secondary" style="opacity:0.35;cursor:default">← Previous</span>
+    {% endif %}
+    {% if queue_position and queue_total %}
+      <span style="flex:1; text-align:center; font-size:0.85rem; color:var(--secondary); font-weight:600">
+        Certificate {{ queue_position }} of {{ queue_total }}
+      </span>
+    {% endif %}
+    {% if next_id %}
+      <a href="/detail/{{ next_id }}" class="btn btn-sm btn-secondary">Next →</a>
+    {% else %}
+      <span class="btn btn-sm btn-secondary" style="opacity:0.35;cursor:default">Next →</span>
     {% endif %}
   </div>
   {% endif %}

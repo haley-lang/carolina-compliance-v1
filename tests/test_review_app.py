@@ -870,3 +870,374 @@ def test_queue_possible_duplicate_normalizes_policy_number(authed_client):
         mock.return_value.all.return_value = [rec1, rec2]
         resp = authed_client.get("/queue?batch=other")
     assert b"Possible duplicate" in resp.data
+
+
+# ── Task 1: 58-record smoke test (Billy/RTR batch) ────────────────────────────
+
+def _make_billy_rec(rec_id, source_filename, named_insured="Test Co LLC",
+                    review_status="Pending Review", confidence=0.97,
+                    policies=None, ai_disagreements="", review_reason="",
+                    prior_raw_json=""):
+    """Build a mock record shaped like a real Billy/RTR Airtable record."""
+    if policies is None:
+        policies = [{
+            "policy_type": "Commercial General Liability",
+            "policy_number": "GL-001",
+            "carrier": "Hartford",
+            "effective_date": "2025-01-01",
+            "expiration_date": "2026-01-01",
+            "coverage_limits": "$1M/$2M",
+            "policy_basis": "occurrence",
+            "additional_insured_checked": False,
+            "waiver_of_subrogation_checked": False,
+            "primary_noncontributory_checked": False,
+        }]
+    raw = {
+        "document_type": "COI",
+        "named_insured": named_insured,
+        "certificate_holder": "RTR Homes LLC",
+        "contact_emails": [],
+        "policies": policies,
+        "confidence": confidence,
+    }
+    fields = {
+        "Source Filename": source_filename,
+        "Named Insured": named_insured,
+        "Raw JSON": json.dumps(raw),
+        "Review Status": review_status,
+        "Confidence Score": confidence,
+        "Extraction Processed At": "2025-10-01T12:00:00Z",
+    }
+    if ai_disagreements:
+        fields["AI Disagreements"] = ai_disagreements
+    if review_reason:
+        fields["Review Reason"] = review_reason
+    if prior_raw_json:
+        fields["Prior Raw JSON (superseded)"] = prior_raw_json
+    return {"id": rec_id, "fields": fields}
+
+
+# Generate 58 representative Billy/RTR records covering all field variations
+_BILLY_RTR_RECORDS = []
+# COI_forms_ prefix variants (certs 1-47)
+for _i in range(1, 48):
+    _source = f"COI_forms_cert{_i:02d}.json"
+    _conf = 0.95 + (_i % 5) * 0.01  # 0.95–0.99
+    _status = "Pending Review" if _i % 3 != 0 else ("Approved" if _i % 6 == 0 else "Rejected")
+    _ai_dis = f"GL.wos: False vs True" if _i % 7 == 0 else ""
+    _prior = json.dumps({"document_type": "COI", "named_insured": f"Vendor {_i} LLC",
+                         "policies": [{"policy_number": f"OLD-{_i:03d}",
+                                       "additional_insured_checked": False,
+                                       "waiver_of_subrogation_checked": False,
+                                       "primary_noncontributory_checked": False}]}) if _i % 5 == 0 else ""
+    _pols = [
+        {
+            "policy_type": "Commercial General Liability",
+            "policy_number": f"GL-{_i:03d}",
+            "carrier": "Hartford",
+            "effective_date": "2025-01-01",
+            "expiration_date": "2026-01-01",
+            "coverage_limits": "$1M/$2M",
+            "policy_basis": "occurrence",
+            "additional_insured_checked": bool(_i % 2),
+            "waiver_of_subrogation_checked": bool(_i % 3),
+            "primary_noncontributory_checked": bool(_i % 4),
+        },
+        {
+            "policy_type": "Workers Compensation",
+            "policy_number": f"WC-{_i:03d}",
+            "carrier": "Travelers",
+            "effective_date": "2025-01-01",
+            "expiration_date": "2026-01-01",
+            "coverage_limits": "$500K",
+            "policy_basis": "",
+            "additional_insured_checked": False,
+            "waiver_of_subrogation_checked": bool(_i % 2),
+            "primary_noncontributory_checked": False,
+        },
+    ] if _i % 4 != 0 else []  # some records have no policies
+    _BILLY_RTR_RECORDS.append(
+        _make_billy_rec(
+            f"recBILLY{_i:03d}", _source,
+            named_insured=f"Vendor {_i} LLC",
+            review_status=_status,
+            confidence=_conf,
+            policies=_pols,
+            ai_disagreements=_ai_dis,
+            prior_raw_json=_prior,
+        )
+    )
+
+# RTR_COI_ prefix variants (certs 48-55)
+for _j in range(1, 9):
+    _i = 47 + _j
+    _source = f"RTR_COI_page{_j:02d}.json"
+    _conf = 0.92 if _j % 2 == 0 else 0.98
+    _pols = [{
+        "policy_type": "Commercial General Liability",
+        "policy_number": f"RTR-GL-{_j:03d}",
+        "carrier": "State Farm",
+        "effective_date": "2025-06-01",
+        "expiration_date": "2026-06-01",
+        "coverage_limits": "$2M",
+        "policy_basis": "claims-made",
+        "additional_insured_checked": True,
+        "waiver_of_subrogation_checked": True,
+        "primary_noncontributory_checked": True,
+    }]
+    _BILLY_RTR_RECORDS.append(
+        _make_billy_rec(
+            f"recRTR{_j:03d}", _source,
+            named_insured=f"RTR Vendor {_j} Inc",
+            confidence=_conf,
+            policies=_pols,
+        )
+    )
+
+# N9WC prefix + low confidence (cert 56)
+_BILLY_RTR_RECORDS.append(
+    _make_billy_rec(
+        "recN9WC001", "N9WC394833-ACORDAPP25-I.json",
+        named_insured="N9WC Services LLC",
+        confidence=0.82,  # low confidence flag
+        policies=[{
+            "policy_type": "GL",
+            "policy_number": "",  # missing policy number → missing_fields flag
+            "carrier": "Nationwide",
+            "effective_date": "2025-03-01",
+            "expiration_date": "2026-03-01",
+            "coverage_limits": "$1M",
+            "policy_basis": "",
+            "additional_insured_checked": False,
+            "waiver_of_subrogation_checked": False,
+            "primary_noncontributory_checked": False,
+        }],
+    )
+)
+
+# coi.json prefix (cert 57)
+_BILLY_RTR_RECORDS.append(
+    _make_billy_rec(
+        "recCOI001", "coi.json",
+        named_insured="Multi Co LLC and Partner Inc",  # multi_company flag
+        confidence=0.97,
+        ai_disagreements="named_insured: different read",
+    )
+)
+
+# resend in filename (cert 58)
+_BILLY_RTR_RECORDS.append(
+    _make_billy_rec(
+        "recRESEND001", "some_cert_resend.json",
+        named_insured="Resend Vendor LLC",
+        confidence=0.99,
+        review_status="Approved",
+    )
+)
+
+assert len(_BILLY_RTR_RECORDS) == 58, f"Expected 58 records, got {len(_BILLY_RTR_RECORDS)}"
+
+
+def test_detail_renders_200_for_all_58_billy_rtr_records(authed_client, mock_ie_table):
+    """Every Billy/RTR record must render the detail page without a 500."""
+    errors = []
+    for rec in _BILLY_RTR_RECORDS:
+        mock_ie_table.get.return_value = rec
+        with patch("review_app._ie_table", return_value=mock_ie_table):
+            resp = authed_client.get(f"/detail/{rec['id']}")
+        if resp.status_code != 200:
+            errors.append(
+                f"Record {rec['id']} ({rec['fields'].get('Source Filename')}) "
+                f"returned HTTP {resp.status_code}"
+            )
+    assert not errors, "Some records returned non-200:\n" + "\n".join(errors)
+
+
+# ── Task 2: session queue_ids / prev-next navigation ─────────────────────────
+
+def test_queue_sets_session_queue_ids(authed_client):
+    """Rendering /queue stores queue_ids in the session."""
+    rec1 = _make_queue_rec("recA", source="COI_forms_cert01.json")
+    rec2 = _make_queue_rec("recB", source="COI_forms_cert02.json")
+    with patch("review_app._ie_table") as mock:
+        mock.return_value.all.return_value = [rec1, rec2]
+        authed_client.get("/queue?batch=rtr&filter=pending")
+    with authed_client.session_transaction() as sess:
+        assert "queue_ids" in sess
+        assert set(sess["queue_ids"]) == {"recA", "recB"}
+        assert sess["queue_batch"] == "rtr"
+        assert sess["queue_chip"] == "pending"
+
+
+def test_detail_passes_prev_none_at_first_record(authed_client, mock_ie_table):
+    """First record in queue has prev_id=None."""
+    rec = _make_rec_with_policies("COI_forms_cert01.json")
+    rec["id"] = "recFIRST"
+    # Seed the session queue
+    with authed_client.session_transaction() as sess:
+        sess["queue_ids"] = ["recFIRST", "recSECOND", "recTHIRD"]
+        sess["queue_batch"] = "rtr"
+        sess["queue_chip"] = "pending"
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table):
+        resp = authed_client.get("/detail/recFIRST")
+    assert resp.status_code == 200
+    # First cert: Previous button should be disabled (not a link)
+    assert b"/detail/recSECOND" in resp.data  # next link present
+    assert b"/detail/recFIRST" not in resp.data  # prev link absent (it IS the page)
+
+
+def test_detail_passes_next_none_at_last_record(authed_client, mock_ie_table):
+    """Last record in queue has next_id=None (Next button disabled)."""
+    rec = _make_rec_with_policies("COI_forms_cert47.json")
+    rec["id"] = "recLAST"
+    with authed_client.session_transaction() as sess:
+        sess["queue_ids"] = ["recFIRST", "recSECOND", "recLAST"]
+        sess["queue_batch"] = "rtr"
+        sess["queue_chip"] = "pending"
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table):
+        resp = authed_client.get("/detail/recLAST")
+    assert resp.status_code == 200
+    assert b"/detail/recSECOND" in resp.data  # prev link present
+    # No next link beyond recLAST
+    assert b"/detail/recLAST" not in resp.data
+
+
+def test_detail_passes_both_prev_and_next_for_middle_record(authed_client, mock_ie_table):
+    """Middle record in queue has both prev_id and next_id set."""
+    rec = _make_rec_with_policies("COI_forms_cert02.json")
+    rec["id"] = "recMID"
+    with authed_client.session_transaction() as sess:
+        sess["queue_ids"] = ["recFIRST", "recMID", "recLAST"]
+        sess["queue_batch"] = "rtr"
+        sess["queue_chip"] = "pending"
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table):
+        resp = authed_client.get("/detail/recMID")
+    assert resp.status_code == 200
+    assert b"/detail/recFIRST" in resp.data  # prev link
+    assert b"/detail/recLAST" in resp.data   # next link
+
+
+def test_detail_nav_bar_shows_position(authed_client, mock_ie_table):
+    """Navigation bar should show 'Certificate N of M' text."""
+    rec = _make_rec_with_policies("COI_forms_cert02.json")
+    rec["id"] = "recMID"
+    with authed_client.session_transaction() as sess:
+        sess["queue_ids"] = ["recFIRST", "recMID", "recLAST"]
+        sess["queue_batch"] = "rtr"
+        sess["queue_chip"] = "pending"
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table):
+        resp = authed_client.get("/detail/recMID")
+    assert b"Certificate 2 of 3" in resp.data
+
+
+# ── Task 3: after action, go to next cert ────────────────────────────────────
+
+def test_approve_redirects_to_next_when_queue_ids_in_session(authed_client, mock_ie_table, mock_corr_table):
+    """After approve with a next_id in session, redirects to next cert detail."""
+    rec = _make_rec_with_policies()
+    rec["id"] = "recCURRENT"
+    with authed_client.session_transaction() as sess:
+        sess["queue_ids"] = ["recCURRENT", "recNEXT"]
+        sess["queue_batch"] = "rtr"
+        sess["queue_chip"] = "pending"
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table), \
+         patch("review_app._corrections_table", return_value=mock_corr_table):
+        resp = authed_client.post("/action/recCURRENT", data=_approve_data(
+            named_insured="Test Co LLC",
+            certificate_holder="GC Inc",
+            policy_0_policy_type="GL",
+        ), follow_redirects=False)
+    assert resp.status_code == 302
+    assert "/detail/recNEXT" in resp.headers["Location"]
+
+
+def test_reject_redirects_to_next_when_queue_ids_in_session(authed_client, mock_ie_table, mock_corr_table):
+    """After reject with a next_id in session, redirects to next cert detail."""
+    rec = _make_rec_with_policies()
+    rec["id"] = "recCURRENT"
+    with authed_client.session_transaction() as sess:
+        sess["queue_ids"] = ["recCURRENT", "recNEXT"]
+        sess["queue_batch"] = "rtr"
+        sess["queue_chip"] = "pending"
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table), \
+         patch("review_app._corrections_table", return_value=mock_corr_table):
+        resp = authed_client.post("/action/recCURRENT", data={
+            "csrf_token": _TEST_CSRF, "action": "reject", "why": "",
+        }, follow_redirects=False)
+    assert resp.status_code == 302
+    assert "/detail/recNEXT" in resp.headers["Location"]
+
+
+def test_last_cert_approve_redirects_to_queue_with_params(authed_client, mock_ie_table, mock_corr_table):
+    """After approving the last cert (no next_id), redirects to /queue with batch+filter."""
+    rec = _make_rec_with_policies()
+    rec["id"] = "recLAST"
+    with authed_client.session_transaction() as sess:
+        sess["queue_ids"] = ["recFIRST", "recLAST"]
+        sess["queue_batch"] = "rtr"
+        sess["queue_chip"] = "needs_look"
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table), \
+         patch("review_app._corrections_table", return_value=mock_corr_table):
+        resp = authed_client.post("/action/recLAST", data=_approve_data(
+            named_insured="Test Co LLC",
+            certificate_holder="GC Inc",
+            policy_0_policy_type="GL",
+        ), follow_redirects=False)
+    # No next_id → falls back to same-page redirect (corrections_logged)
+    assert resp.status_code == 302
+    assert "recLAST" in resp.headers["Location"]
+    assert "corrections_logged" in resp.headers["Location"]
+
+
+def test_last_cert_reject_redirects_to_queue_with_params(authed_client, mock_ie_table, mock_corr_table):
+    """After rejecting the last cert (no next_id), redirects to /queue with batch+filter."""
+    rec = _make_rec_with_policies()
+    rec["id"] = "recLAST"
+    with authed_client.session_transaction() as sess:
+        sess["queue_ids"] = ["recFIRST", "recLAST"]
+        sess["queue_batch"] = "rtr"
+        sess["queue_chip"] = "needs_look"
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table), \
+         patch("review_app._corrections_table", return_value=mock_corr_table):
+        resp = authed_client.post("/action/recLAST", data={
+            "csrf_token": _TEST_CSRF, "action": "reject", "why": "",
+        }, follow_redirects=False)
+    assert resp.status_code == 302
+    location = resp.headers["Location"]
+    assert "/queue" in location
+    assert "batch=rtr" in location
+    assert "filter=needs_look" in location
+
+
+def test_approve_flash_message_shown_on_next_page(authed_client, mock_ie_table, mock_corr_table):
+    """After approve with next_id, flash message appears on the next detail page."""
+    rec_current = _make_rec_with_policies("COI_forms_cert01.json")
+    rec_current["id"] = "recCURRENT"
+    rec_next = _make_rec_with_policies("COI_forms_cert02.json")
+    rec_next["id"] = "recNEXT"
+
+    with authed_client.session_transaction() as sess:
+        sess["queue_ids"] = ["recCURRENT", "recNEXT"]
+        sess["queue_batch"] = "rtr"
+        sess["queue_chip"] = "pending"
+
+    # First call: get() returns current rec for the action
+    # Second call (after redirect follow): get() returns next rec
+    mock_ie_table.get.side_effect = [rec_current, rec_next]
+    with patch("review_app._ie_table", return_value=mock_ie_table), \
+         patch("review_app._corrections_table", return_value=mock_corr_table):
+        resp = authed_client.post("/action/recCURRENT", data=_approve_data(
+            named_insured="Test Co LLC",
+            certificate_holder="GC Inc",
+            policy_0_policy_type="GL",
+        ), follow_redirects=True)
+    assert resp.status_code == 200
+    assert b"Approved" in resp.data
