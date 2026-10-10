@@ -585,3 +585,163 @@ def test_is_billy_rtr_false_for_coi_forms_no_underscore():
 
 def test_is_billy_rtr_false_for_test_bro():
     assert _is_billy_rtr("TEST_BRO.json") is False
+
+
+# ── detail page rendering ─────────────────────────────────────────────────────
+
+def _make_rec_with_policies(source_filename="COI_forms_cert31.json"):
+    """Fixture record with one policy — the exact shape that triggered the 500."""
+    raw = {
+        "document_type": "COI",
+        "named_insured": "Test Co LLC",
+        "certificate_holder": "GC Inc",
+        "contact_emails": [],
+        "policies": [{
+            "policy_type": "GL",
+            "policy_number": "GL-001",
+            "carrier": "Hartford",
+            "effective_date": "2025-01-01",
+            "expiration_date": "2026-01-01",
+            "coverage_limits": "$1M",
+            "policy_basis": "occurrence",
+            "additional_insured_checked": False,
+            "waiver_of_subrogation_checked": False,
+            "primary_noncontributory_checked": False,
+        }],
+    }
+    return {
+        "id": "recDETAIL",
+        "fields": {
+            "Source Filename": source_filename,
+            "Named Insured": "Test Co LLC",
+            "Raw JSON": json.dumps(raw),
+            "Review Status": "Pending Review",
+            "Confidence Score": 0.97,
+        },
+    }
+
+
+def test_detail_page_renders_200_with_policies(authed_client, mock_ie_table):
+    """detail.html must render OK when the record has at least one policy.
+
+    This test caught the `policies | enumerate` filter bug: Jinja2 treats
+    `enumerate` as a global function, not a filter, so `policies | enumerate`
+    raises TemplateRuntimeError and returns a 500.  The fix is to call it as
+    `enumerate(policies)` instead.
+    """
+    rec = _make_rec_with_policies()
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table):
+        resp = authed_client.get("/detail/recDETAIL")
+    assert resp.status_code == 200, (
+        f"detail page returned {resp.status_code} — "
+        "likely `policies | enumerate` filter bug in detail.html"
+    )
+    assert b"GL-001" in resp.data
+
+
+def test_detail_page_renders_200_no_policies(authed_client, mock_ie_table):
+    """Records with no policies should also render cleanly."""
+    raw = {
+        "document_type": "COI",
+        "named_insured": "Empty Co",
+        "certificate_holder": "GC Inc",
+        "contact_emails": [],
+        "policies": [],
+    }
+    rec = {
+        "id": "recNOPOL",
+        "fields": {
+            "Source Filename": "COI_forms_cert03.json",
+            "Named Insured": "Empty Co",
+            "Raw JSON": json.dumps(raw),
+            "Review Status": "Pending Review",
+            "Confidence Score": 0.95,
+        },
+    }
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table):
+        resp = authed_client.get("/detail/recNOPOL")
+    assert resp.status_code == 200
+
+
+def test_detail_shows_airtable_link(authed_client, mock_ie_table):
+    """Airtable deep-link must appear in the topnav."""
+    rec = _make_rec_with_policies()
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table):
+        resp = authed_client.get("/detail/recDETAIL")
+    assert b"airtable.com" in resp.data
+
+
+def test_detail_approve_redirects_back(authed_client, mock_ie_table, mock_corr_table):
+    """Approve on the detail page should redirect to detail with corrections_logged."""
+    rec = _make_rec_with_policies()
+    mock_ie_table.get.return_value = rec
+    # Pass data that exactly matches the record so corrections_logged == 0
+    with patch("review_app._ie_table", return_value=mock_ie_table), \
+         patch("review_app._corrections_table", return_value=mock_corr_table):
+        resp = authed_client.post("/action/recDETAIL", data=_approve_data(
+            named_insured="Test Co LLC",
+            certificate_holder="GC Inc",
+            policy_0_policy_type="GL",
+        ), follow_redirects=False)
+    assert resp.status_code == 302
+    assert "recDETAIL" in resp.headers["Location"]
+    assert "corrections_logged=0" in resp.headers["Location"]
+
+
+def test_detail_approve_with_edit_shows_flash(authed_client, mock_ie_table, mock_corr_table):
+    """After approve+edit, corrections_logged > 0 and the page loads."""
+    rec = _make_rec_with_policies()
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table), \
+         patch("review_app._corrections_table", return_value=mock_corr_table):
+        resp = authed_client.post("/action/recDETAIL", data=_approve_data(
+            named_insured="Test Co LLC",
+            certificate_holder="GC Inc",
+            policy_0_policy_number="GL-999",  # changed
+        ), follow_redirects=True)
+    assert resp.status_code == 200
+    assert b"Corrections logged" in resp.data
+
+
+def test_detail_reject_redirects_to_queue(authed_client, mock_ie_table, mock_corr_table):
+    rec = _make_rec_with_policies()
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table), \
+         patch("review_app._corrections_table", return_value=mock_corr_table):
+        resp = authed_client.post("/action/recDETAIL", data={
+            "csrf_token": _TEST_CSRF, "action": "reject", "why": "bad cert",
+        }, follow_redirects=False)
+    assert resp.status_code == 302
+    assert "/queue" in resp.headers["Location"]
+
+
+def test_detail_escalate_redirects_to_queue(authed_client, mock_ie_table, mock_corr_table):
+    rec = _make_rec_with_policies()
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table), \
+         patch("review_app._corrections_table", return_value=mock_corr_table):
+        resp = authed_client.post("/action/recDETAIL", data={
+            "csrf_token": _TEST_CSRF, "action": "escalate", "why": "",
+        }, follow_redirects=False)
+    assert resp.status_code == 302
+    assert "/queue" in resp.headers["Location"]
+
+
+def test_detail_500_returns_error_page(app, authed_client, mock_ie_table):
+    """When detail raises unexpectedly, the 500 handler must return the error page.
+
+    Flask suppresses error handlers when TESTING=True; disable PROPAGATE_EXCEPTIONS
+    just for this test so the handler actually runs.
+    """
+    app.config["PROPAGATE_EXCEPTIONS"] = False
+    mock_ie_table.get.side_effect = RuntimeError("simulated crash")
+    try:
+        with patch("review_app._ie_table", return_value=mock_ie_table):
+            resp = authed_client.get("/detail/recCRASH")
+        assert resp.status_code == 500
+        assert b"Something went wrong" in resp.data
+    finally:
+        app.config["PROPAGATE_EXCEPTIONS"] = True

@@ -152,7 +152,7 @@
                 </tr>
               </thead>
               <tbody>
-              {% for i, p in policies | enumerate %}
+              {% for i, p in enumerate(policies) %}
               <tr>
                 <td class="text-secondary">{{ i + 1 }}</td>
                 <td>

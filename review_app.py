@@ -23,6 +23,7 @@ import os
 import re
 import secrets
 import time
+import traceback
 from datetime import datetime, timezone
 from functools import wraps
 
@@ -203,6 +204,7 @@ def not_found(e):
 
 @app.errorhandler(500)
 def server_error(e):
+    app.logger.error("500 error:\n%s", traceback.format_exc())
     return render_template("error.html",
         code=500,
         title="Something went wrong on our end.",
