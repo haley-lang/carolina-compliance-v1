@@ -46,7 +46,7 @@
     {% if flags.missing_fields %}<span class="flag flag-alert">Missing a policy number</span>{% endif %}
     {% if flags.low_confidence %}<span class="flag flag-muted">Low confidence</span>{% endif %}
     {% if flags.non_coi %}<span class="flag flag-blue">Not a certificate</span>{% endif %}
-    {% if flags.changed_vs_prior %}<span class="flag flag-muted">Changed since last read</span>{% endif %}
+    {% if flags.changed_vs_prior %}<span class="flag flag-info">Changed since last read</span>{% endif %}
     {% if flags.multi_company %}<span class="flag flag-muted">More than one company named</span>{% endif %}
   </div>
   {% endif %}

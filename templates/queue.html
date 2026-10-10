@@ -122,9 +122,9 @@
           {% if row.flags.missing_fields %}<span class="flag flag-alert">Missing a policy number</span>{% endif %}
           {% if row.flags.low_confidence %}<span class="flag flag-muted">Low confidence</span>{% endif %}
           {% if row.flags.non_coi %}<span class="flag flag-blue">Not a certificate</span>{% endif %}
-          {% if row.flags.changed_vs_prior %}<span class="flag flag-muted">Changed since last read</span>{% endif %}
           {% if row.flags.multi_company %}<span class="flag flag-muted">More than one company named</span>{% endif %}
-          {% if row.flags.possible_duplicate %}<span class="flag flag-muted">Possible duplicate</span>{% endif %}
+          {% if row.flags.possible_duplicate %}<span class="flag flag-muted">Possible duplicate{% if row.duplicate_match %} ({{ row.duplicate_match }}){% endif %}</span>{% endif %}
+          {% if row.flags.changed_vs_prior %}<span class="flag flag-info">Changed since last read</span>{% endif %}
         </td>
         <td>
           <a href="/detail/{{ row.id }}" class="btn btn-secondary btn-sm">Review →</a>

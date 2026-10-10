@@ -745,3 +745,128 @@ def test_detail_500_returns_error_page(app, authed_client, mock_ie_table):
         assert b"Something went wrong" in resp.data
     finally:
         app.config["PROPAGATE_EXCEPTIONS"] = True
+
+
+# ── changed_vs_prior no longer triggers needs_look ───────────────────────────
+
+def test_changed_vs_prior_alone_does_not_trigger_needs_look():
+    """changed_vs_prior is informational — should not contribute to needs_look."""
+    prior = {"policies": [{**_GL, "waiver_of_subrogation_checked": False}]}
+    current = {
+        "document_type": "COI",
+        "named_insured": "Acme LLC",
+        "policies": [{**_GL, "waiver_of_subrogation_checked": True}],
+    }
+    f = {"Confidence Score": 0.99, "Prior Raw JSON (superseded)": json.dumps(prior)}
+    flags = compute_flags(f, current)
+    assert flags["changed_vs_prior"] is True
+    assert flags["needs_look"] is False
+
+
+def test_changed_vs_prior_with_ai_disagreement_still_triggers_needs_look():
+    """When another flag also fires, needs_look must still be True."""
+    prior = {"policies": [{**_GL, "waiver_of_subrogation_checked": False}]}
+    current = {
+        "document_type": "COI",
+        "named_insured": "Acme LLC",
+        "policies": [{**_GL, "waiver_of_subrogation_checked": True}],
+    }
+    f = {
+        "Confidence Score": 0.99,
+        "AI Disagreements": "wos: False vs True",
+        "Prior Raw JSON (superseded)": json.dumps(prior),
+    }
+    flags = compute_flags(f, current)
+    assert flags["changed_vs_prior"] is True
+    assert flags["needs_look"] is True
+
+
+# ── possible_duplicate: policy-number + effective-date matching ───────────────
+
+def _make_queue_rec(rec_id, named_insured="Acme LLC", policy_number="GL-001",
+                    effective_date="2025-01-01", source="cert01.json"):
+    raw = {
+        "document_type": "COI",
+        "named_insured": named_insured,
+        "certificate_holder": "GC Inc",
+        "contact_emails": [],
+        "policies": [{
+            **_GL,
+            "policy_number": policy_number,
+            "effective_date": effective_date,
+        }],
+    }
+    return {
+        "id": rec_id,
+        "fields": {
+            "Source Filename": source,
+            "Named Insured": named_insured,
+            "Raw JSON": json.dumps(raw),
+            "Review Status": "Pending Review",
+            "Confidence Score": 0.98,
+            "Extraction Processed At": "2025-01-01T00:00:00Z",
+        },
+    }
+
+
+def test_queue_possible_duplicate_fires_on_matching_policy(authed_client):
+    """Two pending rows: same NI + same policy number + same effective date → both flagged."""
+    rec1 = _make_queue_rec("recA", "Acme LLC", "GL-001", "2025-01-01")
+    rec2 = _make_queue_rec("recB", "Acme LLC", "GL-001", "2025-01-01")
+    with patch("review_app._ie_table") as mock:
+        mock.return_value.all.return_value = [rec1, rec2]
+        resp = authed_client.get("/queue?batch=other")
+    assert resp.status_code == 200
+    assert b"Possible duplicate" in resp.data
+    assert b"GL-001" in resp.data  # match text shows original policy number
+
+
+def test_queue_possible_duplicate_shows_match_text(authed_client):
+    """Match text must contain the policy number and effective date."""
+    rec1 = _make_queue_rec("recA", "Acme LLC", "WC-999", "2025-06-01")
+    rec2 = _make_queue_rec("recB", "Acme LLC", "WC-999", "2025-06-01")
+    with patch("review_app._ie_table") as mock:
+        mock.return_value.all.return_value = [rec1, rec2]
+        resp = authed_client.get("/queue?batch=other")
+    assert b"WC-999" in resp.data
+    assert b"2025-06-01" in resp.data
+
+
+def test_queue_possible_duplicate_no_fire_on_different_policy_numbers(authed_client):
+    """Same NI but different policy numbers → NOT a duplicate."""
+    rec1 = _make_queue_rec("recA", "Acme LLC", "GL-001", "2025-01-01")
+    rec2 = _make_queue_rec("recB", "Acme LLC", "GL-002", "2025-01-01")
+    with patch("review_app._ie_table") as mock:
+        mock.return_value.all.return_value = [rec1, rec2]
+        resp = authed_client.get("/queue?batch=other")
+    assert b"Possible duplicate" not in resp.data
+
+
+def test_queue_possible_duplicate_no_fire_on_different_effective_dates(authed_client):
+    """Same NI + same policy number but different effective dates → NOT a duplicate."""
+    rec1 = _make_queue_rec("recA", "Acme LLC", "GL-001", "2025-01-01")
+    rec2 = _make_queue_rec("recB", "Acme LLC", "GL-001", "2026-01-01")
+    with patch("review_app._ie_table") as mock:
+        mock.return_value.all.return_value = [rec1, rec2]
+        resp = authed_client.get("/queue?batch=other")
+    assert b"Possible duplicate" not in resp.data
+
+
+def test_queue_possible_duplicate_no_fire_on_empty_policy_number(authed_client):
+    """If a policy has no policy number, it cannot match."""
+    rec1 = _make_queue_rec("recA", "Acme LLC", "", "2025-01-01")
+    rec2 = _make_queue_rec("recB", "Acme LLC", "", "2025-01-01")
+    with patch("review_app._ie_table") as mock:
+        mock.return_value.all.return_value = [rec1, rec2]
+        resp = authed_client.get("/queue?batch=other")
+    assert b"Possible duplicate" not in resp.data
+
+
+def test_queue_possible_duplicate_normalizes_policy_number(authed_client):
+    """GL-001 and GL 001 are the same policy number after normalization."""
+    rec1 = _make_queue_rec("recA", "Acme LLC", "GL-001", "2025-01-01")
+    rec2 = _make_queue_rec("recB", "Acme LLC", "GL 001", "2025-01-01")
+    with patch("review_app._ie_table") as mock:
+        mock.return_value.all.return_value = [rec1, rec2]
+        resp = authed_client.get("/queue?batch=other")
+    assert b"Possible duplicate" in resp.data

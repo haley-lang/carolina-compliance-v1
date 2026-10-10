@@ -304,6 +304,7 @@ img { max-width: 100%; }
 .flag-alert { background: #ffe8e8; color: #b03a2e; }
 .flag-muted { background: var(--offwhite); color: var(--secondary); border: 1px solid var(--border); }
 .flag-blue  { background: #e8f0fe; color: var(--blue); }
+.flag-info  { background: none; border: none; color: var(--secondary); font-style: italic; opacity: 0.75; padding-left: 0; }
 
 /* ── Empty state ─────────────────────────────────────────────────── */
 .empty-state {

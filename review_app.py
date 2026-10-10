@@ -24,6 +24,7 @@ import re
 import secrets
 import time
 import traceback
+from collections import defaultdict
 from datetime import datetime, timezone
 from functools import wraps
 
@@ -57,6 +58,16 @@ def _is_billy_rtr(source_filename: str) -> bool:
         any(fn.startswith(p) for p in _BILLY_RTR_PREFIXES)
         or "resend" in fn.lower()
     )
+
+
+def _norm_ni(name: str) -> str:
+    """Normalize a Named Insured for duplicate detection."""
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", "", (name or "").lower())).strip()
+
+
+def _norm_polnum(v: str) -> str:
+    """Normalize a policy number for duplicate matching (strip punctuation/spaces)."""
+    return re.sub(r"[^A-Z0-9]", "", str(v or "").upper())
 SECOND_READ_JSON_FIELD_ID = "fldJFX9EN6j40cdXD"
 AI_DISAGREEMENTS_FIELD_ID = "fldbiX9zZHdF3RGDQ"
 PRIOR_RAW_JSON_FIELD_NAME = "Prior Raw JSON (superseded)"
@@ -310,7 +321,11 @@ def compute_flags(airtable_fields: dict, raw_data: dict) -> dict:
     ni = raw_data.get("named_insured") or ""
     flags["multi_company"] = bool(_MULTI_COMPANY_RE.search(ni))
 
-    flags["needs_look"] = any(v for k, v in flags.items() if k != "needs_look")
+    # changed_vs_prior is an informational note, not an action trigger
+    flags["needs_look"] = any(
+        v for k, v in flags.items()
+        if k not in ("needs_look", "changed_vs_prior")
+    )
     return flags
 
 
@@ -361,9 +376,6 @@ def index():
 @app.route("/queue")
 @login_required
 def queue():
-    import re as _re
-    from collections import Counter
-
     chip = request.args.get("filter", "pending")
     table = _ie_table()
     all_records = table.all()
@@ -389,30 +401,54 @@ def queue():
             "policies_count": f.get("Policies Count") or 0,
             "extraction_at": f.get("Extraction Processed At") or "",
             "flags": flags,
+            "_policies": raw_data.get("policies") or [],
         })
 
     PENDING_SET = {REVIEW_STATUS_PENDING_REVIEW}
     APPROVED_SET = {REVIEW_STATUS_APPROVED, REVIEW_STATUS_APPROVED_EDITED, REVIEW_STATUS_AUTO_APPROVED}
     REJECTED_SET = {REVIEW_STATUS_REJECTED}
 
-    # Compute possible_duplicate flag at queue level (requires cross-row comparison)
-    def _norm_ni(name: str) -> str:
-        return _re.sub(r"\s+", " ", _re.sub(r"[^a-z0-9 ]", "", (name or "").lower())).strip()
-
-    ni_counts = Counter(
-        _norm_ni(r["named_insured"])
-        for r in rows
-        if r["named_insured"] and r["review_status"] in PENDING_SET
-    )
+    # possible_duplicate: same normalized NI + at least one identical policy number & effective date
     for r in rows:
-        ni_key = _norm_ni(r["named_insured"])
-        r["flags"]["possible_duplicate"] = (
-            bool(ni_key) and ni_counts[ni_key] > 1
-            and r["review_status"] in PENDING_SET
-        )
-        # Update needs_look to include possible_duplicate
-        if r["flags"]["possible_duplicate"]:
-            r["flags"]["needs_look"] = True
+        r["flags"]["possible_duplicate"] = False
+        r["duplicate_match"] = ""
+
+    ni_groups: dict = defaultdict(list)
+    for r in rows:
+        if r["review_status"] in PENDING_SET and r["named_insured"]:
+            ni_key = _norm_ni(r["named_insured"])
+            if ni_key:
+                ni_groups[ni_key].append(r)
+
+    for group in ni_groups.values():
+        if len(group) < 2:
+            continue
+        # {(norm_polnum, effective_date): original_policy_number} per row
+        pol_maps = []
+        for r in group:
+            m = {}
+            for p in r["_policies"]:
+                norm = _norm_polnum(p.get("policy_number") or "")
+                eff = (p.get("effective_date") or "").strip()
+                if norm and eff:
+                    m[(norm, eff)] = (p.get("policy_number") or "").strip()
+            pol_maps.append(m)
+
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                shared = set(pol_maps[i]) & set(pol_maps[j])
+                if not shared:
+                    continue
+                norm_key = next(iter(shared))
+                orig_num = pol_maps[i][norm_key]
+                eff_date = norm_key[1]
+                match_text = f"{orig_num} / {eff_date}" if eff_date else orig_num
+                for r_idx in (i, j):
+                    r = group[r_idx]
+                    r["flags"]["possible_duplicate"] = True
+                    r["flags"]["needs_look"] = True
+                    if not r["duplicate_match"]:
+                        r["duplicate_match"] = match_text
 
     # Batch filter
     batch = request.args.get("batch", "rtr")
