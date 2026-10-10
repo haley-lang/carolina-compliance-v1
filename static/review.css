@@ -229,6 +229,16 @@ img { max-width: 100%; }
   color: var(--navy);
 }
 
+/* ── Queue table scroll wrapper ──────────────────────────────────── */
+.table-scroll-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.queue-table .cell-flags {
+  min-width: 240px;
+  white-space: normal;
+}
+
 /* ── Queue table ─────────────────────────────────────────────────── */
 .queue-table {
   width: 100%;
@@ -270,6 +280,14 @@ img { max-width: 100%; }
 .badge-rejected  { background: #ffe0e0; color: #b03a2e; }
 .badge-escalated { background: #e8f0fe; color: var(--blue); }
 .badge-muted     { background: var(--bg); color: var(--secondary); border: 1px solid var(--border); }
+
+/* ── Review reason tag (quiet, not a warning) ─────────────────────── */
+.review-reason-tag {
+  font-size: 0.7rem;
+  color: var(--secondary);
+  margin-left: 6px;
+  opacity: 0.7;
+}
 
 /* ── Flag chips ─────────────────────────────────────────────────── */
 .flag {

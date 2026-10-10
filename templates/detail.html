@@ -18,6 +18,9 @@
   </a>
   <div class="topnav-links">
     <a href="/queue" class="nav-link">← Queue</a>
+    {% if airtable_url %}
+    <a href="{{ airtable_url }}" class="nav-link" target="_blank" rel="noopener">Open in Airtable ↗</a>
+    {% endif %}
     <a href="/logout" class="btn btn-gold btn-sm">Sign out</a>
   </div>
 </nav>

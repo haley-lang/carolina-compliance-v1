@@ -45,6 +45,17 @@ from review_gate import (
 # ── Constants ────────────────────────────────────────────────────────────────
 
 CORRECTIONS_TABLE_ID = "tblh6NTQikjzl8FFu"
+EXTRACTIONS_TABLE_ID = "tblT88Ty6d6M766oY"  # Incoming Extractions — for Airtable deep-links
+
+_BILLY_RTR_PREFIXES = ("COI_forms_", "RTR_COI_", "N9WC", "coi.json")
+
+def _is_billy_rtr(source_filename: str) -> bool:
+    """True if the filename belongs to the Billy/RTR real-client batch."""
+    fn = source_filename or ""
+    return (
+        any(fn.startswith(p) for p in _BILLY_RTR_PREFIXES)
+        or "resend" in fn.lower()
+    )
 SECOND_READ_JSON_FIELD_ID = "fldJFX9EN6j40cdXD"
 AI_DISAGREEMENTS_FIELD_ID = "fldbiX9zZHdF3RGDQ"
 PRIOR_RAW_JSON_FIELD_NAME = "Prior Raw JSON (superseded)"
@@ -221,7 +232,12 @@ def _corrections_table():
 
 # ── Flag computation ─────────────────────────────────────────────────────────
 
-_MULTI_COMPANY_RE = re.compile(r"\band\b|[&]|/|,\s+[A-Z]", re.IGNORECASE)
+_MC_ENTITY = r"(?:LLC|L\.L\.C\.|Inc\.?|Corp\.?|Co\.?|Ltd\.?|PLLC|P\.C\.|LLP|LP)"
+_MC_SEP    = r"(?:[\r\n]+|[ \t]+and[ \t]+|[ \t]*&[ \t]*|[ \t]+dba[ \t]+)"
+_MULTI_COMPANY_RE = re.compile(
+    _MC_ENTITY + r"[,.]?\s*" + _MC_SEP + r".*?" + _MC_ENTITY,
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def compute_flags(airtable_fields: dict, raw_data: dict) -> dict:
@@ -343,6 +359,9 @@ def index():
 @app.route("/queue")
 @login_required
 def queue():
+    import re as _re
+    from collections import Counter
+
     chip = request.args.get("filter", "pending")
     table = _ie_table()
     all_records = table.all()
@@ -370,32 +389,67 @@ def queue():
             "flags": flags,
         })
 
-    rows.sort(key=lambda r: r["extraction_at"], reverse=True)
-
     PENDING_SET = {REVIEW_STATUS_PENDING_REVIEW}
     APPROVED_SET = {REVIEW_STATUS_APPROVED, REVIEW_STATUS_APPROVED_EDITED, REVIEW_STATUS_AUTO_APPROVED}
     REJECTED_SET = {REVIEW_STATUS_REJECTED}
 
-    if chip == "ai_disagreed":
-        filtered = [r for r in rows if r["flags"]["ai_disagreed"] and r["review_status"] in PENDING_SET]
-    elif chip == "needs_look":
-        filtered = [r for r in rows if r["flags"]["needs_look"] and r["review_status"] in PENDING_SET]
-    elif chip == "approved":
-        filtered = [r for r in rows if r["review_status"] in APPROVED_SET]
-    elif chip == "rejected":
-        filtered = [r for r in rows if r["review_status"] in REJECTED_SET]
+    # Compute possible_duplicate flag at queue level (requires cross-row comparison)
+    def _norm_ni(name: str) -> str:
+        return _re.sub(r"\s+", " ", _re.sub(r"[^a-z0-9 ]", "", (name or "").lower())).strip()
+
+    ni_counts = Counter(
+        _norm_ni(r["named_insured"])
+        for r in rows
+        if r["named_insured"] and r["review_status"] in PENDING_SET
+    )
+    for r in rows:
+        ni_key = _norm_ni(r["named_insured"])
+        r["flags"]["possible_duplicate"] = (
+            bool(ni_key) and ni_counts[ni_key] > 1
+            and r["review_status"] in PENDING_SET
+        )
+        # Update needs_look to include possible_duplicate
+        if r["flags"]["possible_duplicate"]:
+            r["flags"]["needs_look"] = True
+
+    # Batch filter
+    batch = request.args.get("batch", "rtr")
+    if batch == "rtr":
+        batch_rows = [r for r in rows if _is_billy_rtr(r["source_filename"])]
     else:
-        filtered = [r for r in rows if r["review_status"] in PENDING_SET]
+        batch_rows = [r for r in rows if not _is_billy_rtr(r["source_filename"])]
+
+    if chip == "ai_disagreed":
+        filtered = [r for r in batch_rows if r["flags"]["ai_disagreed"] and r["review_status"] in PENDING_SET]
+    elif chip == "needs_look":
+        filtered = [r for r in batch_rows if r["flags"]["needs_look"] and r["review_status"] in PENDING_SET]
+    elif chip == "approved":
+        filtered = [r for r in batch_rows if r["review_status"] in APPROVED_SET]
+    elif chip == "rejected":
+        filtered = [r for r in batch_rows if r["review_status"] in REJECTED_SET]
+    else:
+        filtered = [r for r in batch_rows if r["review_status"] in PENDING_SET]
+
+    # Step 1: sort by extraction_at descending (newest first)
+    filtered.sort(key=lambda r: r["extraction_at"], reverse=True)
+    # Step 2: stable-sort by priority group (preserves newest-first within each group)
+    def _queue_priority(r):
+        if r["flags"]["ai_disagreed"]:
+            return 0
+        if r["flags"]["possible_duplicate"]:
+            return 1
+        return 2
+    filtered.sort(key=_queue_priority)
 
     counts = {
-        "pending": sum(1 for r in rows if r["review_status"] in PENDING_SET),
-        "ai_disagreed": sum(1 for r in rows if r["flags"]["ai_disagreed"] and r["review_status"] in PENDING_SET),
-        "needs_look": sum(1 for r in rows if r["flags"]["needs_look"] and r["review_status"] in PENDING_SET),
-        "approved": sum(1 for r in rows if r["review_status"] in APPROVED_SET),
-        "rejected": sum(1 for r in rows if r["review_status"] in REJECTED_SET),
+        "pending": sum(1 for r in batch_rows if r["review_status"] in PENDING_SET),
+        "ai_disagreed": sum(1 for r in batch_rows if r["flags"]["ai_disagreed"] and r["review_status"] in PENDING_SET),
+        "needs_look": sum(1 for r in batch_rows if r["flags"]["needs_look"] and r["review_status"] in PENDING_SET),
+        "approved": sum(1 for r in batch_rows if r["review_status"] in APPROVED_SET),
+        "rejected": sum(1 for r in batch_rows if r["review_status"] in REJECTED_SET),
     }
 
-    return render_template("queue.html", rows=filtered, chip=chip, counts=counts)
+    return render_template("queue.html", rows=filtered, chip=chip, counts=counts, batch=batch)
 
 
 # ── Detail ────────────────────────────────────────────────────────────────────
@@ -445,6 +499,12 @@ def detail(record_id):
     flags = compute_flags(f, raw_data)
     corrections_logged = request.args.get("corrections_logged", type=int, default=None)
 
+    _base_id = clean_base_id(config.AIRTABLE_BASE_ID) if config.AIRTABLE_BASE_ID else ""
+    airtable_url = (
+        f"https://airtable.com/{_base_id}/{EXTRACTIONS_TABLE_ID}/{record_id}"
+        if _base_id else ""
+    )
+
     return render_template(
         "detail.html",
         record_id=record_id,
@@ -457,6 +517,7 @@ def detail(record_id):
         ai_disagrees=ai_disagrees,
         flags=flags,
         corrections_logged=corrections_logged,
+        airtable_url=airtable_url,
     )
 
 

@@ -506,3 +506,82 @@ def test_approve_never_overwrites_prior_raw_json(authed_client, mock_ie_table, m
     assert "Prior Raw JSON (superseded)" not in fields_written
     from reextract_rtr import PRIOR_RAW_JSON_FIELD_ID
     assert PRIOR_RAW_JSON_FIELD_ID not in fields_written
+
+
+# ── multi_company flag (tightened regex) ──────────────────────────────────────
+
+from review_app import _is_billy_rtr
+
+def test_multi_company_false_for_single_name_with_comma_suffix():
+    """Griffin Masonry, Inc — comma before entity suffix, NOT two companies."""
+    f = {"Confidence Score": 0.99}
+    raw = {"document_type": "COI", "named_insured": "Griffin Masonry, Inc", "policies": []}
+    assert compute_flags(f, raw)["multi_company"] is False
+
+
+def test_multi_company_false_for_and_in_single_company_name():
+    """E.E. SIDING AND CONSTRUCTION SOLUTION LLC — 'and' is part of company name, NOT separator."""
+    f = {"Confidence Score": 0.99}
+    raw = {"document_type": "COI", "named_insured": "E.E. SIDING AND CONSTRUCTION SOLUTION LLC", "policies": []}
+    assert compute_flags(f, raw)["multi_company"] is False
+
+
+def test_multi_company_false_for_plain_llc():
+    """GREEN CLEAN ECO LLC — single entity, no separator pattern."""
+    f = {"Confidence Score": 0.99}
+    raw = {"document_type": "COI", "named_insured": "GREEN CLEAN ECO LLC", "policies": []}
+    assert compute_flags(f, raw)["multi_company"] is False
+
+
+def test_multi_company_true_for_two_suffixes_with_and():
+    """Two LLC/Inc entities joined by ' and ' — genuinely two companies."""
+    f = {"Confidence Score": 0.99}
+    raw = {"document_type": "COI", "named_insured": "Smith LLC and Jones Inc", "policies": []}
+    assert compute_flags(f, raw)["multi_company"] is True
+
+
+def test_multi_company_true_for_two_suffixes_with_ampersand():
+    f = {"Confidence Score": 0.99}
+    raw = {"document_type": "COI", "named_insured": "Alpha Corp & Beta LLC", "policies": []}
+    assert compute_flags(f, raw)["multi_company"] is True
+
+
+def test_multi_company_true_for_two_suffixes_with_newline():
+    f = {"Confidence Score": 0.99}
+    raw = {"document_type": "COI", "named_insured": "Acme Inc\nBeta Corp", "policies": []}
+    assert compute_flags(f, raw)["multi_company"] is True
+
+
+def test_multi_company_false_for_ampersand_without_entity_suffix():
+    """'Henson Heating & Cooling' — ampersand but no entity suffix before it."""
+    f = {"Confidence Score": 0.99}
+    raw = {"document_type": "COI", "named_insured": "Henson Heating & Cooling", "policies": []}
+    assert compute_flags(f, raw)["multi_company"] is False
+
+
+# ── batch filter helper ────────────────────────────────────────────────────────
+
+def test_is_billy_rtr_coi_forms_prefix():
+    assert _is_billy_rtr("COI_forms_cert01.json") is True
+
+def test_is_billy_rtr_rtr_coi_prefix():
+    assert _is_billy_rtr("RTR_COI_page47_resend.json") is True
+
+def test_is_billy_rtr_n9wc_prefix():
+    assert _is_billy_rtr("N9WC394833-ACORDAPP25-I.json") is True
+
+def test_is_billy_rtr_coi_json():
+    assert _is_billy_rtr("coi.json") is True
+
+def test_is_billy_rtr_resend_anywhere():
+    assert _is_billy_rtr("some_resend_file.json") is True
+
+def test_is_billy_rtr_false_for_test_data():
+    assert _is_billy_rtr("scenario_1_renewal.json") is False
+
+def test_is_billy_rtr_false_for_coi_forms_no_underscore():
+    """COI_forms.json (no trailing _) should NOT be Billy/RTR."""
+    assert _is_billy_rtr("COI_forms.json") is False
+
+def test_is_billy_rtr_false_for_test_bro():
+    assert _is_billy_rtr("TEST_BRO.json") is False
