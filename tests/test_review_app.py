@@ -703,7 +703,7 @@ def test_detail_approve_with_edit_shows_flash(authed_client, mock_ie_table, mock
             policy_0_policy_number="GL-999",  # changed
         ), follow_redirects=True)
     assert resp.status_code == 200
-    assert b"Corrections logged" in resp.data
+    assert b"Data confirmed" in resp.data
 
 
 def test_detail_reject_redirects_to_queue(authed_client, mock_ie_table, mock_corr_table):
@@ -1240,4 +1240,206 @@ def test_approve_flash_message_shown_on_next_page(authed_client, mock_ie_table, 
             policy_0_policy_type="GL",
         ), follow_redirects=True)
     assert resp.status_code == 200
-    assert b"Approved" in resp.data
+    assert b"Data confirmed" in resp.data
+
+
+# ── UX Changes: zoom, wording, save_draft, toggles ───────────────────────────
+
+def test_detail_zoom_container_present(authed_client, mock_ie_table):
+    """Zoom container elements must be present in the detail page HTML."""
+    rec = _make_rec_with_policies()
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table):
+        resp = authed_client.get("/detail/recDETAIL")
+    assert resp.status_code == 200
+    assert b"zoom-outer" in resp.data
+    assert b"zoom-in" in resp.data
+    assert b"zoom-out" in resp.data
+    assert b"zoom-reset" in resp.data
+
+
+def test_detail_policy_cards_not_table(authed_client, mock_ie_table):
+    """Policy layout uses cards (policy-card class), not the old wide table."""
+    rec = _make_rec_with_policies()
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table):
+        resp = authed_client.get("/detail/recDETAIL")
+    assert b"policy-card" in resp.data
+    assert b"policy-table" not in resp.data
+
+
+def test_detail_button_text_data_is_correct(authed_client, mock_ie_table):
+    """Approve button must say 'Data is correct', not 'Looks right'."""
+    rec = _make_rec_with_policies()
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table):
+        resp = authed_client.get("/detail/recDETAIL")
+    assert b"Data is correct" in resp.data
+    assert b"Looks right" not in resp.data
+
+
+def test_detail_has_save_and_keep_button(authed_client, mock_ie_table):
+    """Detail page must have a 'Save and keep in queue' button."""
+    rec = _make_rec_with_policies()
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table):
+        resp = authed_client.get("/detail/recDETAIL")
+    assert b"save_draft" in resp.data
+    assert b"Save and keep in queue" in resp.data
+
+
+def test_detail_disclaimer_sentence_present(authed_client, mock_ie_table):
+    """The disclaimer sentence must appear under the action buttons."""
+    rec = _make_rec_with_policies()
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table):
+        resp = authed_client.get("/detail/recDETAIL")
+    assert b"does not approve the vendor" in resp.data
+
+
+def test_save_draft_leaves_review_status_pending(authed_client, mock_ie_table, mock_corr_table):
+    """save_draft must NOT change Review Status."""
+    rec = _make_rec_with_policies()
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table), \
+         patch("review_app._corrections_table", return_value=mock_corr_table):
+        resp = authed_client.post("/action/recDETAIL", data={
+            "csrf_token": _TEST_CSRF,
+            "action": "save_draft",
+            "why": "",
+            "named_insured": "Test Co LLC",
+            "certificate_holder": "GC Inc",
+            "policy_0_policy_type": "GL",
+            "policy_0_policy_number": "GL-001",
+            "policy_0_carrier": "Hartford",
+            "policy_0_effective_date": "2025-01-01",
+            "policy_0_expiration_date": "2026-01-01",
+            "policy_0_coverage_limits": "$1M",
+            "policy_0_policy_basis": "occurrence",
+            "policy_0_additional_insured_checked": "false",
+            "policy_0_waiver_of_subrogation_checked": "false",
+            "policy_0_primary_noncontributory_checked": "false",
+        }, follow_redirects=False)
+    # Must not touch Review Status
+    if mock_ie_table.update.called:
+        fields_written = mock_ie_table.update.call_args[0][1]
+        assert "Review Status" not in fields_written
+
+
+def test_save_draft_with_edit_writes_corrections(authed_client, mock_ie_table, mock_corr_table):
+    """save_draft must write Corrections rows when fields are changed."""
+    rec = _make_rec_with_policies()
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table), \
+         patch("review_app._corrections_table", return_value=mock_corr_table):
+        authed_client.post("/action/recDETAIL", data={
+            "csrf_token": _TEST_CSRF,
+            "action": "save_draft",
+            "why": "fixing number",
+            "named_insured": "Test Co LLC",
+            "certificate_holder": "GC Inc",
+            "policy_0_policy_type": "GL",
+            "policy_0_policy_number": "GL-999",  # changed
+            "policy_0_carrier": "Hartford",
+            "policy_0_effective_date": "2025-01-01",
+            "policy_0_expiration_date": "2026-01-01",
+            "policy_0_coverage_limits": "$1M",
+            "policy_0_policy_basis": "occurrence",
+            "policy_0_additional_insured_checked": "false",
+            "policy_0_waiver_of_subrogation_checked": "false",
+            "policy_0_primary_noncontributory_checked": "false",
+        })
+    mock_corr_table.create.assert_called_once()
+    row = mock_corr_table.create.call_args[0][0]
+    assert row["New Value"] == "GL-999"
+
+
+def test_save_draft_redirects_to_same_detail(authed_client, mock_ie_table, mock_corr_table):
+    """save_draft must redirect back to the same detail page."""
+    rec = _make_rec_with_policies()
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table), \
+         patch("review_app._corrections_table", return_value=mock_corr_table):
+        resp = authed_client.post("/action/recDETAIL", data={
+            "csrf_token": _TEST_CSRF,
+            "action": "save_draft",
+            "why": "",
+            "named_insured": "Test Co LLC",
+            "certificate_holder": "GC Inc",
+            "policy_0_policy_type": "GL",
+            "policy_0_policy_number": "GL-001",
+            "policy_0_carrier": "Hartford",
+            "policy_0_effective_date": "2025-01-01",
+            "policy_0_expiration_date": "2026-01-01",
+            "policy_0_coverage_limits": "$1M",
+            "policy_0_policy_basis": "occurrence",
+            "policy_0_additional_insured_checked": "false",
+            "policy_0_waiver_of_subrogation_checked": "false",
+            "policy_0_primary_noncontributory_checked": "false",
+        }, follow_redirects=False)
+    assert resp.status_code == 302
+    assert "recDETAIL" in resp.headers["Location"]
+
+
+def test_detail_radio_toggles_for_checkboxes(authed_client, mock_ie_table):
+    """Checkbox fields must use radio buttons (not select) for Checked/Not checked."""
+    rec = _make_rec_with_policies()
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table):
+        resp = authed_client.get("/detail/recDETAIL")
+    html = resp.data.decode()
+    assert 'type="radio"' in html
+    assert 'name="policy_0_additional_insured_checked"' in html
+    assert 'name="policy_0_waiver_of_subrogation_checked"' in html
+    assert 'name="policy_0_primary_noncontributory_checked"' in html
+    assert "Checked" in html
+    assert "Not checked" in html
+
+
+def test_queue_shows_data_confirmed_for_approved_records(authed_client):
+    """Queue badge must show 'Data confirmed' for Approved/Approved+Edited records."""
+    rec = _make_queue_rec("recAPPROVED", source="COI_forms_cert01.json")
+    rec["fields"]["Review Status"] = "Approved"
+    with patch("review_app._ie_table") as mock:
+        mock.return_value.all.return_value = [rec]
+        resp = authed_client.get("/queue?batch=rtr&filter=approved")
+    assert b"Data confirmed" in resp.data
+    assert b">Approved<" not in resp.data  # raw "Approved" text must not appear as badge text
+
+
+def test_source_page_url_uses_thumbnail_for_pdf_attachment(authed_client, mock_ie_table):
+    """When Source Page attachment is a PDF, use the large thumbnail URL for display."""
+    import review_app
+    rec = _make_rec_with_policies()
+    rec["fields"]["Source Page"] = [{
+        "id": "att123",
+        "url": "https://cdn.airtable.com/original.pdf",
+        "filename": "page.pdf",
+        "type": "application/pdf",
+        "thumbnails": {
+            "large": {"url": "https://cdn.airtable.com/thumb_large.png", "width": 512, "height": 663}
+        }
+    }]
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table):
+        resp = authed_client.get("/detail/recDETAIL")
+    assert b"thumb_large.png" in resp.data
+    assert b"original.pdf" not in resp.data  # should NOT be used as the img src
+
+
+def test_source_page_url_uses_original_for_image_attachment(authed_client, mock_ie_table):
+    """When Source Page attachment is an image, use the full-res original URL."""
+    rec = _make_rec_with_policies()
+    rec["fields"]["Source Page"] = [{
+        "id": "att456",
+        "url": "https://cdn.airtable.com/page.png",
+        "filename": "page.png",
+        "type": "image/png",
+        "thumbnails": {
+            "large": {"url": "https://cdn.airtable.com/thumb.png", "width": 512, "height": 663}
+        }
+    }]
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table):
+        resp = authed_client.get("/detail/recDETAIL")
+    assert b"cdn.airtable.com/page.png" in resp.data

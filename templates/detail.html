@@ -36,9 +36,9 @@
   {% if corrections_logged is not none %}
   <div class="flash flash-success">
     {% if corrections_logged > 0 %}
-      Corrections logged: {{ corrections_logged }} — review status updated.
+      Data confirmed — {{ corrections_logged }} correction(s) saved.
     {% else %}
-      Approved with no edits.
+      Data confirmed — no corrections.
     {% endif %}
   </div>
   {% endif %}
@@ -88,9 +88,17 @@
         <div class="source-img-wrap">
           <div style="padding:12px">
             {% if source_page_url %}
-              <img src="{{ source_page_url }}" id="source-img" class="source-img"
-                   alt="Source certificate page"
-                   title="Click to view full screen">
+              <div class="zoom-outer" id="zoom-outer">
+                <div class="zoom-canvas" id="zoom-canvas">
+                  <img src="{{ source_page_url }}" id="source-img" class="source-img" alt="Source certificate page">
+                </div>
+                <div class="zoom-controls">
+                  <button type="button" class="zoom-btn" id="zoom-out" title="Zoom out">−</button>
+                  <button type="button" class="zoom-btn" id="zoom-reset" title="Reset zoom">100%</button>
+                  <button type="button" class="zoom-btn" id="zoom-in" title="Zoom in">+</button>
+                  <button type="button" class="zoom-btn" id="zoom-fs" title="Full screen">⛶</button>
+                </div>
+              </div>
             {% else %}
               <div style="padding:64px 24px; text-align:center; color:var(--secondary)">
                 No source page attached.
@@ -160,93 +168,97 @@
           </div>
           {% set policies = raw_data.get('policies') or [] %}
           {% if policies %}
-          <div class="policy-table-wrap">
-            <table class="policy-table">
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Type</th>
-                  <th>Number</th>
-                  <th>Carrier</th>
-                  <th>Eff</th>
-                  <th>Exp</th>
-                  <th>Limits</th>
-                  <th>Basis</th>
-                  <th title="Additional Insured">AI</th>
-                  <th title="Waiver of Subrogation">WoS</th>
-                  <th title="Primary & Non-Contributory">P&amp;N</th>
-                </tr>
-              </thead>
-              <tbody>
-              {% for i, p in enumerate(policies) %}
-              <tr>
-                <td class="text-secondary">{{ i + 1 }}</td>
-                <td>
-                  <input type="text" name="policy_{{ i }}_policy_type"
-                         class="{% if (i, 'policy_type') in highlight_cells %}disagree-cell{% endif %}"
-                         value="{{ p.get('policy_type') or '' }}" style="min-width:120px">
-                </td>
-                <td>
-                  <input type="text" name="policy_{{ i }}_policy_number"
-                         class="{% if (i, 'policy_number') in highlight_cells %}disagree-cell{% endif %}"
-                         value="{{ p.get('policy_number') or '' }}" style="min-width:110px">
-                  {% if (i, 'policy_number') in highlight_cells and second_data and second_data.get('policies') and i < (second_data.get('policies') | length) %}
-                    <p class="disagree-note">Other read said: {{ second_data['policies'][i].get('policy_number') or '(blank)' }}</p>
-                  {% endif %}
-                </td>
-                <td>
+          <div class="card-body">
+          {% for i, p in enumerate(policies) %}
+          <div class="policy-card {% if not loop.last %}mb-12{% endif %}">
+            <div class="policy-card-hd">
+              <span class="policy-card-num">{{ i + 1 }}</span>
+              <span class="policy-card-type">
+                <input type="text" name="policy_{{ i }}_policy_type"
+                       class="policy-type-input {% if (i, 'policy_type') in highlight_cells %}disagree-cell{% endif %}"
+                       value="{{ p.get('policy_type') or '' }}" placeholder="Policy type">
+              </span>
+              <span class="policy-card-polnum">
+                <input type="text" name="policy_{{ i }}_policy_number"
+                       class="policy-num-input {% if (i, 'policy_number') in highlight_cells %}disagree-cell{% endif %}"
+                       value="{{ p.get('policy_number') or '' }}" placeholder="Policy number">
+              </span>
+              {% if (i, 'policy_number') in highlight_cells and second_data and second_data.get('policies') and i < (second_data.get('policies') | length) %}
+                <p class="disagree-note">Other read: {{ second_data['policies'][i].get('policy_number') or '(blank)' }}</p>
+              {% endif %}
+            </div>
+            <div class="policy-card-body">
+              <div class="policy-card-grid">
+                <div>
+                  <label class="field-label-sm">Carrier</label>
                   <input type="text" name="policy_{{ i }}_carrier"
-                         class="{% if (i, 'carrier') in highlight_cells %}disagree-cell{% endif %}"
-                         value="{{ p.get('carrier') or '' }}" style="min-width:100px">
-                </td>
-                <td>
+                         class="policy-input {% if (i, 'carrier') in highlight_cells %}disagree-cell{% endif %}"
+                         value="{{ p.get('carrier') or '' }}">
+                </div>
+                <div>
+                  <label class="field-label-sm">Effective</label>
                   <input type="text" name="policy_{{ i }}_effective_date"
-                         class="{% if (i, 'effective_date') in highlight_cells %}disagree-cell{% endif %}"
-                         value="{{ p.get('effective_date') or '' }}" style="min-width:90px">
-                </td>
-                <td>
+                         class="policy-input {% if (i, 'effective_date') in highlight_cells %}disagree-cell{% endif %}"
+                         value="{{ p.get('effective_date') or '' }}">
+                </div>
+                <div>
+                  <label class="field-label-sm">Expiration</label>
                   <input type="text" name="policy_{{ i }}_expiration_date"
-                         class="{% if (i, 'expiration_date') in highlight_cells %}disagree-cell{% endif %}"
-                         value="{{ p.get('expiration_date') or '' }}" style="min-width:90px">
-                </td>
-                <td>
-                  <input type="text" name="policy_{{ i }}_coverage_limits"
-                         value="{{ p.get('coverage_limits') or '' }}" style="min-width:130px">
-                </td>
-                <td>
+                         class="policy-input {% if (i, 'expiration_date') in highlight_cells %}disagree-cell{% endif %}"
+                         value="{{ p.get('expiration_date') or '' }}">
+                </div>
+                <div>
+                  <label class="field-label-sm">Basis</label>
                   <select name="policy_{{ i }}_policy_basis"
-                          class="{% if (i, 'policy_basis') in highlight_cells %}disagree-cell{% endif %}"
-                          style="min-width:100px">
+                          class="policy-input {% if (i, 'policy_basis') in highlight_cells %}disagree-cell{% endif %}">
                     <option value="" {% if not p.get('policy_basis') %}selected{% endif %}>—</option>
                     <option value="occurrence" {% if p.get('policy_basis') == 'occurrence' %}selected{% endif %}>Occurrence</option>
                     <option value="claims-made" {% if p.get('policy_basis') == 'claims-made' %}selected{% endif %}>Claims-made</option>
                   </select>
-                </td>
-                <td>
-                  <select name="policy_{{ i }}_additional_insured_checked"
-                          class="{% if (i, 'additional_insured_checked') in highlight_cells %}disagree-cell{% endif %}">
-                    <option value="true"  {% if p.get('additional_insured_checked') %}selected{% endif %}>Y</option>
-                    <option value="false" {% if not p.get('additional_insured_checked') %}selected{% endif %}>N</option>
-                  </select>
-                </td>
-                <td>
-                  <select name="policy_{{ i }}_waiver_of_subrogation_checked"
-                          class="{% if (i, 'waiver_of_subrogation_checked') in highlight_cells %}disagree-cell{% endif %}">
-                    <option value="true"  {% if p.get('waiver_of_subrogation_checked') %}selected{% endif %}>Y</option>
-                    <option value="false" {% if not p.get('waiver_of_subrogation_checked') %}selected{% endif %}>N</option>
-                  </select>
-                </td>
-                <td>
-                  <select name="policy_{{ i }}_primary_noncontributory_checked"
-                          class="{% if (i, 'primary_noncontributory_checked') in highlight_cells %}disagree-cell{% endif %}">
-                    <option value="true"  {% if p.get('primary_noncontributory_checked') %}selected{% endif %}>Y</option>
-                    <option value="false" {% if not p.get('primary_noncontributory_checked') %}selected{% endif %}>N</option>
-                  </select>
-                </td>
-              </tr>
-              {% endfor %}
-              </tbody>
-            </table>
+                </div>
+                <div style="grid-column:1/-1">
+                  <label class="field-label-sm">Coverage Limits</label>
+                  <input type="text" name="policy_{{ i }}_coverage_limits"
+                         class="policy-input"
+                         value="{{ p.get('coverage_limits') or '' }}">
+                </div>
+              </div>
+
+              <!-- Checkbox toggles -->
+              <div class="policy-toggles">
+                {% set chk_fields = [
+                  ('additional_insured_checked',       'Additional Insured (AI)'),
+                  ('waiver_of_subrogation_checked',    'Waiver of Subrogation (WoS)'),
+                  ('primary_noncontributory_checked',  'Primary & Non-Contributory (P&N)'),
+                ] %}
+                {% for chk_key, chk_label in chk_fields %}
+                {% set is_checked = p.get(chk_key) %}
+                {% set disagree = (i, chk_key) in highlight_cells %}
+                <div class="toggle-row{% if disagree %} toggle-disagree{% endif %}">
+                  <span class="toggle-label">{{ chk_label }}</span>
+                  <div class="toggle-group">
+                    <label class="toggle-opt">
+                      <input type="radio" name="policy_{{ i }}_{{ chk_key }}" value="true"
+                             {% if is_checked %}checked{% endif %}>
+                      <span class="toggle-pill">Checked</span>
+                    </label>
+                    <label class="toggle-opt">
+                      <input type="radio" name="policy_{{ i }}_{{ chk_key }}" value="false"
+                             {% if not is_checked %}checked{% endif %}>
+                      <span class="toggle-pill">Not checked</span>
+                    </label>
+                  </div>
+                  {% if disagree and second_data and second_data.get('policies') and i < (second_data.get('policies') | length) %}
+                    <p class="disagree-note">
+                      Other read: {{ 'Checked' if second_data['policies'][i].get(chk_key) else 'Not checked' }}
+                    </p>
+                  {% endif %}
+                </div>
+                {% endfor %}
+              </div>
+            </div>
+          </div>
+          {% endfor %}
           </div>
           {% else %}
             <div class="card-body text-secondary">No policies extracted.</div>
@@ -312,15 +324,16 @@
           </div>
           <div class="action-buttons">
             <button type="submit" id="btn-approve" name="action" value="approve"
-                    class="btn btn-primary">Looks right, approve</button>
+                    class="btn btn-primary">Data is correct</button>
+            <button type="submit" name="action" value="save_draft"
+                    class="btn btn-secondary">Save and keep in queue</button>
             <button type="submit" name="action" value="reject"
                     class="btn btn-danger">Reject</button>
             <button type="submit" name="action" value="escalate"
                     class="btn btn-secondary">Send to GC</button>
           </div>
           <p class="action-note">
-            Approve sets Review Status to Approved (or Approved + Edited if you made changes).
-            Processing Status is not changed here.
+            This confirms the data matches the page. It does not approve the vendor's coverage and nothing is sent.
           </p>
         </div>
 
@@ -337,11 +350,83 @@
   var form = btn.closest('form');
   var changed = false;
   form.addEventListener('input', function () {
-    if (!changed) { changed = true; btn.textContent = 'Save my fixes and approve'; }
+    if (!changed) { changed = true; btn.textContent = 'Save my corrections'; }
   });
+}());
+
+(function () {
+  var outer = document.getElementById('zoom-outer');
+  var canvas = document.getElementById('zoom-canvas');
+  if (!outer || !canvas) return;
+
+  var scale = 1, posX = 0, posY = 0;
+  var MIN = 1, MAX = 4;
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  function applyTransform() {
+    canvas.style.transform = 'translate(' + posX + 'px,' + posY + 'px) scale(' + scale + ')';
+  }
+
+  function clampPos() {
+    var ow = outer.clientWidth, oh = outer.clientHeight;
+    var cw = canvas.offsetWidth * scale, ch = canvas.offsetHeight * scale;
+    if (cw <= ow) posX = 0; else posX = clamp(posX, ow - cw, 0);
+    if (ch <= oh) posY = 0; else posY = clamp(posY, oh - ch, 0);
+  }
+
+  function zoomTo(newScale, ox, oy) {
+    var r = newScale / scale;
+    posX = ox - r * (ox - posX);
+    posY = oy - r * (oy - posY);
+    scale = newScale;
+    clampPos();
+    applyTransform();
+    syncButtons();
+  }
+
+  function syncButtons() {
+    var pct = Math.round(scale * 100) + '%';
+    var resetBtn = document.getElementById('zoom-reset');
+    if (resetBtn) resetBtn.textContent = pct;
+    var outBtn = document.getElementById('zoom-out');
+    if (outBtn) outBtn.disabled = scale <= MIN;
+    var inBtn = document.getElementById('zoom-in');
+    if (inBtn) inBtn.disabled = scale >= MAX;
+  }
+
+  /* wheel zoom */
+  outer.addEventListener('wheel', function (e) {
+    e.preventDefault();
+    var factor = e.deltaY < 0 ? 1.15 : (1 / 1.15);
+    var rect = outer.getBoundingClientRect();
+    zoomTo(clamp(scale * factor, MIN, MAX), e.clientX - rect.left, e.clientY - rect.top);
+  }, { passive: false });
+
+  /* double-click toggle */
+  outer.addEventListener('dblclick', function (e) {
+    var rect = outer.getBoundingClientRect();
+    var target = scale > 1.2 ? 1 : 2.5;
+    zoomTo(target, e.clientX - rect.left, e.clientY - rect.top);
+    if (target === 1) { posX = 0; posY = 0; applyTransform(); syncButtons(); }
+  });
+
+  /* buttons */
+  document.getElementById('zoom-in').addEventListener('click', function () {
+    zoomTo(clamp(scale * 1.3, MIN, MAX), outer.clientWidth / 2, outer.clientHeight / 2);
+  });
+  document.getElementById('zoom-out').addEventListener('click', function () {
+    zoomTo(clamp(scale / 1.3, MIN, MAX), outer.clientWidth / 2, outer.clientHeight / 2);
+  });
+  document.getElementById('zoom-reset').addEventListener('click', function () {
+    scale = 1; posX = 0; posY = 0; applyTransform(); syncButtons();
+  });
+
+  /* fullscreen secondary option */
+  var fsBtn = document.getElementById('zoom-fs');
   var img = document.getElementById('source-img');
-  if (img) {
-    img.addEventListener('click', function () {
+  if (fsBtn && img) {
+    fsBtn.addEventListener('click', function () {
       if (!document.fullscreenElement) {
         img.requestFullscreen && img.requestFullscreen();
       } else {
@@ -349,6 +434,27 @@
       }
     });
   }
+
+  /* drag pan */
+  var drag = null;
+  outer.addEventListener('pointerdown', function (e) {
+    if (e.button !== 0) return;
+    drag = { sx: e.clientX - posX, sy: e.clientY - posY };
+    outer.setPointerCapture(e.pointerId);
+    outer.classList.add('grabbing');
+  });
+  outer.addEventListener('pointermove', function (e) {
+    if (!drag) return;
+    posX = e.clientX - drag.sx;
+    posY = e.clientY - drag.sy;
+    clampPos();
+    applyTransform();
+  });
+  function endDrag() { drag = null; outer.classList.remove('grabbing'); }
+  outer.addEventListener('pointerup', endDrag);
+  outer.addEventListener('pointercancel', endDrag);
+
+  syncButtons();
 }());
 </script>
 </body>

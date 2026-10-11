@@ -103,7 +103,7 @@
             {% elif row.review_status == 'Rejected' %}badge-rejected
             {% elif row.review_status == 'Escalated to GC' %}badge-escalated
             {% else %}badge-muted{% endif %}">
-            {{ row.review_status }}
+            {{ display_review_status(row.review_status) }}
           </span>
           {% if row.review_reason and row.review_reason != 'N/A' %}
             <span class="review-reason-tag">{{ row.review_reason }}</span>

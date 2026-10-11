@@ -115,6 +115,17 @@ def _csrf_token() -> str:
 
 app.jinja_env.globals["csrf_token"] = _csrf_token
 
+_DISPLAY_STATUS_MAP = {
+    REVIEW_STATUS_APPROVED:         "Data confirmed",
+    REVIEW_STATUS_APPROVED_EDITED:  "Data confirmed",
+    REVIEW_STATUS_AUTO_APPROVED:    "Data confirmed (auto)",
+}
+
+def _display_review_status(status: str) -> str:
+    return _DISPLAY_STATUS_MAP.get(status, status)
+
+app.jinja_env.globals["display_review_status"] = _display_review_status
+
 
 def csrf_protect(f):
     """Decorator: reject POST requests that don't carry the correct session CSRF token."""
@@ -530,9 +541,21 @@ def detail(record_id):
             pass
 
     source_page_url = None
+    source_page_full_url = None
     attachments = f.get(SOURCE_PAGE_FIELD)
     if isinstance(attachments, list) and attachments:
-        source_page_url = attachments[0].get("url")
+        att = attachments[0]
+        mime = att.get("type", "")
+        original_url = att.get("url")
+        source_page_full_url = original_url
+        if mime.startswith("image/"):
+            # PNG/JPEG from pdf2image — use full-resolution original
+            source_page_url = original_url
+        else:
+            # PDF or unknown — use Airtable's large thumbnail (renders as image)
+            thumbs = att.get("thumbnails") or {}
+            large = (thumbs.get("large") or {}).get("url")
+            source_page_url = large or original_url
 
     ai_raw = (
         f.get("AI Disagreements") or f.get(AI_DISAGREEMENTS_FIELD_ID) or ""
@@ -571,6 +594,7 @@ def detail(record_id):
         highlight_cells=highlight_cells,
         prior_data=prior_data,
         source_page_url=source_page_url,
+        source_page_full_url=source_page_full_url,
         ai_disagrees=ai_disagrees,
         flags=flags,
         corrections_logged=corrections_logged,
@@ -621,9 +645,9 @@ def action(record_id):
         )
         if next_id:
             if corrections_count > 0:
-                flash(f"Approved — {corrections_count} correction(s) logged.", "success")
+                flash(f"Data confirmed — {corrections_count} correction(s) saved.", "success")
             else:
-                flash("Approved with no edits.", "success")
+                flash("Data confirmed — no corrections.", "success")
             return redirect(url_for("detail", record_id=next_id))
         return redirect(url_for("detail", record_id=record_id,
                                 corrections_logged=corrections_count))
@@ -645,6 +669,16 @@ def action(record_id):
         if next_id:
             return redirect(url_for("detail", record_id=next_id))
         return redirect(url_for("queue", batch=queue_batch, filter=queue_chip))
+
+    if action_type == "save_draft":
+        corrections_count = _handle_save_draft(
+            table, record_id, source_filename, original_data, why_note, now_iso,
+        )
+        if corrections_count:
+            flash(f"{corrections_count} correction(s) saved — still in queue.", "info")
+        else:
+            flash("No changes detected.", "info")
+        return redirect(url_for("detail", record_id=record_id))
 
     abort(400)
 
@@ -706,6 +740,60 @@ def _handle_approve(table, record_id, source_filename, original_data, why_note, 
         update["Raw JSON"] = json.dumps(new_data, indent=2)
 
     table.update(record_id, update, typecast=True)
+    return len(corrections)
+
+
+def _handle_save_draft(table, record_id, source_filename, original_data, why_note, now_iso):
+    """Save edits + write Corrections rows without changing Review Status."""
+    corrections = []
+
+    for field in ("named_insured", "certificate_holder"):
+        submitted = (request.form.get(field) or "").strip()
+        original = (original_data.get(field) or "").strip()
+        if submitted != original:
+            corrections.append((field, original, submitted))
+
+    original_policies = original_data.get("policies") or []
+    new_policies = []
+    for i, orig in enumerate(original_policies):
+        new_pol = dict(orig)
+        for pf in ("policy_type", "policy_number", "carrier",
+                   "effective_date", "expiration_date",
+                   "coverage_limits", "policy_basis"):
+            submitted = (request.form.get(f"policy_{i}_{pf}") or "").strip() or None
+            original_val = orig.get(pf) or None
+            if isinstance(original_val, str):
+                original_val = original_val.strip() or None
+            if submitted != original_val:
+                corrections.append((f"policies[{i}].{pf}", str(original_val or ""), str(submitted or "")))
+            new_pol[pf] = submitted if submitted is not None else orig.get(pf)
+        for chk in ("additional_insured_checked",
+                    "waiver_of_subrogation_checked",
+                    "primary_noncontributory_checked"):
+            submitted_bool = request.form.get(f"policy_{i}_{chk}") == "true"
+            original_bool = bool(orig.get(chk))
+            if submitted_bool != original_bool:
+                corrections.append((f"policies[{i}].{chk}", str(original_bool), str(submitted_bool)))
+            new_pol[chk] = submitted_bool
+        new_policies.append(new_pol)
+
+    for field_path, old_val, new_val in corrections:
+        _write_correction(source_filename, record_id, field_path, old_val, new_val, why_note, now_iso)
+
+    if corrections:
+        new_data = dict(original_data)
+        new_data["policies"] = new_policies
+        update = {"Raw JSON": json.dumps(new_data, indent=2)}
+        _airtable_field_names = {
+            "named_insured": "Named Insured",
+            "certificate_holder": "Certificate Holder",
+        }
+        for fp, old, new_val in corrections:
+            if fp in _airtable_field_names:
+                new_data[fp] = new_val
+                update[_airtable_field_names[fp]] = new_val
+        table.update(record_id, update, typecast=True)
+
     return len(corrections)
 
 
