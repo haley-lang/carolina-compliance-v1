@@ -127,6 +127,17 @@ def _display_review_status(status: str) -> str:
 app.jinja_env.globals["display_review_status"] = _display_review_status
 
 
+def _norm_tristate(v) -> str:
+    """Normalize a possibly-boolean checkbox to tri-state string. Back-compat: bool True → 'checked'."""
+    if isinstance(v, bool):
+        return "checked" if v else "not_checked"
+    if v in ("checked", "not_checked", "not_applicable"):
+        return v
+    return "not_checked"
+
+app.jinja_env.globals["norm_tristate"] = _norm_tristate
+
+
 def csrf_protect(f):
     """Decorator: reject POST requests that don't carry the correct session CSRF token."""
     @wraps(f)
@@ -320,7 +331,7 @@ def compute_flags(airtable_fields: dict, raw_data: dict) -> dict:
                     for chk in ("additional_insured_checked",
                                 "waiver_of_subrogation_checked",
                                 "primary_noncontributory_checked"):
-                        if bool(cp.get(chk)) != bool(pp.get(chk)):
+                        if _norm_tristate(cp.get(chk)) != _norm_tristate(pp.get(chk)):
                             flags["changed_vs_prior"] = True
                             break
                     if flags["changed_vs_prior"]:
@@ -364,15 +375,21 @@ def _highlight_cells(raw_data: dict, second_data: dict) -> set:
         ("effective_date", lambda v: str(v or "").strip()),
         ("expiration_date", lambda v: str(v or "").strip()),
         ("policy_basis", lambda v: str(v or "").strip().lower()),
-        ("additional_insured_checked", bool),
-        ("waiver_of_subrogation_checked", bool),
-        ("primary_noncontributory_checked", bool),
+        ("additional_insured_checked", _norm_tristate),
+        ("waiver_of_subrogation_checked", _norm_tristate),
+        ("primary_noncontributory_checked", lambda v: str(bool(v))),
         ("carrier", lambda v: str(v or "").strip().lower()),
     ]
     for i, (cp, sp) in enumerate(zip(cur_pols, sec_pols)):
         for field, norm in check_fields:
             if norm(cp.get(field)) != norm(sp.get(field)):
                 highlights.add((i, field))
+    # Statement field comparison (certificate-level)
+    for stmt_field in ("additional_insured_statement", "waiver_of_subrogation_statement"):
+        sa = raw_data.get(stmt_field) or {}
+        sb = second_data.get(stmt_field) or {}
+        if bool(sa.get("present")) != bool(sb.get("present")):
+            highlights.add((-1, stmt_field))
     return highlights
 
 
@@ -709,14 +726,20 @@ def _handle_approve(table, record_id, source_filename, original_data, why_note, 
             if submitted != original_val:
                 corrections.append((f"policies[{i}].{pf}", str(original_val or ""), str(submitted or "")))
             new_pol[pf] = submitted if submitted is not None else orig.get(pf)
-        for chk in ("additional_insured_checked",
-                    "waiver_of_subrogation_checked",
-                    "primary_noncontributory_checked"):
-            submitted_bool = request.form.get(f"policy_{i}_{chk}") == "true"
-            original_bool = bool(orig.get(chk))
-            if submitted_bool != original_bool:
-                corrections.append((f"policies[{i}].{chk}", str(original_bool), str(submitted_bool)))
-            new_pol[chk] = submitted_bool
+        # Tri-state checkboxes (AI and WoS)
+        for chk in ("additional_insured_checked", "waiver_of_subrogation_checked"):
+            submitted = _norm_tristate(request.form.get(f"policy_{i}_{chk}"))
+            original = _norm_tristate(orig.get(chk))
+            if submitted != original:
+                corrections.append((f"policies[{i}].{chk}", original, submitted))
+            new_pol[chk] = submitted
+        # Boolean checkbox (P&N)
+        submitted_bool = request.form.get(f"policy_{i}_primary_noncontributory_checked") == "true"
+        original_bool = bool(orig.get("primary_noncontributory_checked"))
+        if submitted_bool != original_bool:
+            corrections.append((f"policies[{i}].primary_noncontributory_checked",
+                                 str(original_bool), str(submitted_bool)))
+        new_pol["primary_noncontributory_checked"] = submitted_bool
         new_policies.append(new_pol)
 
     # Write Corrections rows
@@ -767,14 +790,20 @@ def _handle_save_draft(table, record_id, source_filename, original_data, why_not
             if submitted != original_val:
                 corrections.append((f"policies[{i}].{pf}", str(original_val or ""), str(submitted or "")))
             new_pol[pf] = submitted if submitted is not None else orig.get(pf)
-        for chk in ("additional_insured_checked",
-                    "waiver_of_subrogation_checked",
-                    "primary_noncontributory_checked"):
-            submitted_bool = request.form.get(f"policy_{i}_{chk}") == "true"
-            original_bool = bool(orig.get(chk))
-            if submitted_bool != original_bool:
-                corrections.append((f"policies[{i}].{chk}", str(original_bool), str(submitted_bool)))
-            new_pol[chk] = submitted_bool
+        # Tri-state checkboxes (AI and WoS)
+        for chk in ("additional_insured_checked", "waiver_of_subrogation_checked"):
+            submitted = _norm_tristate(request.form.get(f"policy_{i}_{chk}"))
+            original = _norm_tristate(orig.get(chk))
+            if submitted != original:
+                corrections.append((f"policies[{i}].{chk}", original, submitted))
+            new_pol[chk] = submitted
+        # Boolean checkbox (P&N)
+        submitted_bool = request.form.get(f"policy_{i}_primary_noncontributory_checked") == "true"
+        original_bool = bool(orig.get("primary_noncontributory_checked"))
+        if submitted_bool != original_bool:
+            corrections.append((f"policies[{i}].primary_noncontributory_checked",
+                                 str(original_bool), str(submitted_bool)))
+        new_pol["primary_noncontributory_checked"] = submitted_bool
         new_policies.append(new_pol)
 
     for field_path, old_val, new_val in corrections:

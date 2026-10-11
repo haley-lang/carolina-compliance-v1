@@ -1,0 +1,23 @@
+{
+  "_note": "Candidate gold entries for new tri-state checkbox and statement fields. Not yet approved by Haley. Doster cert03 case: AI column is N/A (not checked), AI statement is present in description; WoS column is checked, WoS statement is absent.",
+  "pages": {
+    "doster_cert03": {
+      "doc_type": "COI",
+      "_case_description": "AI: column N/A, statement present. WoS: column checked, statement absent.",
+      "policies": [
+        {
+          "family": "GL",
+          "number": "GL-PLACEHOLDER",
+          "eff": "2025-01-01",
+          "exp": "2026-01-01",
+          "basis": "occurrence",
+          "ai": "not_applicable",
+          "wos": "checked",
+          "pnc": false
+        }
+      ],
+      "additional_insured_statement": {"present": true, "quote": "Certificate holder is named as additional insured per endorsement.", "policies_named": null},
+      "waiver_of_subrogation_statement": {"present": false, "quote": null, "policies_named": null}
+    }
+  }
+}

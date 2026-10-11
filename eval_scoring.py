@@ -5,6 +5,24 @@ from datetime import datetime
 FIELDS = ("number", "eff", "exp", "basis", "ai", "wos", "pnc")
 
 
+def _norm_checkbox(v) -> str:
+    """Normalize a checkbox value (possibly bool for back-compat) to a tri-state string."""
+    if isinstance(v, bool):
+        return "checked" if v else "not_checked"
+    if v in ("checked", "not_checked", "not_applicable"):
+        return v
+    return "not_checked"
+
+
+def _gold_checkbox(v) -> str:
+    """Normalize a gold entry checkbox (bool or string) to tri-state string."""
+    if isinstance(v, bool):
+        return "checked" if v else "not_checked"
+    if isinstance(v, str) and v in ("checked", "not_checked", "not_applicable"):
+        return v
+    return "not_checked"
+
+
 def family(policy_type) -> str:
     t = (policy_type or "").upper()
     if "EXCESS" in t and "WORKER" in t:
@@ -82,8 +100,8 @@ def score_page(gold: dict, got: dict) -> dict:
         check(f"{fam}.eff", gp["eff"], norm_date(match.get("effective_date")))
         check(f"{fam}.exp", gp["exp"], norm_date(match.get("expiration_date")))
         check(f"{fam}.basis", gp["basis"], norm_basis(match.get("policy_basis")))
-        check(f"{fam}.ai", gp["ai"], bool(match.get("additional_insured_checked")))
-        check(f"{fam}.wos", gp["wos"], bool(match.get("waiver_of_subrogation_checked")))
+        check(f"{fam}.ai", _gold_checkbox(gp["ai"]), _norm_checkbox(match.get("additional_insured_checked")))
+        check(f"{fam}.wos", _gold_checkbox(gp["wos"]), _norm_checkbox(match.get("waiver_of_subrogation_checked")))
         check(f"{fam}.pnc", gp["pnc"], bool(match.get("primary_noncontributory_checked")))
 
     return {"checks": checks, "correct": checks - len(errors), "errors": errors}
@@ -128,8 +146,8 @@ def compare_extractions(a: dict, b: dict) -> list:
                      ("eff", norm_date(pa.get("effective_date")), norm_date(pb.get("effective_date"))),
                      ("exp", norm_date(pa.get("expiration_date")), norm_date(pb.get("expiration_date"))),
                      ("basis", norm_basis(pa.get("policy_basis")), norm_basis(pb.get("policy_basis"))),
-                     ("ai", bool(pa.get("additional_insured_checked")), bool(pb.get("additional_insured_checked"))),
-                     ("wos", bool(pa.get("waiver_of_subrogation_checked")), bool(pb.get("waiver_of_subrogation_checked"))),
+                     ("ai", _norm_checkbox(pa.get("additional_insured_checked")), _norm_checkbox(pb.get("additional_insured_checked"))),
+                     ("wos", _norm_checkbox(pa.get("waiver_of_subrogation_checked")), _norm_checkbox(pb.get("waiver_of_subrogation_checked"))),
                      ("pnc", bool(pa.get("primary_noncontributory_checked")), bool(pb.get("primary_noncontributory_checked"))))
             for name, x, y in pairs:
                 if x != y:

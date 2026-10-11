@@ -93,8 +93,10 @@ CHECKBOX_RULES = """\
   means OCCUR is checked, NOT claims-made. Set policy_basis to "claims-made" ONLY when the X is in the box before
   the word CLAIMS-MADE. Set policy_basis to null for Automobile, Workers Compensation and any row that has no such boxes.
 - UMBRELLA LIAB / EXCESS LIAB row reads "[box] OCCUR  [box] CLAIMS-MADE". Set policy_basis for umbrella and excess rows from the checked OCCUR or CLAIMS-MADE box on that row, using the same box-to-the-left-of-the-word rule. Return null only if neither box is checked.
-- ADDL INSD and SUBR WVD: base additional_insured_checked and waiver_of_subrogation_checked ONLY on what is written
-  in those two narrow columns for that row. Blank means false. Do not infer them from the description of operations.
+- ADDL INSD and SUBR WVD: set additional_insured_checked and waiver_of_subrogation_checked ONLY from the narrow
+  column cells for that row. Use "checked", "not_checked", or "not_applicable" as the value — never infer from
+  the description of operations. The description has its own separate statement fields
+  (additional_insured_statement, waiver_of_subrogation_statement) that you fill independently.
 - EMPTY ROWS: return a policy row only if something is written in it (policy number, carrier, dates or limits).
   Do not return rows for coverage lines that are blank on the form.
 """
@@ -143,31 +145,59 @@ Rules:
   from cell non-emptiness.
 
   - additional_insured_checked:
-      true  ONLY if the ADDL INSD cell for that row contains the literal
-            letter "Y", the word "Yes", a filled/marked checkbox in the
-            YES position, or an "X" in a single YES checkbox.
-      false in EVERY other case, including: "N", "n", "No", "N/A", "NA",
-            "n/a", a dash "-", blank/empty, an unmarked/empty checkbox,
-            or any value that is not an explicit YES.
+      "checked"         ONLY if the ADDL INSD cell for that row contains the literal
+                        letter "Y", the word "Yes", a filled/marked checkbox in the
+                        YES position, or an "X" in a single YES checkbox.
+      "not_applicable"  if the cell contains "N/A", "NA", "n/a", or any variation
+                        indicating not applicable for this row.
+      "not_checked"     in every other case: "N", "n", "No", a dash "-",
+                        blank/empty, an unmarked/empty checkbox, or any value
+                        that is not an explicit YES or N/A.
 
   - waiver_of_subrogation_checked:
-      true  ONLY if the SUBR WVD cell for that row contains the literal
-            letter "Y", the word "Yes", a filled/marked checkbox in the
-            YES position, or an "X" in a single YES checkbox.
-      false in EVERY other case, including: "N", "n", "No", "N/A", "NA",
-            "n/a", a dash "-", blank/empty, an unmarked/empty checkbox,
-            or any value that is not an explicit YES.
+      "checked"         ONLY if the SUBR WVD cell for that row contains the literal
+                        letter "Y", the word "Yes", a filled/marked checkbox in the
+                        YES position, or an "X" in a single YES checkbox.
+      "not_applicable"  if the cell contains "N/A", "NA", "n/a", or any variation
+                        indicating not applicable for this row.
+      "not_checked"     in every other case: "N", "n", "No", a dash "-",
+                        blank/empty, an unmarked/empty checkbox, or any value
+                        that is not an explicit YES or N/A.
 
   Examples:
-      ADDL INSD = "Y"   → additional_insured_checked: true
-      ADDL INSD = "N"   → additional_insured_checked: false  (NOT true)
-      ADDL INSD = "N/A" → additional_insured_checked: false
-      ADDL INSD = ""    → additional_insured_checked: false
-      SUBR WVD  = "N"   → waiver_of_subrogation_checked: false (NOT true)
+      ADDL INSD = "Y"   → additional_insured_checked: "checked"
+      ADDL INSD = "N"   → additional_insured_checked: "not_checked"  (NOT "checked")
+      ADDL INSD = "N/A" → additional_insured_checked: "not_applicable"
+      ADDL INSD = ""    → additional_insured_checked: "not_checked"
+      SUBR WVD  = "N"   → waiver_of_subrogation_checked: "not_checked" (NOT "checked")
+      SUBR WVD  = "N/A" → waiver_of_subrogation_checked: "not_applicable"
 
   - primary_noncontributory_checked: true if "Primary and Noncontributory"
     or "Primary/Non-Contributory" language appears in the description of
     operations referencing this policy type. false otherwise.
+- ADDITIONAL INSURED STATEMENT (certificate-level, not per-policy):
+  Look in the "DESCRIPTION OF OPERATIONS / LOCATIONS / VEHICLES" section for text
+  that names the certificate holder (or any party) as an additional insured.
+  Examples: "Certificate holder is named as additional insured", "Additional insured
+  endorsement attached for XYZ Corp".
+  - If such language is present, set additional_insured_statement.present to true,
+    copy the verbatim sentence(s) into additional_insured_statement.quote, and list
+    any policy types or policy numbers explicitly named in policies_named (or null).
+  - If no such language appears, set additional_insured_statement to
+    {"present": false, "quote": null, "policies_named": null}.
+  - Do NOT look at the ADDL INSD column to determine this — that is a separate source.
+    The column and the description text are two independent captures; never merge them.
+- WAIVER OF SUBROGATION STATEMENT (certificate-level, not per-policy):
+  Look in the "DESCRIPTION OF OPERATIONS / LOCATIONS / VEHICLES" section for text
+  about waiver of subrogation (e.g., "waiver of subrogation applies", "subrogation
+  waived in favor of").
+  - If such language is present, set waiver_of_subrogation_statement.present to true,
+    copy the verbatim sentence(s) into waiver_of_subrogation_statement.quote, and list
+    any policy types or policy numbers explicitly named in policies_named (or null).
+  - If no such language appears, set waiver_of_subrogation_statement to
+    {"present": false, "quote": null, "policies_named": null}.
+  - Do NOT look at the SUBR WVD column to determine this — that is a separate source.
+    The column and the description text are two independent captures; never merge them.
 - DESCRIPTION OF OPERATIONS: Extract the full text from the "DESCRIPTION OF OPERATIONS / LOCATIONS / VEHICLES" section at the bottom of the ACORD form. Return as description_of_operations at the top level. Return null if blank or not present.
 - CONFIDENCE: After extracting all fields, return an overall confidence score
   as a single top-level "confidence" field, a float between 0.0 and 1.0 with
@@ -188,6 +218,8 @@ Return this exact JSON structure:
   "contact_emails": ["<email>"],
   "description_of_operations": "<string or null>",
   "confidence": <float between 0.0 and 1.0>,
+  "additional_insured_statement": {"present": false, "quote": null, "policies_named": null},
+  "waiver_of_subrogation_statement": {"present": false, "quote": null, "policies_named": null},
   "policies": [
     {
       "policy_type": "<string or null>",
@@ -200,8 +232,8 @@ Return this exact JSON structure:
       "policy_basis": "<claims-made | occurrence | null>",
       "retro_date": "<string or null>",
       "tail_coverage_evidenced": false,
-      "additional_insured_checked": false,
-      "waiver_of_subrogation_checked": false,
+      "additional_insured_checked": "not_checked",
+      "waiver_of_subrogation_checked": "not_checked",
       "primary_noncontributory_checked": false
     }
   ]
@@ -523,10 +555,14 @@ def _is_zero_or_blank_limits(limits) -> bool:
 
 
 def _has_any_checked_box(p: dict) -> bool:
-    return bool(
-        p.get("additional_insured_checked")
-        or p.get("waiver_of_subrogation_checked")
-        or p.get("primary_noncontributory_checked")
+    def _is_chk(v):
+        if isinstance(v, bool):
+            return v
+        return v == "checked"
+    return (
+        _is_chk(p.get("additional_insured_checked"))
+        or _is_chk(p.get("waiver_of_subrogation_checked"))
+        or bool(p.get("primary_noncontributory_checked"))
     )
 
 
@@ -844,6 +880,16 @@ def _compare_reads(primary: dict, secondary: dict) -> list:
     ni_b = (secondary.get("named_insured") or "").strip().lower()
     if ni_a != ni_b:
         diffs.append(f"named_insured: {primary.get('named_insured')!r} vs {secondary.get('named_insured')!r}")
+    # Compare certificate-level statement fields
+    for stmt_field in ("additional_insured_statement", "waiver_of_subrogation_statement"):
+        sa = primary.get(stmt_field) or {}
+        sb = secondary.get(stmt_field) or {}
+        if bool(sa.get("present")) != bool(sb.get("present")):
+            diffs.append(
+                f"{stmt_field}.present: {sa.get('present')!r} vs {sb.get('present')!r}"
+            )
+        elif sa.get("present") and (sa.get("quote") or "") != (sb.get("quote") or ""):
+            diffs.append(f"{stmt_field}.quote: differs")
     return diffs
 
 

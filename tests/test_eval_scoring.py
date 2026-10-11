@@ -66,3 +66,33 @@ def test_compare_extractions_flags_only_real_differences():
     b["policies"][0]["policy_basis"] = "claims-made"
     b["policies"].append({"policy_type": "UMBRELLA LIAB"})  # empty row ignored
     assert es.compare_extractions(a, b) == ["GL.basis: 'occurrence' vs 'claims-made'"]
+
+
+def test_score_page_tristate_not_applicable_not_same_as_checked():
+    """not_applicable gold entry does not match checked extraction."""
+    page = dict(GOLD["f1_04"])  # single GL policy
+    page = {**page, "policies": [{**page["policies"][0], "ai": "not_applicable"}]}
+    out = perfect_output(GOLD["f1_04"])
+    out["policies"][0]["additional_insured_checked"] = "checked"
+    s = es.score_page(page, out)
+    assert any("ai" in e for e in s["errors"])
+
+
+def test_score_page_tristate_not_applicable_matches():
+    """not_applicable gold entry matches not_applicable extraction."""
+    page = dict(GOLD["f1_04"])
+    page = {**page, "policies": [{**page["policies"][0], "ai": "not_applicable"}]}
+    out = perfect_output(GOLD["f1_04"])
+    out["policies"][0]["additional_insured_checked"] = "not_applicable"
+    s = es.score_page(page, out)
+    assert not any("ai" in e for e in s["errors"])
+
+
+def test_compare_extractions_tristate_diff():
+    """compare_extractions detects not_checked vs not_applicable as a real difference."""
+    a = perfect_output(GOLD["f1_04"])
+    b = perfect_output(GOLD["f1_04"])
+    a["policies"][0]["additional_insured_checked"] = "not_checked"
+    b["policies"][0]["additional_insured_checked"] = "not_applicable"
+    diffs = es.compare_extractions(a, b)
+    assert any("ai" in d for d in diffs)

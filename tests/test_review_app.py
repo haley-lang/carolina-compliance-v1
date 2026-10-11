@@ -377,8 +377,8 @@ def _approve_data(**overrides):
         "policy_0_expiration_date": "2026-01-01",
         "policy_0_coverage_limits": "$1M",
         "policy_0_policy_basis": "occurrence",
-        "policy_0_additional_insured_checked": "false",
-        "policy_0_waiver_of_subrogation_checked": "false",
+        "policy_0_additional_insured_checked": "not_checked",
+        "policy_0_waiver_of_subrogation_checked": "not_checked",
         "policy_0_primary_noncontributory_checked": "false",
     }
     base.update(overrides)
@@ -1118,6 +1118,181 @@ def test_detail_passes_both_prev_and_next_for_middle_record(authed_client, mock_
     assert resp.status_code == 200
     assert b"/detail/recFIRST" in resp.data  # prev link
     assert b"/detail/recLAST" in resp.data   # next link
+
+
+# ── Tri-state checkbox tests ──────────────────────────────────────────────────
+
+def test_detail_tristate_na_rendered(authed_client, mock_ie_table):
+    """Detail page renders 'not_applicable' radio for AI field."""
+    raw = {
+        "document_type": "COI",
+        "named_insured": "Test Co",
+        "policies": [{
+            "policy_type": "GL",
+            "policy_number": "GL-1",
+            "carrier": "Hartford",
+            "effective_date": "2025-01-01",
+            "expiration_date": "2026-01-01",
+            "coverage_limits": "$1M",
+            "policy_basis": "occurrence",
+            "additional_insured_checked": "not_applicable",
+            "waiver_of_subrogation_checked": "checked",
+            "primary_noncontributory_checked": False,
+        }],
+    }
+    rec = {
+        "id": "rec001",
+        "fields": {
+            "Source Filename": "cert01.json",
+            "Named Insured": "Test Co",
+            "Raw JSON": json.dumps(raw),
+            "Review Status": "Pending Review",
+            "Confidence Score": 0.97,
+        },
+    }
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table):
+        resp = authed_client.get("/detail/rec001")
+    assert resp.status_code == 200
+    html = resp.data.decode()
+    assert 'value="not_applicable"' in html
+    assert 'value="checked"' in html
+
+
+def test_detail_statement_not_captured_for_old_rows(authed_client, mock_ie_table):
+    """Old rows without statement fields show 'not captured yet'."""
+    raw = {
+        "document_type": "COI",
+        "named_insured": "Old Co",
+        "policies": [{
+            "policy_type": "GL",
+            "policy_number": "GL-1",
+            "carrier": "Hartford",
+            "effective_date": "2025-01-01",
+            "expiration_date": "2026-01-01",
+            "coverage_limits": "$1M",
+            "policy_basis": "occurrence",
+            "additional_insured_checked": False,
+            "waiver_of_subrogation_checked": False,
+            "primary_noncontributory_checked": False,
+        }],
+        # No additional_insured_statement or waiver_of_subrogation_statement
+    }
+    rec = {
+        "id": "rec001",
+        "fields": {
+            "Source Filename": "cert01.json",
+            "Named Insured": "Old Co",
+            "Raw JSON": json.dumps(raw),
+            "Review Status": "Pending Review",
+            "Confidence Score": 0.97,
+        },
+    }
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table):
+        resp = authed_client.get("/detail/rec001")
+    assert resp.status_code == 200
+    assert b"not captured yet" in resp.data
+
+
+def test_detail_statement_present_shown(authed_client, mock_ie_table):
+    """Statement present for AI shows the quote text."""
+    raw = {
+        "document_type": "COI",
+        "named_insured": "New Co",
+        "additional_insured_statement": {
+            "present": True,
+            "quote": "Certificate holder is named as additional insured.",
+            "policies_named": None,
+        },
+        "waiver_of_subrogation_statement": {"present": False, "quote": None, "policies_named": None},
+        "policies": [{
+            "policy_type": "GL",
+            "policy_number": "GL-1",
+            "carrier": "Hartford",
+            "effective_date": "2025-01-01",
+            "expiration_date": "2026-01-01",
+            "coverage_limits": "$1M",
+            "policy_basis": "occurrence",
+            "additional_insured_checked": "not_applicable",
+            "waiver_of_subrogation_checked": "not_checked",
+            "primary_noncontributory_checked": False,
+        }],
+    }
+    rec = {
+        "id": "rec001",
+        "fields": {
+            "Source Filename": "cert01.json",
+            "Named Insured": "New Co",
+            "Raw JSON": json.dumps(raw),
+            "Review Status": "Pending Review",
+            "Confidence Score": 0.97,
+        },
+    }
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table):
+        resp = authed_client.get("/detail/rec001")
+    assert resp.status_code == 200
+    assert b"Certificate holder is named as additional insured." in resp.data
+
+
+def test_approve_tristate_ai_stored_as_string(authed_client, mock_ie_table, mock_corr_table):
+    """Approving with AI=not_applicable stores the string value in Raw JSON."""
+    raw = {
+        "document_type": "COI",
+        "named_insured": "Tri Co",
+        "certificate_holder": "GC Inc",
+        "contact_emails": [],
+        "policies": [{
+            "policy_type": "GL",
+            "policy_number": "GL-1",
+            "carrier": "Hartford",
+            "effective_date": "2025-01-01",
+            "expiration_date": "2026-01-01",
+            "coverage_limits": "$1M",
+            "policy_basis": "occurrence",
+            "additional_insured_checked": "not_checked",
+            "waiver_of_subrogation_checked": "not_checked",
+            "primary_noncontributory_checked": False,
+        }],
+        "confidence": 0.98,
+    }
+    rec = {
+        "id": "rec001",
+        "fields": {
+            "Source Filename": "cert01.json",
+            "Named Insured": "Tri Co",
+            "Raw JSON": json.dumps(raw),
+            "Review Status": "Pending Review",
+            "Confidence Score": 0.98,
+        },
+    }
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table), \
+         patch("review_app._corrections_table", return_value=mock_corr_table):
+        data = _approve_data(
+            named_insured="Tri Co",
+            certificate_holder="GC Inc",
+            policy_0_policy_type="GL",
+            policy_0_policy_number="GL-1",
+            policy_0_carrier="Hartford",
+            policy_0_effective_date="2025-01-01",
+            policy_0_expiration_date="2026-01-01",
+            policy_0_coverage_limits="$1M",
+            policy_0_policy_basis="occurrence",
+            policy_0_additional_insured_checked="not_applicable",
+            policy_0_waiver_of_subrogation_checked="checked",
+            policy_0_primary_noncontributory_checked="false",
+        )
+        authed_client.post("/action/rec001", data=data)
+
+    update_args = mock_ie_table.update.call_args
+    fields_written = update_args[0][1]
+    assert "Raw JSON" in fields_written
+    saved_raw = json.loads(fields_written["Raw JSON"])
+    p = saved_raw["policies"][0]
+    assert p["additional_insured_checked"] == "not_applicable"
+    assert p["waiver_of_subrogation_checked"] == "checked"
 
 
 def test_detail_nav_bar_shows_position(authed_client, mock_ie_table):

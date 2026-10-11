@@ -844,6 +844,20 @@ select.policy-input {
 .align-center { align-items: center; }
 .fw-600 { font-weight: 600; }
 .small  { font-size: 0.82rem; }
+.mt-4  { margin-top: 4px; }
+.mb-4  { margin-bottom: 4px; }
+
+/* ── Statement quote ─────────────────────────────────────────────── */
+.stmt-quote {
+  font-size: 0.8rem;
+  color: var(--on-surface);
+  background: var(--surface-2, #f9f9f9);
+  border-left: 3px solid var(--border);
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-style: italic;
+  margin-top: 4px;
+}
 
 /* ── Scrollbar (webkit) ──────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }

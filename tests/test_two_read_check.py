@@ -60,6 +60,27 @@ def _mock_response(data_dict):
 
 # ── _compare_reads ────────────────────────────────────────────────────────────
 
+def test_compare_reads_statement_present_diff():
+    """_compare_reads detects difference in additional_insured_statement.present."""
+    a = _make_ext()
+    b = _make_ext()
+    a["additional_insured_statement"] = {"present": False, "quote": None, "policies_named": None}
+    b["additional_insured_statement"] = {"present": True, "quote": "AI endorsement attached.", "policies_named": None}
+    diffs = extractor._compare_reads(a, b)
+    assert any("additional_insured_statement" in d for d in diffs)
+
+
+def test_compare_reads_statement_identical_no_diff():
+    """_compare_reads ignores identical statement fields."""
+    a = _make_ext()
+    b = _make_ext()
+    stmt = {"present": True, "quote": "AI endorsement.", "policies_named": None}
+    a["additional_insured_statement"] = stmt
+    b["additional_insured_statement"] = stmt
+    diffs = extractor._compare_reads(a, b)
+    assert not any("additional_insured_statement" in d for d in diffs)
+
+
 def test_compare_reads_identical_returns_empty():
     a = _make_ext(policies=[_gl_policy()])
     assert extractor._compare_reads(a, a) == []
