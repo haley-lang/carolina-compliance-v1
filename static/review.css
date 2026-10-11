@@ -932,3 +932,101 @@ select.policy-input {
 .corr-val { max-width: 180px; word-break: break-word; }
 .corr-file { max-width: 160px; word-break: break-word; font-size: 0.78rem; }
 .corr-why { max-width: 200px; word-break: break-word; color: var(--secondary); }
+
+/* ── Issue decision panel ─────────────────────────────────────────── */
+.issue-card {
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 10px;
+}
+.issue-card[data-decided="true"] {
+  opacity: 0.6;
+}
+.issue-ai_disagreement { border-left: 3px solid #e67e22; }
+.issue-missing_field   { border-left: 3px solid #e74c3c; }
+.issue-non_coi         { border-left: 3px solid var(--blue); }
+.issue-stmt_box_mismatch { border-left: 3px solid #8e44ad; }
+.issue-possible_duplicate { border-left: 3px solid #c0392b; }
+
+.issue-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+.issue-title {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--navy);
+}
+.issue-badge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 10px;
+  background: #fff3cd;
+  color: #856404;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.issue-badge-done {
+  background: #d4edda;
+  color: #155724;
+}
+.issue-desc {
+  font-size: 0.82rem;
+  color: var(--secondary);
+  margin-bottom: 10px;
+}
+.issue-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.issue-text-control {
+  align-items: center;
+}
+.issue-opt {
+  cursor: pointer;
+}
+.issue-opt input[type="radio"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.issue-pill {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  background: var(--offwhite);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+}
+.issue-opt input[type="radio"]:checked + .issue-pill {
+  background: var(--navy);
+  color: var(--white);
+  border-color: var(--navy);
+}
+.issue-pick-btn {
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  background: var(--offwhite);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  transition: background 0.1s;
+}
+.issue-pick-btn:hover {
+  background: var(--border);
+}

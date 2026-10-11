@@ -2212,3 +2212,208 @@ def test_export_gold_candidates_all_required_fields():
         assert c["why"] == "OCR error"
         assert c["model"] == "claude-test"
         assert c["status"] == "candidate"
+
+
+# ── compute_issues() ──────────────────────────────────────────────────────────
+
+def _raw_with_policy(**overrides):
+    pol = {
+        "policy_type": "Commercial General Liability",
+        "policy_number": "GL-001",
+        "effective_date": "2025-01-01",
+        "expiration_date": "2026-01-01",
+        "additional_insured_checked": "not_checked",
+        "waiver_of_subrogation_checked": "not_checked",
+        "primary_noncontributory_checked": False,
+    }
+    pol.update(overrides)
+    return {
+        "named_insured": "Acme Corp",
+        "document_type": "COI",
+        "policies": [pol],
+    }
+
+
+def test_compute_issues_empty_when_clean():
+    import review_app
+    raw = _raw_with_policy()
+    flags = {"ai_disagreed": False, "missing_fields": False, "low_confidence": False,
+             "non_coi": False, "changed_vs_prior": False, "multi_company": False,
+             "needs_look": False, "possible_duplicate": False}
+    issues = review_app.compute_issues(raw, None, flags)
+    assert issues == []
+
+
+def test_compute_issues_ai_disagreement_tristate():
+    import review_app
+    raw = _raw_with_policy(additional_insured_checked="checked")
+    second = _raw_with_policy(additional_insured_checked="not_checked")
+    flags = {"ai_disagreed": True, "non_coi": False}
+    issues = review_app.compute_issues(raw, second, flags)
+    ai_issues = [i for i in issues if i["type"] == "ai_disagreement"]
+    assert any("Additional Insured" in i["title"] for i in ai_issues)
+    issue = next(i for i in ai_issues if "Additional Insured" in i["title"])
+    assert issue["control"] == "tristate"
+    assert issue["read1"] == "checked"
+    assert issue["read2"] == "not_checked"
+    assert "Read 1: Checked" in issue["description"]
+    assert "Read 2: Not checked" in issue["description"]
+    assert issue["field"].endswith("additional_insured_checked")
+
+
+def test_compute_issues_ai_disagreement_pnc():
+    import review_app
+    raw = _raw_with_policy(primary_noncontributory_checked=True)
+    second = _raw_with_policy(primary_noncontributory_checked=False)
+    flags = {"ai_disagreed": True, "non_coi": False}
+    issues = review_app.compute_issues(raw, second, flags)
+    ai_issues = [i for i in issues if i["type"] == "ai_disagreement"]
+    assert any("Primary" in i["title"] for i in ai_issues)
+    issue = next(i for i in ai_issues if "Primary" in i["title"])
+    assert issue["control"] == "bool"
+    assert issue["read1"] == "true"
+    assert issue["read2"] == "false"
+
+
+def test_compute_issues_ai_disagreement_policy_number():
+    import review_app
+    raw = _raw_with_policy(policy_number="GL-001")
+    second = _raw_with_policy(policy_number="GL-002")
+    flags = {"ai_disagreed": True, "non_coi": False}
+    issues = review_app.compute_issues(raw, second, flags)
+    ai_issues = [i for i in issues if i["type"] == "ai_disagreement"]
+    assert any("Policy Number" in i["title"] for i in ai_issues)
+
+
+def test_compute_issues_missing_policy_number():
+    import review_app
+    raw = _raw_with_policy(policy_number="")
+    flags = {"ai_disagreed": False, "missing_fields": True, "non_coi": False}
+    issues = review_app.compute_issues(raw, None, flags)
+    missing = [i for i in issues if i["type"] == "missing_field"]
+    assert any("policy number" in i["title"] for i in missing)
+    issue = next(i for i in missing if "policy number" in i["title"])
+    assert issue["control"] == "text"
+    assert issue["field"].endswith("_policy_number")
+
+
+def test_compute_issues_missing_both_dates():
+    import review_app
+    raw = _raw_with_policy(effective_date="", expiration_date="")
+    flags = {"ai_disagreed": False, "missing_fields": True, "non_coi": False}
+    issues = review_app.compute_issues(raw, None, flags)
+    missing = [i for i in issues if i["type"] == "missing_field"]
+    assert any("dates" in i["title"] for i in missing)
+
+
+def test_compute_issues_non_coi():
+    import review_app
+    raw = {"named_insured": "X", "document_type": "cancellation_notice", "policies": []}
+    flags = {"ai_disagreed": False, "missing_fields": False, "non_coi": True}
+    issues = review_app.compute_issues(raw, None, flags)
+    non_coi_issues = [i for i in issues if i["type"] == "non_coi"]
+    assert len(non_coi_issues) == 1
+    assert "cancellation_notice" in non_coi_issues[0]["title"]
+    assert non_coi_issues[0]["control"] == "select"
+    assert non_coi_issues[0]["field"] == "document_type"
+
+
+def test_compute_issues_possible_duplicate():
+    import review_app
+    raw = _raw_with_policy()
+    flags = {}
+    issues = review_app.compute_issues(raw, None, flags, duplicate_match="GL-001 / 2025-01-01")
+    dup_issues = [i for i in issues if i["type"] == "possible_duplicate"]
+    assert len(dup_issues) == 1
+    assert "GL-001" in dup_issues[0]["description"]
+    assert dup_issues[0]["control"] == "none"
+
+
+def test_compute_issues_stmt_box_mismatch():
+    import review_app
+    raw = _raw_with_policy(additional_insured_checked="checked")
+    raw["additional_insured_statement"] = {"present": False, "quote": None, "policies_named": None}
+    flags = {}
+    issues = review_app.compute_issues(raw, None, flags)
+    stmt_issues = [i for i in issues if i["type"] == "stmt_box_mismatch"]
+    assert len(stmt_issues) == 1
+    assert "Additional Insured" in stmt_issues[0]["title"]
+    assert "Checked" in stmt_issues[0]["title"]
+    assert "Absent" in stmt_issues[0]["title"]
+
+
+def test_compute_issues_no_duplicate_when_empty_match():
+    import review_app
+    raw = _raw_with_policy()
+    flags = {}
+    issues = review_app.compute_issues(raw, None, flags, duplicate_match="")
+    assert not any(i["type"] == "possible_duplicate" for i in issues)
+
+
+# ── Issues panel renders in detail page ──────────────────────────────────────
+
+def test_detail_shows_issues_panel_for_ai_disagreement(authed_client, mock_ie_table):
+    """Issues panel renders when second read disagrees with first."""
+    rec = _make_cert_fixture(
+        raw=_raw_with_policy(additional_insured_checked="checked"),
+        record_id="recISS1",
+    )
+    rec["fields"]["fldJFX9EN6j40cdXD"] = json.dumps(  # SECOND_READ_JSON_FIELD_ID
+        _raw_with_policy(additional_insured_checked="not_checked")
+    )
+    rec["fields"]["AI Disagreements"] = "additional_insured_checked"
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table):
+        resp = authed_client.get("/detail/recISS1")
+    assert resp.status_code == 200
+    assert b"WHY THIS NEEDS YOU" in resp.data
+    assert b"issue-ai_disagreement" in resp.data
+    assert b"Additional Insured" in resp.data
+
+
+def test_detail_no_issues_panel_when_data_clean(authed_client, mock_ie_table):
+    """Issues panel absent when there are no issues to resolve."""
+    rec = _make_cert_fixture(raw=_raw_with_policy(), record_id="recISS2")
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table):
+        resp = authed_client.get("/detail/recISS2")
+    assert resp.status_code == 200
+    assert b"WHY THIS NEEDS YOU" not in resp.data
+
+
+def test_detail_issues_panel_has_all_extracted_data_label(authed_client, mock_ie_table):
+    """'ALL EXTRACTED DATA' label appears when issues panel is shown."""
+    rec = _make_cert_fixture(raw=_raw_with_policy(policy_number=""), record_id="recISS3")
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table):
+        resp = authed_client.get("/detail/recISS3")
+    assert resp.status_code == 200
+    # If there is a missing-number issue, the panel is shown
+    assert b"ALL EXTRACTED DATA" in resp.data
+
+
+def test_source_page_prefers_last_image_over_pdf(authed_client, mock_ie_table):
+    """When both PDF and image/* attachments exist, viewer uses the last image."""
+    rec = _make_rec_with_policies()
+    rec["fields"]["Source Page"] = [
+        {
+            "id": "att_pdf",
+            "url": "https://cdn.airtable.com/original.pdf",
+            "filename": "page.pdf",
+            "type": "application/pdf",
+            "thumbnails": {"large": {"url": "https://cdn.airtable.com/thumb.png",
+                                     "width": 512, "height": 663}},
+        },
+        {
+            "id": "att_png",
+            "url": "https://cdn.airtable.com/page_300dpi.png",
+            "filename": "page_300dpi.png",
+            "type": "image/png",
+        },
+    ]
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table):
+        resp = authed_client.get("/detail/recDETAIL")
+    assert b"page_300dpi.png" in resp.data
+    # The low-res thumbnail should NOT be used when a hi-res PNG is present
+    assert b"thumb.png" not in resp.data

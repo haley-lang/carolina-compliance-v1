@@ -27,12 +27,11 @@ SAMPLE_EXTRACTION = {
 
 OLD_RAW = json.dumps({"document_type": "COI", "named_insured": "RTR (old extraction)"})
 
-
 BACKUP_VALUE = '{"backed": "up"}'
 
 
 def _make_rec(rec_id, source_filename, review_status="Auto-Approved",
-              raw_json=None, has_backup=False):
+              raw_json=None, has_backup=False, has_backup_2=False):
     fields = {
         "Source Filename": source_filename,
         "Review Status": review_status,
@@ -41,8 +40,9 @@ def _make_rec(rec_id, source_filename, review_status="Auto-Approved",
         "Raw JSON": raw_json if raw_json is not None else OLD_RAW,
     }
     if has_backup:
-        # pyairtable returns fields keyed by NAME, not field ID
         fields[reextract_rtr.PRIOR_RAW_JSON_FIELD_NAME] = BACKUP_VALUE
+    if has_backup_2:
+        fields[reextract_rtr.PRIOR_RAW_JSON_2_FIELD_NAME] = BACKUP_VALUE
     return {"id": rec_id, "fields": fields}
 
 
@@ -81,27 +81,44 @@ def mock_extract():
         yield m
 
 
+@pytest.fixture(autouse=True)
+def patch_corrected_ids():
+    """By default no rows have corrections; override in individual tests."""
+    with patch("reextract_rtr._fetch_corrected_record_ids", return_value=set()):
+        yield
+
+
+@pytest.fixture
+def mock_api():
+    return MagicMock()
+
+
+BASE_ID = "testbase"
+
+
 # ── dry run ──────────────────────────────────────────────────────────────────
 
-def test_dry_run_writes_nothing(cert_folder, mock_table_factory):
+def test_dry_run_writes_nothing(cert_folder, mock_table_factory, mock_api):
     table = mock_table_factory("tbl1")
     table._records["rec1"] = _make_rec("rec1", "cert01.json")
     table.update = MagicMock()
 
-    reextract_rtr.run(cert_folder, apply=False, table=table)
+    reextract_rtr.run(cert_folder, apply=False, only_statements=False,
+                      table=table, api=mock_api, base_id=BASE_ID)
 
     table.update.assert_not_called()
 
 
 # ── backup logic ──────────────────────────────────────────────────────────────
 
-def test_apply_backup_written_on_first_run(cert_folder, mock_table_factory):
+def test_apply_backup_written_on_first_run(cert_folder, mock_table_factory, mock_api):
     """Row has Raw JSON and no backup: backup is written with the OLD Raw JSON exactly once."""
     table = mock_table_factory("tbl1")
     table._records["rec1"] = _make_rec("rec1", "cert01.json", has_backup=False)
     table.update = MagicMock()
 
-    reextract_rtr.run(cert_folder, apply=True, table=table)
+    reextract_rtr.run(cert_folder, apply=True, only_statements=False,
+                      table=table, api=mock_api, base_id=BASE_ID)
 
     table.update.assert_called_once()
     fields_written = table.update.call_args[0][1]
@@ -110,13 +127,14 @@ def test_apply_backup_written_on_first_run(cert_folder, mock_table_factory):
     assert fields_written[reextract_rtr.PRIOR_RAW_JSON_FIELD_ID] == OLD_RAW
 
 
-def test_apply_backup_not_overwritten_on_second_run(cert_folder, mock_table_factory):
+def test_apply_backup_not_overwritten_on_second_run(cert_folder, mock_table_factory, mock_api):
     """Row already has 'Prior Raw JSON (superseded)' filled: backup value must not change."""
     table = mock_table_factory("tbl1")
     table._records["rec1"] = _make_rec("rec1", "cert01.json", has_backup=True)
     table.update = MagicMock()
 
-    reextract_rtr.run(cert_folder, apply=True, table=table)
+    reextract_rtr.run(cert_folder, apply=True, only_statements=False,
+                      table=table, api=mock_api, base_id=BASE_ID)
 
     # update is still called (for the other refreshed fields), but must not touch the backup
     table.update.assert_called_once()
@@ -125,31 +143,125 @@ def test_apply_backup_not_overwritten_on_second_run(cert_folder, mock_table_fact
     assert reextract_rtr.PRIOR_RAW_JSON_FIELD_NAME not in fields_written
 
 
-# ── rejected rows ─────────────────────────────────────────────────────────────
+def test_slot2_backup_used_when_slot1_full(cert_folder, mock_table_factory, mock_api):
+    """Slot 1 already has content → backup goes to slot 2."""
+    table = mock_table_factory("tbl1")
+    table._records["rec1"] = _make_rec("rec1", "cert01.json", has_backup=True)
+    table.update = MagicMock()
 
-def test_rejected_rows_skipped(cert_folder, mock_table_factory, mock_extract):
+    reextract_rtr.run(cert_folder, apply=True, only_statements=False,
+                      table=table, api=mock_api, base_id=BASE_ID)
+
+    table.update.assert_called_once()
+    fields_written = table.update.call_args[0][1]
+    assert reextract_rtr.PRIOR_RAW_JSON_2_FIELD_ID in fields_written
+    assert fields_written[reextract_rtr.PRIOR_RAW_JSON_2_FIELD_ID] == OLD_RAW
+
+
+# ── skipped rows ──────────────────────────────────────────────────────────────
+
+def test_rejected_rows_skipped(cert_folder, mock_table_factory, mock_api, mock_extract):
     table = mock_table_factory("tbl1")
     table._records["rec1"] = _make_rec("rec1", "cert01.json", review_status="Rejected")
     table.update = MagicMock()
 
-    result = reextract_rtr.run(cert_folder, apply=True, table=table)
+    result = reextract_rtr.run(cert_folder, apply=True, only_statements=False,
+                               table=table, api=mock_api, base_id=BASE_ID)
 
     mock_extract.assert_not_called()
     table.update.assert_not_called()
-    assert result["rejected"] == 1
+    assert result["skipped_status"] == 1
+    assert result["matched"] == 0
+
+
+def test_approved_rows_skipped(cert_folder, mock_table_factory, mock_api, mock_extract):
+    table = mock_table_factory("tbl1")
+    table._records["rec1"] = _make_rec("rec1", "cert01.json", review_status="Approved")
+    table.update = MagicMock()
+
+    result = reextract_rtr.run(cert_folder, apply=True, only_statements=False,
+                               table=table, api=mock_api, base_id=BASE_ID)
+
+    mock_extract.assert_not_called()
+    assert result["skipped_status"] == 1
+
+
+def test_corrected_row_skipped(cert_folder, mock_table_factory, mock_api, mock_extract):
+    """Row in corrected_ids set is skipped even if status is reviewable."""
+    table = mock_table_factory("tbl1")
+    table._records["rec1"] = _make_rec("rec1", "cert01.json", review_status="Auto-Approved")
+    table.update = MagicMock()
+
+    with patch("reextract_rtr._fetch_corrected_record_ids", return_value={"rec1"}):
+        result = reextract_rtr.run(cert_folder, apply=True, only_statements=False,
+                                   table=table, api=mock_api, base_id=BASE_ID)
+
+    mock_extract.assert_not_called()
+    table.update.assert_not_called()
+    assert result["skipped_corrections"] == 1
     assert result["matched"] == 0
 
 
 # ── status fields never touched ───────────────────────────────────────────────
 
-def test_status_fields_not_touched(cert_folder, mock_table_factory):
+def test_status_fields_not_touched(cert_folder, mock_table_factory, mock_api):
     table = mock_table_factory("tbl1")
     table._records["rec1"] = _make_rec("rec1", "cert01.json")
     table.update = MagicMock()
 
-    reextract_rtr.run(cert_folder, apply=True, table=table)
+    reextract_rtr.run(cert_folder, apply=True, only_statements=False,
+                      table=table, api=mock_api, base_id=BASE_ID)
 
     fields_written = table.update.call_args[0][1]
     assert "Review Status" not in fields_written
     assert "Review Reason" not in fields_written
     assert "Processing Status" not in fields_written
+
+
+# ── only-statements mode ──────────────────────────────────────────────────────
+
+def test_only_statements_grafts_statement_fields(cert_folder, mock_table_factory, mock_api):
+    """--only-statements: statement fields are updated, other fields preserved from old data."""
+    old_data = {
+        "document_type": "COI",
+        "named_insured": "RTR (old)",
+        "additional_insured_statement": None,
+        "waiver_of_subrogation_statement": None,
+        "policies": [{"policy_type": "GL", "policy_number": "OLD-001"}],
+    }
+    extraction_with_stmts = dict(SAMPLE_EXTRACTION)
+    extraction_with_stmts["additional_insured_statement"] = "AI is required per contract."
+    extraction_with_stmts["waiver_of_subrogation_statement"] = "Waiver applies to all policies."
+
+    table = mock_table_factory("tbl1")
+    table._records["rec1"] = _make_rec(
+        "rec1", "cert01.json", raw_json=json.dumps(old_data)
+    )
+    table.update = MagicMock()
+
+    with patch("extractor.extract_document", return_value=dict(extraction_with_stmts)):
+        reextract_rtr.run(cert_folder, apply=True, only_statements=True,
+                          table=table, api=mock_api, base_id=BASE_ID)
+
+    table.update.assert_called_once()
+    fields_written = table.update.call_args[0][1]
+    written_raw = json.loads(fields_written["Raw JSON"])
+
+    # Statement fields come from the new extraction
+    assert written_raw["additional_insured_statement"] == "AI is required per contract."
+    assert written_raw["waiver_of_subrogation_statement"] == "Waiver applies to all policies."
+
+    # Non-statement fields are preserved from old data
+    assert written_raw["named_insured"] == "RTR (old)"
+    assert written_raw["policies"][0]["policy_number"] == "OLD-001"
+
+
+def test_only_statements_dry_run_writes_nothing(cert_folder, mock_table_factory, mock_api):
+    table = mock_table_factory("tbl1")
+    table._records["rec1"] = _make_rec("rec1", "cert01.json")
+    table.update = MagicMock()
+
+    reextract_rtr.run(cert_folder, apply=False, only_statements=True,
+                      table=table, api=mock_api, base_id=BASE_ID)
+
+    table.update.assert_not_called()

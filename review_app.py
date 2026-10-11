@@ -403,6 +403,215 @@ def _highlight_cells(raw_data: dict, second_data: dict) -> set:
     return highlights
 
 
+# ── Issue computation (decision panel) ───────────────────────────────────────
+
+_TRISTATE_LABELS = {"checked": "Checked", "not_checked": "Not checked", "not_applicable": "N/A"}
+
+
+def compute_issues(raw_data: dict, second_data, flags: dict, duplicate_match: str = "") -> list:
+    """Return ordered list of issue dicts for the 'Why this needs you' panel.
+
+    Each issue has:
+        id           stable string for JS tracking
+        type         ai_disagreement | missing_field | possible_duplicate | non_coi | stmt_box_mismatch
+        title        one short sentence shown in the card header
+        description  plain-English explanation with the two conflicting values side-by-side
+        control      text | tristate | bool | select | none
+        field        form input name to drive (may be absent for control=none)
+        options      list of {label, value} for tristate/bool/select
+        current      current value as a string (pre-selects the control)
+    """
+    issues = []
+    policies = raw_data.get("policies") or []
+
+    # 1. AI disagreements — one issue per disagreed field
+    if second_data:
+        sec_policies = second_data.get("policies") or []
+
+        ni_a = (raw_data.get("named_insured") or "").strip()
+        ni_b = (second_data.get("named_insured") or "").strip()
+        if ni_a.lower() != ni_b.lower():
+            issues.append({
+                "id": "ai_named_insured",
+                "type": "ai_disagreement",
+                "title": "Named Insured — AI reads disagree",
+                "description": f"Read 1: “{ni_a or '(blank)'}” · Read 2: “{ni_b or '(blank)'}”",
+                "control": "text",
+                "field": "named_insured",
+                "current": ni_a,
+                "read1": ni_a,
+                "read2": ni_b,
+            })
+
+        TRISTATE_PAIRS = [
+            ("additional_insured_checked",    "Additional Insured"),
+            ("waiver_of_subrogation_checked", "Waiver of Subrogation"),
+        ]
+        BOOL_PAIRS = [
+            ("primary_noncontributory_checked", "Primary & Non-Contributory"),
+        ]
+        TEXT_PAIRS = [
+            ("policy_number",    "Policy Number"),
+            ("effective_date",   "Effective Date"),
+            ("expiration_date",  "Expiration Date"),
+        ]
+
+        for i, pol_a in enumerate(policies):
+            if i >= len(sec_policies):
+                break
+            pol_b = sec_policies[i]
+            pol_label = (pol_a.get("policy_type") or f"Policy {i + 1}").strip()
+
+            for fld, lbl in TRISTATE_PAIRS:
+                va = _norm_tristate(pol_a.get(fld))
+                vb = _norm_tristate(pol_b.get(fld))
+                if va != vb:
+                    issues.append({
+                        "id": f"ai_pol{i}_{fld}",
+                        "type": "ai_disagreement",
+                        "title": f"{pol_label} — {lbl}",
+                        "description": f"Read 1: {_TRISTATE_LABELS[va]} · Read 2: {_TRISTATE_LABELS[vb]}",
+                        "control": "tristate",
+                        "field": f"policy_{i}_{fld}",
+                        "current": va,
+                        "read1": va,
+                        "read2": vb,
+                        "options": [
+                            {"label": "Checked",     "value": "checked"},
+                            {"label": "Not checked", "value": "not_checked"},
+                            {"label": "N/A",         "value": "not_applicable"},
+                        ],
+                    })
+
+            for fld, lbl in BOOL_PAIRS:
+                va = bool(pol_a.get(fld))
+                vb = bool(pol_b.get(fld))
+                if va != vb:
+                    issues.append({
+                        "id": f"ai_pol{i}_{fld}",
+                        "type": "ai_disagreement",
+                        "title": f"{pol_label} — {lbl}",
+                        "description": (
+                            f"Read 1: {'Checked' if va else 'Not checked'} "
+                            f"· Read 2: {'Checked' if vb else 'Not checked'}"
+                        ),
+                        "control": "bool",
+                        "field": f"policy_{i}_{fld}",
+                        "current": "true" if va else "false",
+                        "read1": "true" if va else "false",
+                        "read2": "true" if vb else "false",
+                        "options": [
+                            {"label": "Checked",     "value": "true"},
+                            {"label": "Not checked", "value": "false"},
+                        ],
+                    })
+
+            for fld, lbl in TEXT_PAIRS:
+                va = (pol_a.get(fld) or "").strip()
+                vb = (pol_b.get(fld) or "").strip()
+                if va.upper().replace(" ", "") != vb.upper().replace(" ", ""):
+                    issues.append({
+                        "id": f"ai_pol{i}_{fld}",
+                        "type": "ai_disagreement",
+                        "title": f"{pol_label} — {lbl}",
+                        "description": f"Read 1: “{va or '(blank)'}” · Read 2: “{vb or '(blank)'}”",
+                        "control": "text",
+                        "field": f"policy_{i}_{fld}",
+                        "current": va,
+                        "read1": va,
+                        "read2": vb,
+                    })
+
+    # 2. Missing field issues
+    _content_keys = ("policy_number", "carrier", "effective_date", "expiration_date", "coverage_limits")
+    for i, p in enumerate(policies):
+        pol_label = (p.get("policy_type") or f"Policy {i + 1}").strip()
+        has_content = any(str(p.get(k) or "").strip() for k in _content_keys)
+        if not has_content:
+            continue
+        if not (p.get("policy_number") or "").strip():
+            issues.append({
+                "id": f"missing_pol{i}_number",
+                "type": "missing_field",
+                "title": f"{pol_label} — policy number is blank",
+                "description": "The AI left the policy number empty. Enter it from the certificate.",
+                "control": "text",
+                "field": f"policy_{i}_policy_number",
+                "current": "",
+            })
+        if not (p.get("effective_date") or "").strip() and not (p.get("expiration_date") or "").strip():
+            issues.append({
+                "id": f"missing_pol{i}_dates",
+                "type": "missing_field",
+                "title": f"{pol_label} — both dates are blank",
+                "description": "Effective date and expiration date are both empty.",
+                "control": "text",
+                "field": f"policy_{i}_effective_date",
+                "current": "",
+            })
+
+    # 3. Non-COI document type
+    if flags.get("non_coi"):
+        doc_type = (raw_data.get("document_type") or "").strip()
+        issues.append({
+            "id": "non_coi",
+            "type": "non_coi",
+            "title": f"Document type reads as “{doc_type}” — is that right?",
+            "description": "If this is a Certificate of Insurance, change the type to COI.",
+            "control": "select",
+            "field": "document_type",
+            "current": doc_type,
+            "options": [
+                {"label": "COI",                  "value": "COI"},
+                {"label": "cancellation_notice",  "value": "cancellation_notice"},
+                {"label": "endorsement",          "value": "endorsement"},
+                {"label": "reinstatement",        "value": "reinstatement"},
+                {"label": "unknown",              "value": "unknown"},
+            ],
+        })
+
+    # 4. Statement vs box mismatch
+    for stmt_key, stmt_label, chk_key in (
+        ("additional_insured_statement",    "Additional Insured",    "additional_insured_checked"),
+        ("waiver_of_subrogation_statement", "Waiver of Subrogation", "waiver_of_subrogation_checked"),
+    ):
+        stmt = raw_data.get(stmt_key)
+        if stmt is None:
+            continue
+        stmt_present = bool(stmt.get("present"))
+        any_checked = any(_norm_tristate(p.get(chk_key)) == "checked" for p in policies)
+        if any_checked != stmt_present:
+            box_says  = "Checked" if any_checked else "Not checked"
+            stmt_says = "Present" if stmt_present else "Absent"
+            issues.append({
+                "id": f"stmt_{stmt_key}",
+                "type": "stmt_box_mismatch",
+                "title": f"{stmt_label} — box says {box_says}, statement says {stmt_says}",
+                "description": (
+                    "The per-policy checkbox and the description of operations statement "
+                    "disagree. Confirm which source is correct."
+                ),
+                "control": "none",
+                "field": None,
+            })
+
+    # 5. Possible duplicate
+    if duplicate_match:
+        issues.append({
+            "id": "possible_duplicate",
+            "type": "possible_duplicate",
+            "title": "Possible duplicate certificate",
+            "description": (
+                f"Policy {duplicate_match} appears in another pending cert "
+                "for the same vendor. Use Reject if this is superseded."
+            ),
+            "control": "none",
+            "field": None,
+        })
+
+    return issues
+
+
 # ── Queue ─────────────────────────────────────────────────────────────────────
 
 @app.route("/")
@@ -525,10 +734,15 @@ def queue():
         "rejected": sum(1 for r in batch_rows if r["review_status"] in REJECTED_SET),
     }
 
-    # Store queue order in session for next/previous navigation
+    # Store queue order and duplicate matches in session for detail page
     session["queue_ids"] = [r["id"] for r in filtered]
     session["queue_batch"] = batch
     session["queue_chip"] = chip
+    session["queue_duplicate_matches"] = {
+        r["id"]: r["duplicate_match"]
+        for r in rows
+        if r.get("duplicate_match")
+    }
 
     return render_template("queue.html", rows=filtered, chip=chip, counts=counts, batch=batch)
 
@@ -571,18 +785,20 @@ def detail(record_id):
     source_page_full_url = None
     attachments = f.get(SOURCE_PAGE_FIELD)
     if isinstance(attachments, list) and attachments:
-        att = attachments[0]
-        mime = att.get("type", "")
-        original_url = att.get("url")
-        source_page_full_url = original_url
-        if mime.startswith("image/"):
-            # PNG/JPEG from pdf2image — use full-resolution original
-            source_page_url = original_url
-        else:
-            # PDF or unknown — use Airtable's large thumbnail (renders as image)
+        # Prefer the last image/* attachment (high-res PNG added by rerender script);
+        # fall back to thumbnail of the first PDF attachment.
+        image_atts = [a for a in attachments if (a.get("type") or "").startswith("image/")]
+        pdf_atts   = [a for a in attachments if not (a.get("type") or "").startswith("image/")]
+        if image_atts:
+            att = image_atts[-1]  # last = most recently added high-res PNG
+            source_page_url = att.get("url")
+            source_page_full_url = att.get("url")
+        elif pdf_atts:
+            att = pdf_atts[0]
+            source_page_full_url = att.get("url")
             thumbs = att.get("thumbnails") or {}
             large = (thumbs.get("large") or {}).get("url")
-            source_page_url = large or original_url
+            source_page_url = large or att.get("url")
 
     ai_raw = (
         f.get("AI Disagreements") or f.get(AI_DISAGREEMENTS_FIELD_ID) or ""
@@ -590,6 +806,10 @@ def detail(record_id):
     ai_disagrees = [d.strip() for d in str(ai_raw).split("\n") if d.strip()] if ai_raw else []
 
     flags = compute_flags(f, raw_data)
+
+    duplicate_match = (session.get("queue_duplicate_matches") or {}).get(record_id, "")
+    issues = compute_issues(raw_data, second_data, flags, duplicate_match)
+
     corrections_logged = request.args.get("corrections_logged", type=int, default=None)
 
     _base_id = clean_base_id(config.AIRTABLE_BASE_ID) if config.AIRTABLE_BASE_ID else ""
@@ -624,6 +844,7 @@ def detail(record_id):
         source_page_full_url=source_page_full_url,
         ai_disagrees=ai_disagrees,
         flags=flags,
+        issues=issues,
         corrections_logged=corrections_logged,
         airtable_url=airtable_url,
         prev_id=prev_id,

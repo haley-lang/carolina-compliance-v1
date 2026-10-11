@@ -118,11 +118,81 @@
         </div>
       </div>
 
-      <!-- Right: editable fields -->
+      <!-- Right: decision panel + editable fields -->
       <div>
 
-        <!-- Certificate details -->
-        <span class="section-label">WHAT THE AI READ</span>
+        <!-- "Why this needs you" decision panel -->
+        {% if issues %}
+        <span class="section-label">WHY THIS NEEDS YOU</span>
+        <div id="issues-panel" class="mb-16">
+          {% set undecided_ns = namespace(count=issues | length) %}
+          {% for issue in issues %}
+          <div class="issue-card issue-{{ issue.type }}" data-issue-id="{{ issue.id }}" data-decided="false">
+            <div class="issue-header">
+              <span class="issue-title">{{ issue.title }}</span>
+              <span class="issue-badge">Open</span>
+            </div>
+            <p class="issue-desc">{{ issue.description }}</p>
+
+            {% if issue.control == 'tristate' %}
+            <div class="issue-controls">
+              {% for opt in issue.options %}
+              <label class="issue-opt">
+                <input type="radio" name="issue_{{ issue.id }}" value="{{ opt.value }}"
+                       data-drives="{{ issue.field }}"
+                       {% if opt.value == issue.current %}checked{% endif %}>
+                <span class="issue-pill">{{ opt.label }}</span>
+              </label>
+              {% endfor %}
+            </div>
+
+            {% elif issue.control == 'bool' %}
+            <div class="issue-controls">
+              {% for opt in issue.options %}
+              <label class="issue-opt">
+                <input type="radio" name="issue_{{ issue.id }}" value="{{ opt.value }}"
+                       data-drives="{{ issue.field }}"
+                       {% if opt.value == issue.current %}checked{% endif %}>
+                <span class="issue-pill">{{ opt.label }}</span>
+              </label>
+              {% endfor %}
+            </div>
+
+            {% elif issue.control == 'text' %}
+            <div class="issue-controls issue-text-control">
+              {% if issue.read1 is defined and issue.read2 is defined %}
+              <button type="button" class="issue-pick-btn"
+                      data-drives="{{ issue.field }}" data-pick="{{ issue.read1 }}">
+                Use: "{{ issue.read1 or '(blank)' }}"
+              </button>
+              <button type="button" class="issue-pick-btn"
+                      data-drives="{{ issue.field }}" data-pick="{{ issue.read2 }}">
+                Use: "{{ issue.read2 or '(blank)' }}"
+              </button>
+              {% else %}
+              <span class="small text-secondary">Enter a value in the field below.</span>
+              {% endif %}
+            </div>
+
+            {% elif issue.control == 'select' %}
+            <div class="issue-controls">
+              {% for opt in issue.options %}
+              <label class="issue-opt">
+                <input type="radio" name="issue_{{ issue.id }}" value="{{ opt.value }}"
+                       data-drives="{{ issue.field }}"
+                       {% if opt.value == issue.current %}checked{% endif %}>
+                <span class="issue-pill">{{ opt.label }}</span>
+              </label>
+              {% endfor %}
+            </div>
+            {% endif %}
+          </div>
+          {% endfor %}
+        </div>
+        {% endif %}
+
+        <!-- All extracted data -->
+        <span class="section-label">ALL EXTRACTED DATA</span>
         <div class="card mb-16">
           <div class="card-header">Certificate details</div>
           <div class="card-body">
@@ -545,9 +615,71 @@
 </div>
 
 <script>
+/* ── Issue panel ── */
+(function () {
+  var panel = document.getElementById('issues-panel');
+  if (!panel) return;
+
+  var btn = document.getElementById('btn-approve');
+
+  function countUndecided() {
+    return panel.querySelectorAll('[data-decided="false"]').length;
+  }
+
+  function updateBtn() {
+    if (!btn) return;
+    var n = countUndecided();
+    btn.textContent = n > 0 ? ('Confirm data (' + n + ' issue' + (n === 1 ? '' : 's') + ' open)') : 'Data is correct';
+  }
+
+  function markDecided(card) {
+    card.setAttribute('data-decided', 'true');
+    var badge = card.querySelector('.issue-badge');
+    if (badge) { badge.textContent = 'Decided'; badge.classList.add('issue-badge-done'); }
+    updateBtn();
+  }
+
+  /* Sync a radio/select value to the real form input below */
+  function driveField(fieldName, value) {
+    /* radio inputs */
+    var radios = document.querySelectorAll('input[type="radio"][name="' + fieldName + '"]');
+    radios.forEach(function (r) { r.checked = (r.value === value); });
+    /* text inputs */
+    var texts = document.querySelectorAll('input[type="text"][name="' + fieldName + '"], textarea[name="' + fieldName + '"]');
+    texts.forEach(function (t) { t.value = value; });
+    /* select */
+    var selects = document.querySelectorAll('select[name="' + fieldName + '"]');
+    selects.forEach(function (s) { s.value = value; });
+  }
+
+  /* radio / checkbox controls inside issue cards */
+  panel.addEventListener('change', function (e) {
+    var input = e.target;
+    if (input.tagName !== 'INPUT') return;
+    var drives = input.getAttribute('data-drives');
+    if (drives) driveField(drives, input.value);
+    markDecided(input.closest('[data-issue-id]'));
+  });
+
+  /* pick buttons for text fields */
+  panel.addEventListener('click', function (e) {
+    var btn2 = e.target.closest('.issue-pick-btn');
+    if (!btn2) return;
+    var drives = btn2.getAttribute('data-drives');
+    var pick   = btn2.getAttribute('data-pick') || '';
+    if (drives) driveField(drives, pick);
+    markDecided(btn2.closest('[data-issue-id]'));
+  });
+
+  updateBtn();
+}());
+
+/* ── Approve button text changes on any form edit ── */
 (function () {
   var btn = document.getElementById('btn-approve');
   if (!btn) return;
+  /* Only override if there are no issues (issues panel sets its own text) */
+  if (document.getElementById('issues-panel')) return;
   var form = btn.closest('form');
   var changed = false;
   form.addEventListener('input', function () {
