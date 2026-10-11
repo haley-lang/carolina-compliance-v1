@@ -886,3 +886,49 @@ select.policy-input {
 @media (max-width: 480px) {
   .topnav-links .nav-link { display: none; }
 }
+
+/* ── Corrections page ────────────────────────────────────────────── */
+.corrections-filter select.filter-select {
+  padding: 7px 12px;
+  border: 1.5px solid var(--border);
+  border-radius: 6px;
+  font-family: var(--font-sans);
+  font-size: 0.85rem;
+  background: #fff;
+  color: var(--navy);
+  cursor: pointer;
+}
+.corrections-table-wrap { overflow-x: auto; }
+.corrections-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.83rem;
+}
+.corrections-table th {
+  background: var(--offwhite);
+  border-bottom: 1.5px solid var(--border);
+  padding: 8px 12px;
+  text-align: left;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--secondary);
+  white-space: nowrap;
+}
+.corrections-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.corrections-table tr:last-child td { border-bottom: none; }
+.corr-field { white-space: nowrap; font-size: 0.78rem; }
+.corr-field code {
+  background: var(--offwhite);
+  padding: 2px 5px;
+  border-radius: 4px;
+  font-size: 0.78rem;
+}
+.corr-val { max-width: 180px; word-break: break-word; }
+.corr-file { max-width: 160px; word-break: break-word; font-size: 0.78rem; }
+.corr-why { max-width: 200px; word-break: break-word; color: var(--secondary); }

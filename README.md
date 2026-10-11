@@ -420,3 +420,31 @@ the Railway UI (Variables → Add Reference). Shared Variables are opt-in per se
 ### Health check
 
 Railway's health check should use the `/login` route (GET returns 200).
+
+## Connecting a Custom Domain via Railway
+
+The review app (`review_app.py`) is designed to run behind Railway's reverse proxy with a custom domain.
+
+### Railway environment variables
+
+| Variable | Value | Purpose |
+|---|---|---|
+| `FLASK_HTTPS` | `1` | Enables `Secure` flag on session cookie |
+| `SESSION_COOKIE_DOMAIN` | `.review.yourdomain.com` (optional) | Scopes session cookie to a subdomain |
+| `SESSION_SECRET_KEY` | 32+ hex chars | Required for production session security |
+| `REVIEW_PASSWORD` | your password | Required — app refuses to start without it |
+
+### Setting up the domain
+
+1. In the **Railway dashboard** → your project → the review app service → **Settings** → **Networking** → click **Generate Domain** (or add your custom domain).
+2. Set `FLASK_HTTPS=1` as a service variable (the app sets `SESSION_COOKIE_SECURE=True` automatically).
+3. Point your DNS CNAME to the Railway-provided hostname. Railway handles the TLS certificate automatically.
+4. The app uses Werkzeug's `ProxyFix` middleware, so `url_for()` generates correct `https://` URLs even though Flask sees an internal HTTP connection.
+
+### Testing locally before deploying
+
+```bash
+REVIEW_PASSWORD=test FLASK_HTTPS=0 .venv/bin/python review_app.py
+```
+
+No DNS changes are made by this app — all DNS configuration happens in your registrar or Cloudflare dashboard.

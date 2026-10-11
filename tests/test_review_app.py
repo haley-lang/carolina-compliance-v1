@@ -1618,3 +1618,597 @@ def test_source_page_url_uses_original_for_image_attachment(authed_client, mock_
     with patch("review_app._ie_table", return_value=mock_ie_table):
         resp = authed_client.get("/detail/recDETAIL")
     assert b"cdn.airtable.com/page.png" in resp.data
+
+
+# ── Full-field editable detail page tests ─────────────────────────────────────
+
+def _make_cert_fixture(raw, source_filename="verify_test.json", record_id=None,
+                        named_insured=None, review_status="Pending Review",
+                        confidence=0.98):
+    """Helper to build an Airtable-record-shaped fixture from a raw JSON dict."""
+    return {
+        "id": record_id or "recFIXTURE",
+        "fields": {
+            "Source Filename": source_filename,
+            "Named Insured": named_insured or raw.get("named_insured") or "",
+            "Raw JSON": json.dumps(raw),
+            "Review Status": review_status,
+            "Confidence Score": confidence,
+        },
+    }
+
+
+class patch_table:
+    """Context manager that patches review_app._ie_table so .get(record_id) returns from a dict."""
+    def __init__(self, records_by_id):
+        self._records = records_by_id
+        self._patcher = None
+
+    def __enter__(self):
+        mock = MagicMock()
+
+        def _get(rid):
+            return self._records.get(rid)
+
+        mock.get.side_effect = _get
+        mock.all.return_value = list(self._records.values())
+        self._patcher = patch("review_app._ie_table", return_value=mock)
+        self._patcher.start()
+        return mock
+
+    def __exit__(self, *args):
+        self._patcher.stop()
+
+
+class patch_corrections_create:
+    """Patches review_app._corrections_table so .create(fields) calls fn(fields)."""
+    def __init__(self, fn):
+        self._fn = fn
+        self._patcher = None
+
+    def __enter__(self):
+        mock = MagicMock()
+        mock.create.side_effect = self._fn
+        self._patcher = patch("review_app._corrections_table", return_value=mock)
+        self._patcher.start()
+        return mock
+
+    def __exit__(self, *args):
+        self._patcher.stop()
+
+
+class patch_corrections_all:
+    """Patches review_app._corrections_table so .all() returns a given list."""
+    def __init__(self, rows):
+        self._rows = rows
+        self._patcher = None
+
+    def __enter__(self):
+        mock = MagicMock()
+        mock.all.return_value = self._rows
+        self._patcher = patch("review_app._corrections_table", return_value=mock)
+        self._patcher.start()
+        return mock
+
+    def __exit__(self, *args):
+        self._patcher.stop()
+
+
+# ── Corrections row field verification (item 5) ──────────────────────────────
+
+def test_approve_corrections_row_has_all_required_fields(authed_client):
+    """Approving with a changed named_insured writes one Corrections row with every required field."""
+    raw = {
+        "document_type": "COI",
+        "named_insured": "Original Co",
+        "policies": [{
+            "policy_type": "GL",
+            "policy_number": "GL-1",
+            "carrier": "Hartford",
+            "effective_date": "2025-01-01",
+            "expiration_date": "2026-01-01",
+            "coverage_limits": "$1M",
+            "policy_basis": "occurrence",
+            "additional_insured_checked": "not_checked",
+            "waiver_of_subrogation_checked": "not_checked",
+            "primary_noncontributory_checked": False,
+        }],
+    }
+    cert = _make_cert_fixture(raw, source_filename="verify_test.json", record_id="recV1",
+                               named_insured="Original Co")
+    created = []
+
+    def fake_corrections_create(fields):
+        created.append(fields)
+        return {"id": "recC1", "fields": fields}
+
+    with patch_table({"recV1": cert}):
+        with patch_corrections_create(fake_corrections_create):
+            # Build data that matches the fixture exactly, except named_insured
+            data = {
+                "csrf_token": _TEST_CSRF,
+                "action": "approve",
+                "why": "",
+                "named_insured": "Corrected Co",
+                "certificate_holder": "",
+                "document_type": "COI",
+                "policy_0_policy_type": "GL",
+                "policy_0_policy_number": "GL-1",
+                "policy_0_carrier": "Hartford",
+                "policy_0_effective_date": "2025-01-01",
+                "policy_0_expiration_date": "2026-01-01",
+                "policy_0_coverage_limits": "$1M",
+                "policy_0_policy_basis": "occurrence",
+                "policy_0_additional_insured_checked": "not_checked",
+                "policy_0_waiver_of_subrogation_checked": "not_checked",
+                "policy_0_primary_noncontributory_checked": "false",
+            }
+            authed_client.post("/action/recV1", data=data)
+
+    assert len(created) == 1, f"Expected 1 correction row, got {len(created)}: {[c.get('Field') for c in created]}"
+    row = created[0]
+    assert row["Field"] == "named_insured", f"Wrong field: {row.get('Field')}"
+    assert row["Old Value"] == "Original Co"
+    assert row["New Value"] == "Corrected Co"
+    assert row["Source Filename"] == "verify_test.json"
+    assert row["Incoming Extraction Record ID"] == "recV1"
+    assert row["Learning Status"] == "New"
+    assert row.get("Model"), "Model must be set"
+    assert row.get("Corrected At"), "Corrected At must be set"
+    assert row.get("Summary"), "Summary must be set"
+
+
+# ── Corrections page tests ────────────────────────────────────────────────────
+
+def test_corrections_page_renders(authed_client):
+    """GET /corrections returns 200."""
+    with patch_corrections_all([]):
+        resp = authed_client.get("/corrections")
+    assert resp.status_code == 200
+    assert b"Corrections" in resp.data
+
+
+def test_corrections_page_shows_rows(authed_client):
+    """Corrections page shows one row from the table."""
+    rows = [{"id": "r1", "fields": {
+        "Field": "named_insured",
+        "Old Value": "Old Co",
+        "New Value": "New Co",
+        "Source Filename": "test.json",
+        "Incoming Extraction Record ID": "rec001",
+        "Why (Haley's note)": "OCR",
+        "Model": "claude-test",
+        "Corrected At": "2026-10-11T00:00:00Z",
+        "Learning Status": "New",
+        "Summary": "Changed named_insured: 'Old Co' -> 'New Co'",
+    }}]
+    with patch_corrections_all(rows):
+        resp = authed_client.get("/corrections")
+    assert b"named_insured" in resp.data
+    assert b"Old Co" in resp.data
+    assert b"New Co" in resp.data
+
+
+def test_corrections_page_field_filter(authed_client):
+    """Corrections page field filter hides non-matching rows."""
+    rows = [
+        {"id": "r1", "fields": {"Field": "named_insured", "Old Value": "A", "New Value": "B",
+                                 "Learning Status": "New", "Model": "m", "Source Filename": "f.json",
+                                 "Incoming Extraction Record ID": "r", "Corrected At": "", "Summary": ""}},
+        {"id": "r2", "fields": {"Field": "carrier", "Old Value": "X", "New Value": "Y",
+                                 "Learning Status": "New", "Model": "m", "Source Filename": "f.json",
+                                 "Incoming Extraction Record ID": "r", "Corrected At": "", "Summary": ""}},
+    ]
+    with patch_corrections_all(rows):
+        resp = authed_client.get("/corrections?field=named_insured")
+    assert b"named_insured" in resp.data
+    # Only hidden-row test: the HTML will still include "carrier" in the filter dropdown,
+    # so we check that the carrier row's distinctive values don't appear.
+    html = resp.data.decode()
+    assert "Y" not in html.split("tbody")[1].split("</tbody>")[0] if "tbody" in html else True
+
+
+def test_corrections_page_unauthenticated_redirects_to_login(client):
+    resp = client.get("/corrections", follow_redirects=False)
+    assert resp.status_code == 302
+    assert "/login" in resp.headers["Location"]
+
+
+# ── Detail page placeholder & new field tests ────────────────────────────────
+
+def test_detail_empty_field_shows_placeholder(authed_client):
+    """Detail page renders inputs with placeholder=(blank) for empty fields."""
+    cert = _make_cert_fixture(
+        {"document_type": "COI", "named_insured": "", "policies": []},
+        source_filename="placeholder_test.json",
+        record_id="recP1",
+    )
+    with patch_table({"recP1": cert}):
+        resp = authed_client.get("/detail/recP1")
+    assert resp.status_code == 200
+    assert b'placeholder="(blank)"' in resp.data
+
+
+def test_detail_shows_description_of_operations(authed_client):
+    """Detail page renders description_of_operations textarea."""
+    cert = _make_cert_fixture(
+        {"document_type": "COI", "named_insured": "Test Co",
+         "description_of_operations": "AI is named as additional insured.",
+         "policies": []},
+        source_filename="desc_test.json",
+        record_id="recD1",
+    )
+    with patch_table({"recD1": cert}):
+        resp = authed_client.get("/detail/recD1")
+    assert b"AI is named as additional insured." in resp.data
+    assert b"description_of_operations" in resp.data
+
+
+def test_detail_shows_document_type_select(authed_client):
+    """document_type is a <select> with the five expected options."""
+    cert = _make_cert_fixture(
+        {"document_type": "endorsement", "named_insured": "X", "policies": []},
+        record_id="recDS1",
+    )
+    with patch_table({"recDS1": cert}):
+        resp = authed_client.get("/detail/recDS1")
+    html = resp.data.decode()
+    for opt in ("COI", "cancellation_notice", "endorsement", "reinstatement", "unknown"):
+        assert f'value="{opt}"' in html, f"missing option {opt}"
+
+
+def test_detail_shows_retro_date_input(authed_client):
+    """retro_date input is editable on the policy card."""
+    raw = {
+        "document_type": "COI",
+        "named_insured": "X",
+        "policies": [{
+            "policy_type": "GL", "policy_number": "GL-1", "carrier": "H",
+            "effective_date": "2025-01-01", "expiration_date": "2026-01-01",
+            "coverage_limits": "$1M", "policy_basis": "claims-made",
+            "retro_date": "2020-05-15",
+            "additional_insured_checked": "not_checked",
+            "waiver_of_subrogation_checked": "not_checked",
+            "primary_noncontributory_checked": False,
+        }],
+    }
+    cert = _make_cert_fixture(raw, record_id="recR1")
+    with patch_table({"recR1": cert}):
+        resp = authed_client.get("/detail/recR1")
+    html = resp.data.decode()
+    assert 'name="policy_0_retro_date"' in html
+    assert "2020-05-15" in html
+
+
+def test_detail_shows_tail_and_policy_number_invalid_toggles(authed_client):
+    """tail_coverage_evidenced and policy_number_invalid Yes/No toggles are rendered."""
+    raw = {
+        "document_type": "COI",
+        "named_insured": "X",
+        "policies": [{
+            "policy_type": "GL", "policy_number": "GL-1", "carrier": "H",
+            "effective_date": "2025-01-01", "expiration_date": "2026-01-01",
+            "coverage_limits": "$1M", "policy_basis": "occurrence",
+            "tail_coverage_evidenced": True,
+            "policy_number_invalid": False,
+            "additional_insured_checked": "not_checked",
+            "waiver_of_subrogation_checked": "not_checked",
+            "primary_noncontributory_checked": False,
+        }],
+    }
+    cert = _make_cert_fixture(raw, record_id="recT1")
+    with patch_table({"recT1": cert}):
+        resp = authed_client.get("/detail/recT1")
+    html = resp.data.decode()
+    assert 'name="policy_0_tail_coverage_evidenced"' in html
+    assert 'name="policy_0_policy_number_invalid"' in html
+
+
+def test_detail_shows_other_data_card_for_unknown_keys(authed_client):
+    """Keys outside the known schema render in the 'Other data' card."""
+    raw = {
+        "document_type": "COI",
+        "named_insured": "X",
+        "policies": [],
+        "mystery_field": "mystery_value",
+    }
+    cert = _make_cert_fixture(raw, record_id="recO1")
+    with patch_table({"recO1": cert}):
+        resp = authed_client.get("/detail/recO1")
+    html = resp.data.decode()
+    assert "Other data" in html
+    assert "mystery_field" in html
+    assert "mystery_value" in html
+
+
+def test_detail_other_data_card_hidden_when_no_unknown_keys(authed_client):
+    """'Other data' card header is omitted entirely when there are no unknown keys."""
+    raw = {
+        "document_type": "COI",
+        "named_insured": "X",
+        "certificate_holder": "Y",
+        "certificate_date": "2025-01-01",
+        "contact_emails": [],
+        "description_of_operations": "",
+        "confidence": 0.9,
+        "additional_insured_statement": {"present": False, "quote": None, "policies_named": None},
+        "waiver_of_subrogation_statement": {"present": False, "quote": None, "policies_named": None},
+        "policies": [],
+    }
+    cert = _make_cert_fixture(raw, record_id="recO2")
+    with patch_table({"recO2": cert}):
+        resp = authed_client.get("/detail/recO2")
+    # The card header "<div class='card-header'>Other data</div>" must NOT be present
+    # (the HTML comment "<!-- Other data ... -->" is always in the template).
+    assert b'class="card-header">Other data' not in resp.data
+
+
+def test_detail_statement_quote_textarea_editable(authed_client):
+    """Statement quote renders as an editable textarea with the ai_stmt_quote name."""
+    raw = {
+        "document_type": "COI",
+        "named_insured": "X",
+        "additional_insured_statement": {"present": True, "quote": "AI is a listed insured.", "policies_named": ["GL"]},
+        "waiver_of_subrogation_statement": {"present": False, "quote": None, "policies_named": None},
+        "policies": [],
+    }
+    cert = _make_cert_fixture(raw, record_id="recS1")
+    with patch_table({"recS1": cert}):
+        resp = authed_client.get("/detail/recS1")
+    html = resp.data.decode()
+    assert 'name="ai_stmt_quote"' in html
+    assert "AI is a listed insured." in html
+    assert 'name="ai_stmt_policies_named"' in html
+    assert 'name="ai_stmt_present"' in html
+
+
+# ── Approve: new editable fields update Raw JSON ─────────────────────────────
+
+def test_approve_description_of_operations_edit_writes_correction(authed_client,
+                                                                   mock_ie_table, mock_corr_table):
+    """Editing description_of_operations writes a Corrections row and updates Raw JSON."""
+    raw = {
+        "document_type": "COI",
+        "named_insured": "D Co",
+        "certificate_holder": "GC",
+        "description_of_operations": "Original.",
+        "policies": [{
+            "policy_type": "GL", "policy_number": "GL-1", "carrier": "H",
+            "effective_date": "2025-01-01", "expiration_date": "2026-01-01",
+            "coverage_limits": "$1M", "policy_basis": "occurrence",
+            "additional_insured_checked": "not_checked",
+            "waiver_of_subrogation_checked": "not_checked",
+            "primary_noncontributory_checked": False,
+        }],
+    }
+    rec = {"id": "recD2", "fields": {"Source Filename": "d.json", "Named Insured": "D Co",
+                                       "Raw JSON": json.dumps(raw), "Review Status": "Pending Review",
+                                       "Confidence Score": 0.98}}
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table), \
+         patch("review_app._corrections_table", return_value=mock_corr_table):
+        data = {
+            "csrf_token": _TEST_CSRF, "action": "approve", "why": "",
+            "named_insured": "D Co", "certificate_holder": "GC",
+            "document_type": "COI",
+            "description_of_operations": "Updated description.",
+            "policy_0_policy_type": "GL",
+            "policy_0_policy_number": "GL-1",
+            "policy_0_carrier": "H",
+            "policy_0_effective_date": "2025-01-01",
+            "policy_0_expiration_date": "2026-01-01",
+            "policy_0_coverage_limits": "$1M",
+            "policy_0_policy_basis": "occurrence",
+            "policy_0_additional_insured_checked": "not_checked",
+            "policy_0_waiver_of_subrogation_checked": "not_checked",
+            "policy_0_primary_noncontributory_checked": "false",
+        }
+        authed_client.post("/action/recD2", data=data)
+
+    # One Correction row for description_of_operations
+    fields_logged = [c[0][0]["Field"] for c in mock_corr_table.create.call_args_list]
+    assert fields_logged == ["description_of_operations"], f"Unexpected corrections: {fields_logged}"
+    row = mock_corr_table.create.call_args[0][0]
+    assert row["Field"] == "description_of_operations"
+    assert row["New Value"] == "Updated description."
+    # Raw JSON was updated
+    saved = json.loads(mock_ie_table.update.call_args[0][1]["Raw JSON"])
+    assert saved["description_of_operations"] == "Updated description."
+
+
+def test_approve_statement_edit_writes_correction(authed_client, mock_ie_table, mock_corr_table):
+    """Editing additional_insured_statement.present writes a Corrections row."""
+    raw = {
+        "document_type": "COI",
+        "named_insured": "S Co",
+        "certificate_holder": "GC",
+        "additional_insured_statement": {"present": False, "quote": None, "policies_named": None},
+        "policies": [{
+            "policy_type": "GL", "policy_number": "GL-1", "carrier": "H",
+            "effective_date": "2025-01-01", "expiration_date": "2026-01-01",
+            "coverage_limits": "$1M", "policy_basis": "occurrence",
+            "additional_insured_checked": "not_checked",
+            "waiver_of_subrogation_checked": "not_checked",
+            "primary_noncontributory_checked": False,
+        }],
+    }
+    rec = {"id": "recST", "fields": {"Source Filename": "s.json", "Named Insured": "S Co",
+                                        "Raw JSON": json.dumps(raw), "Review Status": "Pending Review",
+                                        "Confidence Score": 0.98}}
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table), \
+         patch("review_app._corrections_table", return_value=mock_corr_table):
+        data = {
+            "csrf_token": _TEST_CSRF, "action": "approve", "why": "",
+            "named_insured": "S Co", "certificate_holder": "GC",
+            "document_type": "COI",
+            "ai_stmt_present": "true",
+            "ai_stmt_quote": "now present",
+            "ai_stmt_policies_named": "GL, WC",
+            "policy_0_policy_type": "GL",
+            "policy_0_policy_number": "GL-1",
+            "policy_0_carrier": "H",
+            "policy_0_effective_date": "2025-01-01",
+            "policy_0_expiration_date": "2026-01-01",
+            "policy_0_coverage_limits": "$1M",
+            "policy_0_policy_basis": "occurrence",
+            "policy_0_additional_insured_checked": "not_checked",
+            "policy_0_waiver_of_subrogation_checked": "not_checked",
+            "policy_0_primary_noncontributory_checked": "false",
+        }
+        authed_client.post("/action/recST", data=data)
+
+    # Expect at least 2 corrections (present + quote; policies_named may be third)
+    assert mock_corr_table.create.call_count >= 2
+    fields_logged = [c[0][0]["Field"] for c in mock_corr_table.create.call_args_list]
+    assert "additional_insured_statement.present" in fields_logged
+    assert "additional_insured_statement.quote" in fields_logged
+    # Raw JSON reflects new statement
+    saved = json.loads(mock_ie_table.update.call_args[0][1]["Raw JSON"])
+    assert saved["additional_insured_statement"]["present"] is True
+    assert saved["additional_insured_statement"]["quote"] == "now present"
+    assert saved["additional_insured_statement"]["policies_named"] == ["GL", "WC"]
+
+
+def test_approve_document_type_edit_updates_airtable_column(authed_client, mock_ie_table, mock_corr_table):
+    """Changing document_type should write to Raw JSON and the Airtable Document Type column."""
+    raw = {
+        "document_type": "COI",
+        "named_insured": "Doc Co",
+        "certificate_holder": "GC",
+        "policies": [{
+            "policy_type": "GL", "policy_number": "GL-1", "carrier": "H",
+            "effective_date": "2025-01-01", "expiration_date": "2026-01-01",
+            "coverage_limits": "$1M", "policy_basis": "occurrence",
+            "additional_insured_checked": "not_checked",
+            "waiver_of_subrogation_checked": "not_checked",
+            "primary_noncontributory_checked": False,
+        }],
+    }
+    rec = {"id": "recDT", "fields": {"Source Filename": "d.json", "Named Insured": "Doc Co",
+                                        "Raw JSON": json.dumps(raw), "Review Status": "Pending Review",
+                                        "Confidence Score": 0.98}}
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table), \
+         patch("review_app._corrections_table", return_value=mock_corr_table):
+        data = {
+            "csrf_token": _TEST_CSRF, "action": "approve", "why": "",
+            "named_insured": "Doc Co", "certificate_holder": "GC",
+            "document_type": "endorsement",
+            "policy_0_policy_type": "GL",
+            "policy_0_policy_number": "GL-1",
+            "policy_0_carrier": "H",
+            "policy_0_effective_date": "2025-01-01",
+            "policy_0_expiration_date": "2026-01-01",
+            "policy_0_coverage_limits": "$1M",
+            "policy_0_policy_basis": "occurrence",
+            "policy_0_additional_insured_checked": "not_checked",
+            "policy_0_waiver_of_subrogation_checked": "not_checked",
+            "policy_0_primary_noncontributory_checked": "false",
+        }
+        authed_client.post("/action/recDT", data=data)
+
+    fields_written = mock_ie_table.update.call_args[0][1]
+    assert fields_written.get("Document Type") == "endorsement"
+    saved = json.loads(fields_written["Raw JSON"])
+    assert saved["document_type"] == "endorsement"
+
+
+def test_approve_tail_coverage_edit_writes_correction(authed_client, mock_ie_table, mock_corr_table):
+    """Changing tail_coverage_evidenced writes a Corrections row."""
+    raw = {
+        "document_type": "COI",
+        "named_insured": "T Co",
+        "certificate_holder": "GC",
+        "policies": [{
+            "policy_type": "GL", "policy_number": "GL-1", "carrier": "H",
+            "effective_date": "2025-01-01", "expiration_date": "2026-01-01",
+            "coverage_limits": "$1M", "policy_basis": "claims-made",
+            "tail_coverage_evidenced": False,
+            "additional_insured_checked": "not_checked",
+            "waiver_of_subrogation_checked": "not_checked",
+            "primary_noncontributory_checked": False,
+        }],
+    }
+    rec = {"id": "recTA", "fields": {"Source Filename": "t.json", "Named Insured": "T Co",
+                                        "Raw JSON": json.dumps(raw), "Review Status": "Pending Review",
+                                        "Confidence Score": 0.98}}
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table), \
+         patch("review_app._corrections_table", return_value=mock_corr_table):
+        data = {
+            "csrf_token": _TEST_CSRF, "action": "approve", "why": "",
+            "named_insured": "T Co", "certificate_holder": "GC",
+            "document_type": "COI",
+            "policy_0_policy_type": "GL",
+            "policy_0_policy_number": "GL-1",
+            "policy_0_carrier": "H",
+            "policy_0_effective_date": "2025-01-01",
+            "policy_0_expiration_date": "2026-01-01",
+            "policy_0_coverage_limits": "$1M",
+            "policy_0_policy_basis": "claims-made",
+            "policy_0_additional_insured_checked": "not_checked",
+            "policy_0_waiver_of_subrogation_checked": "not_checked",
+            "policy_0_primary_noncontributory_checked": "false",
+            "policy_0_tail_coverage_evidenced": "true",
+        }
+        authed_client.post("/action/recTA", data=data)
+
+    fields_logged = [c[0][0]["Field"] for c in mock_corr_table.create.call_args_list]
+    assert "policies[0].tail_coverage_evidenced" in fields_logged
+
+
+# ── export_gold_candidates verification (item 6) ─────────────────────────────
+
+def test_export_gold_candidates_all_required_fields():
+    """export_gold_candidates picks up 'New' corrections and writes all required fields."""
+    import json as _json
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import patch as _patch
+    import export_gold_candidates
+
+    mock_records = [{"id": "recTEST", "fields": {
+        "Source Filename": "export_test.json",
+        "Incoming Extraction Record ID": "recABC",
+        "Field": "named_insured",
+        "Old Value": "Old Co",
+        "New Value": "New Co",
+        "Why (Haley's note)": "OCR error",
+        "Model": "claude-test",
+        "Corrected At": "2026-10-11T12:00:00.000Z",
+        "Learning Status": "New",
+    }}]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        cand_path = tmp_path / "rtr_gold_candidates.json"
+        forbidden = tmp_path / "rtr_gold.json"
+
+        with _patch.object(export_gold_candidates, "CANDIDATES_PATH", cand_path), \
+             _patch.object(export_gold_candidates, "GOLD_DIR", tmp_path), \
+             _patch.object(export_gold_candidates, "_FORBIDDEN_PATH", forbidden), \
+             _patch("export_gold_candidates.config") as mock_cfg, \
+             _patch("export_gold_candidates.clean_base_id", side_effect=lambda x: x), \
+             _patch("export_gold_candidates.Api") as mock_api:
+
+            mock_cfg.AIRTABLE_API_KEY = "fakekey"
+            mock_cfg.AIRTABLE_BASE_ID = "appFAKE"
+            table = mock_api.return_value.table.return_value
+            table.all.return_value = mock_records
+
+            export_gold_candidates.run()
+
+        assert cand_path.exists(), "candidates file should be created"
+        candidates = _json.loads(cand_path.read_text())
+        assert isinstance(candidates, list)
+        assert len(candidates) == 1
+        c = candidates[0]
+        assert c["source_filename"] == "export_test.json"
+        assert c["record_id"] == "recABC"
+        assert c["field_path"] == "named_insured"
+        assert c["old_value"] == "Old Co"
+        assert c["corrected_value"] == "New Co"
+        assert c["why"] == "OCR error"
+        assert c["model"] == "claude-test"
+        assert c["status"] == "candidate"

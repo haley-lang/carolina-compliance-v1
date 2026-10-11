@@ -99,10 +99,20 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SESSION_SECRET_KEY") or (REVIEW_PASSWORD + "_review_secret_v1")
 app.jinja_env.globals["enumerate"] = enumerate
 
+# Reverse proxy / custom domain support — Railway terminates TLS and forwards HTTP.
+# ProxyFix makes url_for() generate correct https:// URLs behind Railway's proxy.
+from werkzeug.middleware.proxy_fix import ProxyFix
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+
 _https_mode = os.environ.get("FLASK_HTTPS", "").lower() in ("1", "true", "yes")
 app.config["SESSION_COOKIE_SECURE"] = _https_mode
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+
+# Optional: scope session cookie to a specific (sub)domain, e.g. ".review.example.com"
+_cookie_domain = os.environ.get("SESSION_COOKIE_DOMAIN", "").strip()
+if _cookie_domain:
+    app.config["SESSION_COOKIE_DOMAIN"] = _cookie_domain
 
 
 # ── CSRF ─────────────────────────────────────────────────────────────────────
@@ -700,16 +710,70 @@ def action(record_id):
     abort(400)
 
 
-def _handle_approve(table, record_id, source_filename, original_data, why_note, now_iso):
-    """Apply edits, write Corrections rows, set Review Status. Returns corrections count."""
-    corrections = []  # list of (field_path, old_val, new_val)
+_TOP_LEVEL_TEXT_FIELDS = ("named_insured", "certificate_holder",
+                          "certificate_date", "description_of_operations")
 
-    # Top-level text fields
-    for field in ("named_insured", "certificate_holder"):
-        submitted = (request.form.get(field) or "").strip()
-        original = (original_data.get(field) or "").strip()
+_STATEMENT_FIELDS = (
+    ("additional_insured_statement", "ai_stmt"),
+    ("waiver_of_subrogation_statement", "wos_stmt"),
+)
+
+
+def _collect_corrections(original_data):
+    """Compare submitted form values with original_data; return (corrections, new_policies).
+
+    corrections is a list of (field_path, old_str, new_str) tuples.
+    new_policies is the updated policies list reflecting form submissions.
+
+    A field is only compared if it's present in the form submission — this keeps
+    older form submissions (that don't include newer fields like document_type)
+    from spuriously logging corrections.
+    """
+    corrections = []
+
+    # Top-level text fields (named_insured, certificate_holder, certificate_date,
+    # description_of_operations, document_type)
+    for field in _TOP_LEVEL_TEXT_FIELDS + ("document_type",):
+        if field not in request.form:
+            continue
+        submitted = (request.form.get(field) or "").strip() or None
+        original = original_data.get(field)
+        if isinstance(original, str):
+            original = original.strip() or None
+        elif original is None:
+            original = None
+        else:
+            original = str(original)
         if submitted != original:
-            corrections.append((field, original, submitted))
+            corrections.append((field, str(original or ""), str(submitted or "")))
+
+    # Statement fields (additional_insured_statement, waiver_of_subrogation_statement)
+    for stmt_key, form_prefix in _STATEMENT_FIELDS:
+        orig_stmt = original_data.get(stmt_key) or {}
+        # Only compare if present in form (defensive — old form submissions won't have these)
+        if f"{form_prefix}_present" in request.form or f"{form_prefix}_quote" in request.form \
+                or f"{form_prefix}_policies_named" in request.form:
+            new_present = request.form.get(f"{form_prefix}_present") == "true"
+            new_quote = (request.form.get(f"{form_prefix}_quote") or "").strip() or None
+            raw_named = (request.form.get(f"{form_prefix}_policies_named") or "").strip()
+            new_named = [p.strip() for p in raw_named.split(",") if p.strip()] or None
+
+            orig_present = bool(orig_stmt.get("present"))
+            if new_present != orig_present:
+                corrections.append((f"{stmt_key}.present", str(orig_present), str(new_present)))
+            orig_quote = orig_stmt.get("quote") or ""
+            if (new_quote or "") != orig_quote:
+                corrections.append((f"{stmt_key}.quote", orig_quote, str(new_quote or "")))
+            orig_named_list = orig_stmt.get("policies_named") or []
+            if not isinstance(orig_named_list, list):
+                orig_named_list = []
+            new_named_cmp = new_named or []
+            if new_named_cmp != orig_named_list:
+                corrections.append((
+                    f"{stmt_key}.policies_named",
+                    ", ".join(orig_named_list),
+                    ", ".join(new_named_cmp),
+                ))
 
     # Policy table
     original_policies = original_data.get("policies") or []
@@ -718,9 +782,14 @@ def _handle_approve(table, record_id, source_filename, original_data, why_note, 
         new_pol = dict(orig)
         for pf in ("policy_type", "policy_number", "carrier",
                    "effective_date", "expiration_date",
-                   "coverage_limits", "policy_basis"):
-            submitted = (request.form.get(f"policy_{i}_{pf}") or "").strip() or None
-            original_val = (orig.get(pf) or None)
+                   "coverage_limits", "policy_basis",
+                   "retro_date"):
+            form_key = f"policy_{i}_{pf}"
+            if form_key not in request.form:
+                # Preserve original if not submitted
+                continue
+            submitted = (request.form.get(form_key) or "").strip() or None
+            original_val = orig.get(pf)
             if isinstance(original_val, str):
                 original_val = original_val.strip() or None
             if submitted != original_val:
@@ -728,19 +797,71 @@ def _handle_approve(table, record_id, source_filename, original_data, why_note, 
             new_pol[pf] = submitted if submitted is not None else orig.get(pf)
         # Tri-state checkboxes (AI and WoS)
         for chk in ("additional_insured_checked", "waiver_of_subrogation_checked"):
-            submitted = _norm_tristate(request.form.get(f"policy_{i}_{chk}"))
+            form_key = f"policy_{i}_{chk}"
+            if form_key not in request.form:
+                continue
+            submitted = _norm_tristate(request.form.get(form_key))
             original = _norm_tristate(orig.get(chk))
             if submitted != original:
                 corrections.append((f"policies[{i}].{chk}", original, submitted))
             new_pol[chk] = submitted
-        # Boolean checkbox (P&N)
-        submitted_bool = request.form.get(f"policy_{i}_primary_noncontributory_checked") == "true"
-        original_bool = bool(orig.get("primary_noncontributory_checked"))
-        if submitted_bool != original_bool:
-            corrections.append((f"policies[{i}].primary_noncontributory_checked",
-                                 str(original_bool), str(submitted_bool)))
-        new_pol["primary_noncontributory_checked"] = submitted_bool
+        # Boolean checkboxes (P&N, tail, policy_number_invalid)
+        for bool_field in ("primary_noncontributory_checked",
+                           "tail_coverage_evidenced",
+                           "policy_number_invalid"):
+            form_key = f"policy_{i}_{bool_field}"
+            if form_key not in request.form:
+                continue
+            submitted_bool = request.form.get(form_key) == "true"
+            original_bool = bool(orig.get(bool_field))
+            if submitted_bool != original_bool:
+                corrections.append((f"policies[{i}].{bool_field}",
+                                     str(original_bool), str(submitted_bool)))
+            new_pol[bool_field] = submitted_bool
         new_policies.append(new_pol)
+
+    return corrections, new_policies
+
+
+def _apply_form_to_data(new_data, original_data, new_policies):
+    """Apply submitted form values (statement + top-level text + document_type) to new_data.
+
+    Only overwrites fields that are present in the form submission — a missing form
+    key leaves the original value intact.
+    """
+    new_data["policies"] = new_policies
+
+    # Top-level text + document_type (only update if submitted)
+    for field in _TOP_LEVEL_TEXT_FIELDS + ("document_type",):
+        if field in request.form:
+            submitted = (request.form.get(field) or "").strip() or None
+            new_data[field] = submitted
+
+    # Statement fields — only overwrite if submitted
+    for stmt_key, form_prefix in _STATEMENT_FIELDS:
+        if f"{form_prefix}_present" in request.form or f"{form_prefix}_quote" in request.form \
+                or f"{form_prefix}_policies_named" in request.form:
+            new_present = request.form.get(f"{form_prefix}_present") == "true"
+            new_quote = (request.form.get(f"{form_prefix}_quote") or "").strip() or None
+            raw_named = (request.form.get(f"{form_prefix}_policies_named") or "").strip()
+            new_named = [p.strip() for p in raw_named.split(",") if p.strip()] or None
+            new_data[stmt_key] = {
+                "present": new_present,
+                "quote": new_quote,
+                "policies_named": new_named,
+            }
+
+
+_AIRTABLE_FIELD_NAMES = {
+    "named_insured": "Named Insured",
+    "certificate_holder": "Certificate Holder",
+    "document_type": "Document Type",
+}
+
+
+def _handle_approve(table, record_id, source_filename, original_data, why_note, now_iso):
+    """Apply edits, write Corrections rows, set Review Status. Returns corrections count."""
+    corrections, new_policies = _collect_corrections(original_data)
 
     # Write Corrections rows
     for field_path, old_val, new_val in corrections:
@@ -749,17 +870,13 @@ def _handle_approve(table, record_id, source_filename, original_data, why_note, 
     review_status = REVIEW_STATUS_APPROVED_EDITED if corrections else REVIEW_STATUS_APPROVED
 
     update = {"Review Status": review_status}
-    _airtable_field_names = {
-        "named_insured": "Named Insured",
-        "certificate_holder": "Certificate Holder",
-    }
     if corrections:
         new_data = dict(original_data)
-        new_data["policies"] = new_policies
-        for fp, old, new in corrections:
-            if fp in _airtable_field_names:
-                new_data[fp] = new
-                update[_airtable_field_names[fp]] = new
+        _apply_form_to_data(new_data, original_data, new_policies)
+        # Mirror edits to Airtable's top-level columns if the field maps directly
+        for fp, _old, _new in corrections:
+            if fp in _AIRTABLE_FIELD_NAMES:
+                update[_AIRTABLE_FIELD_NAMES[fp]] = new_data.get(fp) or ""
         update["Raw JSON"] = json.dumps(new_data, indent=2)
 
     table.update(record_id, update, typecast=True)
@@ -768,62 +885,79 @@ def _handle_approve(table, record_id, source_filename, original_data, why_note, 
 
 def _handle_save_draft(table, record_id, source_filename, original_data, why_note, now_iso):
     """Save edits + write Corrections rows without changing Review Status."""
-    corrections = []
-
-    for field in ("named_insured", "certificate_holder"):
-        submitted = (request.form.get(field) or "").strip()
-        original = (original_data.get(field) or "").strip()
-        if submitted != original:
-            corrections.append((field, original, submitted))
-
-    original_policies = original_data.get("policies") or []
-    new_policies = []
-    for i, orig in enumerate(original_policies):
-        new_pol = dict(orig)
-        for pf in ("policy_type", "policy_number", "carrier",
-                   "effective_date", "expiration_date",
-                   "coverage_limits", "policy_basis"):
-            submitted = (request.form.get(f"policy_{i}_{pf}") or "").strip() or None
-            original_val = orig.get(pf) or None
-            if isinstance(original_val, str):
-                original_val = original_val.strip() or None
-            if submitted != original_val:
-                corrections.append((f"policies[{i}].{pf}", str(original_val or ""), str(submitted or "")))
-            new_pol[pf] = submitted if submitted is not None else orig.get(pf)
-        # Tri-state checkboxes (AI and WoS)
-        for chk in ("additional_insured_checked", "waiver_of_subrogation_checked"):
-            submitted = _norm_tristate(request.form.get(f"policy_{i}_{chk}"))
-            original = _norm_tristate(orig.get(chk))
-            if submitted != original:
-                corrections.append((f"policies[{i}].{chk}", original, submitted))
-            new_pol[chk] = submitted
-        # Boolean checkbox (P&N)
-        submitted_bool = request.form.get(f"policy_{i}_primary_noncontributory_checked") == "true"
-        original_bool = bool(orig.get("primary_noncontributory_checked"))
-        if submitted_bool != original_bool:
-            corrections.append((f"policies[{i}].primary_noncontributory_checked",
-                                 str(original_bool), str(submitted_bool)))
-        new_pol["primary_noncontributory_checked"] = submitted_bool
-        new_policies.append(new_pol)
+    corrections, new_policies = _collect_corrections(original_data)
 
     for field_path, old_val, new_val in corrections:
         _write_correction(source_filename, record_id, field_path, old_val, new_val, why_note, now_iso)
 
     if corrections:
         new_data = dict(original_data)
-        new_data["policies"] = new_policies
+        _apply_form_to_data(new_data, original_data, new_policies)
         update = {"Raw JSON": json.dumps(new_data, indent=2)}
-        _airtable_field_names = {
-            "named_insured": "Named Insured",
-            "certificate_holder": "Certificate Holder",
-        }
-        for fp, old, new_val in corrections:
-            if fp in _airtable_field_names:
-                new_data[fp] = new_val
-                update[_airtable_field_names[fp]] = new_val
+        for fp, _old, _new in corrections:
+            if fp in _AIRTABLE_FIELD_NAMES:
+                update[_AIRTABLE_FIELD_NAMES[fp]] = new_data.get(fp) or ""
         table.update(record_id, update, typecast=True)
 
     return len(corrections)
+
+
+# ── Corrections page ─────────────────────────────────────────────────────────
+
+@app.route("/corrections")
+@login_required
+def corrections_page():
+    """Read-only view of all Corrections rows, with filters."""
+    table = _corrections_table()
+    field_filter = request.args.get("field", "").strip()
+    model_filter = request.args.get("model", "").strip()
+    status_filter = request.args.get("status", "").strip()
+
+    all_records = table.all()
+    rows = []
+    fields_set = set()
+    models_set = set()
+    statuses_set = set()
+
+    for rec in all_records:
+        f = rec["fields"]
+        fn = f.get("Field") or ""
+        mo = f.get("Model") or ""
+        st = f.get("Learning Status") or ""
+        fields_set.add(fn)
+        models_set.add(mo)
+        statuses_set.add(st)
+        if field_filter and fn != field_filter:
+            continue
+        if model_filter and mo != model_filter:
+            continue
+        if status_filter and st != status_filter:
+            continue
+        rows.append({
+            "id": rec["id"],
+            "summary": f.get("Summary") or "",
+            "source_filename": f.get("Source Filename") or "",
+            "record_id": f.get("Incoming Extraction Record ID") or "",
+            "field": fn,
+            "old_value": f.get("Old Value") or "",
+            "new_value": f.get("New Value") or "",
+            "why": f.get("Why (Haley's note)") or "",
+            "model": mo,
+            "corrected_at": f.get("Corrected At") or "",
+            "status": st,
+        })
+
+    return render_template(
+        "corrections.html",
+        rows=rows,
+        total=len(all_records),
+        fields=sorted(fn for fn in fields_set if fn),
+        models=sorted(mo for mo in models_set if mo),
+        statuses=sorted(st for st in statuses_set if st),
+        field_filter=field_filter,
+        model_filter=model_filter,
+        status_filter=status_filter,
+    )
 
 
 def _write_correction(source_filename, record_id, field_path, old_val, new_val, why_note, corrected_at):

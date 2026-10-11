@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CCS — Corrections</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='ccs_icon.svg') }}">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='review.css') }}">
+</head>
+<body>
+<nav class="topnav">
+  <a href="/queue" class="topnav-logo" aria-label="Carolina Compliance Solutions">
+    <img src="{{ url_for('static', filename='ccs_logo_dark.svg') }}" alt="CCS">
+  </a>
+  <div class="topnav-links">
+    <a href="/queue" class="nav-link">Queue</a>
+    <a href="/corrections" class="nav-link">Corrections</a>
+    <a href="/logout" class="btn btn-gold btn-sm">Sign out</a>
+  </div>
+</nav>
+<div class="page-wrap">
+  <h1 class="headline mb-16">Corrections <em>({{ total }} total)</em></h1>
+
+  <!-- Filter bar -->
+  <form method="get" class="corrections-filter mb-24">
+    <div class="d-flex gap-8 flex-wrap align-center">
+      <select name="field" class="filter-select">
+        <option value="">All fields</option>
+        {% for f in fields %}
+          <option value="{{ f }}" {% if f == field_filter %}selected{% endif %}>{{ f }}</option>
+        {% endfor %}
+      </select>
+      <select name="model" class="filter-select">
+        <option value="">All models</option>
+        {% for m in models %}
+          <option value="{{ m }}" {% if m == model_filter %}selected{% endif %}>{{ m }}</option>
+        {% endfor %}
+      </select>
+      <select name="status" class="filter-select">
+        <option value="">All statuses</option>
+        {% for s in statuses %}
+          <option value="{{ s }}" {% if s == status_filter %}selected{% endif %}>{{ s }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit" class="btn btn-secondary btn-sm">Filter</button>
+      {% if field_filter or model_filter or status_filter %}
+        <a href="/corrections" class="btn btn-sm" style="color:var(--secondary)">Clear</a>
+      {% endif %}
+    </div>
+  </form>
+
+  {% if rows %}
+  <div class="card">
+    <div class="card-header">{{ rows | length }} correction(s) shown</div>
+    <div class="corrections-table-wrap">
+      <table class="corrections-table">
+        <thead>
+          <tr>
+            <th>Field</th>
+            <th>Old Value</th>
+            <th>New Value</th>
+            <th>Source File</th>
+            <th>Why</th>
+            <th>Model</th>
+            <th>Status</th>
+            <th>Date</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+          <tr>
+            <td class="corr-field"><code>{{ row.field }}</code></td>
+            <td class="corr-val">{{ row.old_value or '—' }}</td>
+            <td class="corr-val">{{ row.new_value or '—' }}</td>
+            <td class="corr-file">
+              {% if row.record_id %}
+                <a href="/detail/{{ row.record_id }}" class="small">{{ row.source_filename }}</a>
+              {% else %}
+                {{ row.source_filename }}
+              {% endif %}
+            </td>
+            <td class="corr-why small">{{ row.why or '—' }}</td>
+            <td class="small">{{ row.model or '—' }}</td>
+            <td><span class="flag flag-muted small">{{ row.status or '—' }}</span></td>
+            <td class="small text-secondary">{{ row.corrected_at[:10] if row.corrected_at else '—' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% else %}
+  <div class="card card-body text-secondary">
+    No corrections match the current filters.
+  </div>
+  {% endif %}
+</div>
+</body>
+</html>
