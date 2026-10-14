@@ -8,10 +8,10 @@ Usage:
 Hard guarantees (enforced at runtime, not just convention):
   - Only POSTs to POST /inboxes/{id}/imported_messages. No send, reply,
     forward, draft, or delete endpoints are ever called.
-  - Refuses to run against any inbox other than inb_k4xex (General Box).
+  - Refuses to run against any inbox other than inb_k4xih (COI@).
   - sender.handle and every "to" address must end in @carolinacompliancesolutions.com.
   - Before any --apply, GETs the channel list and refuses if sender or to
-    address matches any Front channel address (prevents routing to COI@/Compliance@).
+    address matches any Front channel address (prevents routing to wrong inbox).
   - is_inbound is always True.
   - thread_ref = external_id so every certificate becomes its own conversation.
   - FRONT_API_TOKEN loaded from .env; never printed, logged, or committed.
@@ -35,7 +35,7 @@ import config  # provides FRONT_API_TOKEN via env
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 FRONT_API_BASE     = "https://api2.frontapp.com"
-ALLOWED_INBOX_ID   = "inb_k4xex"          # General Box — only valid target
+ALLOWED_INBOX_ID   = "inb_k4xih"          # COI@ — only valid target
 REQUIRED_DOMAIN    = "@carolinacompliancesolutions.com"
 # rtr-import@ belongs to no Front channel; prevents routing to COI@/Compliance@
 SENDER_HANDLE      = "rtr-import@carolinacompliancesolutions.com"
@@ -53,7 +53,7 @@ LEDGER_PATH  = Path(__file__).parent / "front_imported.json"
 def _require_inbox(inbox_id: str) -> None:
     if inbox_id != ALLOWED_INBOX_ID:
         raise ValueError(
-            f"Refused: inbox '{inbox_id}' is not the allowed General Box "
+            f"Refused: inbox '{inbox_id}' is not the allowed COI@ inbox "
             f"({ALLOWED_INBOX_ID}). Aborting."
         )
 
@@ -240,8 +240,13 @@ def import_message(msg: dict, token: str) -> dict:
 def verify_imports(imported_results: list[dict], token: str) -> None:
     """GET each created conversation and report threading, inbox, tags, attachments.
 
-    Searches General Box for conversations matching our import subjects,
-    then GETs each conversation to verify isolation, tags, and attachment.
+    Checks (per the import spec):
+      (a) Two separate conversations (each cert its own conv)
+      (b) Each in exactly one inbox — COI@ — and NOT in Compliance@ or haley@
+      (c) RTR tag present
+      (d) Whether a ticket was auto-created (ticket_ids field)
+      (e) Attachment present
+      (f) Message did not go through Gmail (no outbound/sent messages)
     """
     import requests
     import time as _time
@@ -260,7 +265,7 @@ def verify_imports(imported_results: list[dict], token: str) -> None:
     print(f"\n[VERIFY] Waiting 3 s for Front to process imports…")
     _time.sleep(3)
 
-    # GET recent conversations in General Box
+    # GET recent conversations in COI@ inbox
     url = f"{FRONT_API_BASE}/inboxes/{ALLOWED_INBOX_ID}/conversations"
     resp = requests.get(url, headers=headers, params={"limit": 25}, timeout=15)
     if resp.status_code != 200:
@@ -276,7 +281,7 @@ def verify_imports(imported_results: list[dict], token: str) -> None:
                 found[filename] = conv
                 break
 
-    print(f"\n[VERIFY] Found {len(found)}/{len(subjects_to_check)} conversation(s) in General Box")
+    print(f"\n[VERIFY] Found {len(found)}/{len(subjects_to_check)} conversation(s) in COI@")
 
     conv_ids_seen: list[str] = []
 
@@ -284,13 +289,12 @@ def verify_imports(imported_results: list[dict], token: str) -> None:
         print(f"\n  ── {filename} ──")
         conv = found.get(filename)
         if not conv:
-            print(f"    NOT FOUND in General Box (may still be processing)")
+            print(f"    NOT FOUND in COI@ (may still be processing)")
             continue
 
         conv_id = conv.get("id", "?")
         conv_ids_seen.append(conv_id)
 
-        # GET full conversation details
         # GET full conversation detail
         detail_resp = requests.get(
             f"{FRONT_API_BASE}/conversations/{conv_id}",
@@ -308,15 +312,25 @@ def verify_imports(imported_results: list[dict], token: str) -> None:
         else:
             inboxes = []
 
+        # GET messages for checks (e) and (f)
+        msgs_resp = requests.get(
+            f"{FRONT_API_BASE}/conversations/{conv_id}/messages",
+            headers=headers, timeout=10
+        )
+        msgs = msgs_resp.json().get("_results", []) if msgs_resp.status_code == 200 else []
+
         # (a) Conversation ID and status
         print(f"    conversation_id: {conv_id}  (status: {detail.get('status','?')})")
 
-        # (b) Inboxes — must be exactly General Box
+        # (b) Inboxes — must be exactly COI@ (inb_k4xih); not Compliance@ or haley@
         inbox_names = [i.get("name", i.get("id", "?")) for i in inboxes]
-        inbox_ids   = [i.get("id", "?") for i in inboxes]
-        in_general_only = (len(inbox_ids) == 1 and inbox_ids[0] == ALLOWED_INBOX_ID)
-        print(f"    inboxes: {inbox_names}  "
-              f"{'✓ General Box only' if in_general_only else '✗ UNEXPECTED INBOXES: ' + str(inbox_names)}")
+        inbox_ids   = {i.get("id", "?") for i in inboxes}
+        in_coi_only = (inbox_ids == {ALLOWED_INBOX_ID})
+        unexpected  = inbox_ids - {ALLOWED_INBOX_ID}
+        if in_coi_only:
+            print(f"    inboxes: {inbox_names}  ✓ COI@ only (not Compliance@, not haley@)")
+        else:
+            print(f"    inboxes: {inbox_names}  ✗ UNEXPECTED INBOXES: {sorted(unexpected)}")
 
         # (c) Tags
         tags_on_conv = [t.get("name", "?") for t in (detail.get("tags") or [])]
@@ -324,29 +338,29 @@ def verify_imports(imported_results: list[dict], token: str) -> None:
         print(f"    tags: {tags_on_conv}  {'✓' if has_rtr else '✗ RTR tag missing'}")
 
         # (d) ticket_ids — Front's own sequential conversation reference numbers (SU-N).
-        #     These are NOT external tickets; every conversation in a Front workspace
-        #     gets one. No auto-routing to a helpdesk occurred.
+        #     Present on every conversation in a team inbox; not an external ticket system.
         ticket_ids = detail.get("ticket_ids") or []
-        print(f"    ticket_ids (Front seq refs): {ticket_ids}  "
-              f"(these are Front's internal conversation reference numbers, not external tickets)")
+        auto_ticket = bool(ticket_ids)
+        print(f"    ticket auto-created: {'yes — ' + str(ticket_ids) if auto_ticket else 'no'} "
+              f"(Front internal seq ref, not an external helpdesk ticket)")
 
-        # (e) Attachment — check latest message
-        msgs_resp = requests.get(
-            f"{FRONT_API_BASE}/conversations/{conv_id}/messages",
-            headers=headers, timeout=10
-        )
-        if msgs_resp.status_code == 200:
-            msgs = msgs_resp.json().get("_results", [])
-            attachments = []
-            for m in msgs:
-                attachments.extend(m.get("attachments") or [])
-            att_names = [a.get("filename", "?") for a in attachments]
-            print(f"    attachments: {att_names}  "
-                  f"{'✓' if att_names else '✗ no attachments found'}")
+        # (e) Attachment present
+        attachments = []
+        for m in msgs:
+            attachments.extend(m.get("attachments") or [])
+        att_names = [a.get("filename", "?") for a in attachments]
+        print(f"    attachments: {att_names}  "
+              f"{'✓' if att_names else '✗ no attachments found'}")
+
+        # (f) Did not go through Gmail — all messages must be inbound (import, not send)
+        if msgs:
+            has_outbound = any(not m.get("is_inbound", True) for m in msgs)
+            print(f"    sent via Gmail: "
+                  f"{'✗ OUTBOUND MESSAGE FOUND' if has_outbound else '✓ no (all messages are inbound imports)'}")
         else:
-            print(f"    attachments: could not retrieve ({msgs_resp.status_code})")
+            print(f"    sent via Gmail: could not verify (no messages returned)")
 
-    # (a) Are both in different conversations?
+    # Summary: (a) conversation isolation
     if len(conv_ids_seen) == len(subjects_to_check):
         unique = len(set(conv_ids_seen)) == len(conv_ids_seen)
         print(f"\n  conversation isolation: "

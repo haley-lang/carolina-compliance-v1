@@ -53,7 +53,7 @@ def _row(filename: str, sha: str, page: str = "1", page_count: str = "1",
 # ── inbox guard ───────────────────────────────────────────────────────────────
 
 def test_require_inbox_correct_passes():
-    front._require_inbox("inb_k4xex")
+    front._require_inbox("inb_k4xih")  # COI@
 
 
 def test_require_inbox_wrong_raises():
@@ -209,7 +209,7 @@ def test_build_message_fields(tmp_path):
     with patch.object(front, "SPLIT_DIR", tmp_path):
         msg = front.build_message(row)
 
-    assert msg["inbox_id"] == "inb_k4xex"
+    assert msg["inbox_id"] == "inb_k4xih"   # COI@
     assert msg["subject"] == "Certificate - COI_forms_p01"
     assert msg["sender_handle"] == CCS_ADDR
     assert msg["to"] == [CCS_ADDR]
@@ -248,7 +248,7 @@ def test_import_message_refuses_wrong_inbox(tmp_path):
 def test_import_message_refuses_bad_sender(tmp_path):
     _make_pdf(tmp_path, "cert.pdf")
     msg = {
-        "inbox_id": "inb_k4xex", "sender_handle": "vendor@example.com",
+        "inbox_id": "inb_k4xih", "sender_handle": "vendor@example.com",
         "to": [CCS_ADDR], "type": "email", "subject": "X", "body": "X",
         "external_id": "ext1", "created_at": 0, "tags": ["RTR"],
         "metadata": {"is_inbound": True}, "pdf_path": tmp_path / "cert.pdf",
