@@ -396,7 +396,9 @@ def test_approve_no_edits_sets_approved(authed_client, mock_ie_table, mock_corr_
     fields_written = update_args[0][1]
     assert fields_written["Review Status"] == "Approved"
     assert "Processing Status" not in fields_written
-    mock_corr_table.create.assert_not_called()
+    # The reviewed_fields_audit record is always written on approve
+    fields_logged = [c[0][0]["Field"] for c in mock_corr_table.create.call_args_list]
+    assert fields_logged == ["reviewed_fields_audit"]
 
 
 def test_approve_with_edit_sets_approved_edited(authed_client, mock_ie_table, mock_corr_table):
@@ -424,8 +426,10 @@ def test_approve_each_changed_field_writes_one_correction(authed_client, mock_ie
             why="fixing",
         ))
 
-    # Two fields changed → two Corrections rows
-    assert mock_corr_table.create.call_count == 2
+    # Two fields changed → two field Corrections rows + one reviewed_fields_audit row
+    fields_logged = [c[0][0]["Field"] for c in mock_corr_table.create.call_args_list]
+    field_corrections = [f for f in fields_logged if f != "reviewed_fields_audit"]
+    assert len(field_corrections) == 2
     for call in mock_corr_table.create.call_args_list:
         assert call[0][0]["Learning Status"] == "New"
 
@@ -440,7 +444,11 @@ def test_approve_correction_row_has_required_fields(authed_client, mock_ie_table
             why="the reason",
         ))
 
-    row = mock_corr_table.create.call_args[0][0]
+    # First correction row is the field change (audit is the last row)
+    field_rows = [c[0][0] for c in mock_corr_table.create.call_args_list
+                  if c[0][0].get("Field") != "reviewed_fields_audit"]
+    assert len(field_rows) == 1
+    row = field_rows[0]
     assert row["Source Filename"] == "cert01.json"
     assert row["Incoming Extraction Record ID"] == "recTEST"
     assert row["Old Value"] == "GL-OLD"
@@ -1745,8 +1753,9 @@ def test_approve_corrections_row_has_all_required_fields(authed_client):
             }
             authed_client.post("/action/recV1", data=data)
 
-    assert len(created) == 1, f"Expected 1 correction row, got {len(created)}: {[c.get('Field') for c in created]}"
-    row = created[0]
+    field_rows = [c for c in created if c.get("Field") != "reviewed_fields_audit"]
+    assert len(field_rows) == 1, f"Expected 1 correction row, got {len(field_rows)}: {[c.get('Field') for c in field_rows]}"
+    row = field_rows[0]
     assert row["Field"] == "named_insured", f"Wrong field: {row.get('Field')}"
     assert row["Old Value"] == "Original Co"
     assert row["New Value"] == "Corrected Co"
@@ -2005,10 +2014,12 @@ def test_approve_description_of_operations_edit_writes_correction(authed_client,
         }
         authed_client.post("/action/recD2", data=data)
 
-    # One Correction row for description_of_operations
-    fields_logged = [c[0][0]["Field"] for c in mock_corr_table.create.call_args_list]
+    # One Correction row for description_of_operations (plus the reviewed_fields_audit row)
+    fields_logged = [c[0][0]["Field"] for c in mock_corr_table.create.call_args_list
+                     if c[0][0]["Field"] != "reviewed_fields_audit"]
     assert fields_logged == ["description_of_operations"], f"Unexpected corrections: {fields_logged}"
-    row = mock_corr_table.create.call_args[0][0]
+    row = next(c[0][0] for c in mock_corr_table.create.call_args_list
+               if c[0][0]["Field"] == "description_of_operations")
     assert row["Field"] == "description_of_operations"
     assert row["New Value"] == "Updated description."
     # Raw JSON was updated
@@ -2464,7 +2475,7 @@ def test_split_issues_named_insured_is_primary():
     import review_app
     issue = {"type": "ai_disagreement", "field": "named_insured", "id": "ai_named_insured",
              "title": "Named insured mismatch", "description": "", "control": "text"}
-    primary, secondary = review_app._split_issues([issue], gl_idx=0, wc_idx=None)
+    primary, secondary = review_app._split_issues([issue], required_indices={0})
     assert issue in primary
     assert issue not in secondary
 
@@ -2473,7 +2484,7 @@ def test_split_issues_gl_field_is_primary():
     import review_app
     issue = {"type": "ai_disagreement", "field": "policy_0_policy_number", "id": "ai_0_pn",
              "title": "GL policy number", "description": "", "control": "text"}
-    primary, secondary = review_app._split_issues([issue], gl_idx=0, wc_idx=None)
+    primary, secondary = review_app._split_issues([issue], required_indices={0})
     assert issue in primary
 
 
@@ -2482,7 +2493,7 @@ def test_split_issues_other_policy_field_is_secondary():
     # Policy index 2 is not GL (idx=0) or WC (idx=1), so its fields go to secondary
     issue = {"type": "ai_disagreement", "field": "policy_2_policy_number", "id": "ai_2_pn",
              "title": "Umbrella policy number", "description": "", "control": "text"}
-    primary, secondary = review_app._split_issues([issue], gl_idx=0, wc_idx=1)
+    primary, secondary = review_app._split_issues([issue], required_indices={0, 1})
     assert issue in secondary
     assert issue not in primary
 
@@ -2491,7 +2502,7 @@ def test_split_issues_non_coi_is_primary():
     import review_app
     issue = {"type": "non_coi", "field": "document_type", "id": "non_coi",
              "title": "Not a certificate", "description": "", "control": "select"}
-    primary, secondary = review_app._split_issues([issue], gl_idx=None, wc_idx=None)
+    primary, secondary = review_app._split_issues([issue], required_indices=set())
     assert issue in primary
 
 
@@ -2501,7 +2512,7 @@ def test_split_issues_mixed():
                 "title": "GL eff date", "description": "", "control": "text"}
     umb_issue = {"type": "ai_disagreement", "field": "policy_1_effective_date", "id": "ai_1_ed",
                  "title": "Umbrella eff date", "description": "", "control": "text"}
-    primary, secondary = review_app._split_issues([gl_issue, umb_issue], gl_idx=0, wc_idx=None)
+    primary, secondary = review_app._split_issues([gl_issue, umb_issue], required_indices={0})
     assert gl_issue in primary
     assert umb_issue in secondary
 
@@ -2527,3 +2538,79 @@ def test_detail_shows_keyboard_hint(authed_client, mock_ie_table):
     assert resp.status_code == 200
     assert b"kbd-hint" in resp.data
     assert b"Enter" in resp.data
+
+
+# ── requirement-driven flags ──────────────────────────────────────────────────
+
+def test_compute_flags_missing_fields_narrows_to_required():
+    """missing_fields is False when only a non-required policy is missing a number."""
+    import review_app
+    # GL (index 0) is complete; Umbrella (index 1) is missing number — Umbrella not required
+    raw = {
+        "document_type": "COI",
+        "named_insured": "Acme",
+        "policies": [
+            {**_GL, "policy_number": "GL-001"},  # GL at index 0 — complete
+            {"policy_type": "Umbrella", "carrier": "Hartford",
+             "effective_date": "2025-01-01", "expiration_date": "2026-01-01",
+             "policy_number": ""},  # missing number
+        ],
+    }
+    f = {"Confidence Score": 0.99}
+    required = review_app.RTR_REQUIRED_POLICY_TYPES  # GL + WC
+    flags = review_app.compute_flags(f, raw, required)
+    assert flags["missing_fields"] is False
+
+
+def test_compute_flags_missing_required_type_sets_flag():
+    """missing_fields is True when a required type (WC) is absent from the cert."""
+    import review_app
+    raw = {
+        "document_type": "COI",
+        "named_insured": "Acme",
+        "policies": [{**_GL, "policy_number": "GL-001"}],  # GL only, no WC
+    }
+    f = {"Confidence Score": 0.99}
+    required = review_app.RTR_REQUIRED_POLICY_TYPES
+    flags = review_app.compute_flags(f, raw, required)
+    assert flags["missing_fields"] is True
+
+
+def test_compute_issues_skips_nonrequired_disagreement():
+    """AI disagreement on a non-required policy is not included in issues."""
+    import review_app
+    umbrella_pol = {"policy_type": "Umbrella", "policy_number": "UMB-1",
+                    "effective_date": "2025-01-01", "expiration_date": "2026-01-01",
+                    "additional_insured_checked": "checked", "waiver_of_subrogation_checked": "not_checked",
+                    "primary_noncontributory_checked": False}
+    raw = {"named_insured": "Acme", "document_type": "COI",
+           "policies": [umbrella_pol]}
+    second = {"named_insured": "Acme", "document_type": "COI",
+              "policies": [{**umbrella_pol, "additional_insured_checked": "not_checked"}]}
+    flags = {"ai_disagreed": True, "non_coi": False}
+    issues = review_app.compute_issues(raw, second, flags,
+                                       required_policy_types=review_app.RTR_REQUIRED_POLICY_TYPES)
+    assert not any(i["type"] == "ai_disagreement" for i in issues)
+
+
+def test_compute_issues_adds_not_on_file_for_missing_required():
+    """A required type absent from the cert produces a 'not on file' issue."""
+    import review_app
+    raw = {"named_insured": "Acme", "document_type": "COI",
+           "policies": [{**_GL, "policy_number": "GL-001"}]}  # GL only
+    flags = {"ai_disagreed": False, "missing_fields": True, "non_coi": False}
+    issues = review_app.compute_issues(raw, None, flags,
+                                       required_policy_types=review_app.RTR_REQUIRED_POLICY_TYPES)
+    not_on_file = [i for i in issues if "not on file" in i["title"]]
+    assert len(not_on_file) == 1
+    assert "Workers" in not_on_file[0]["title"]
+
+
+def test_detail_shows_required_fields_are_correct_button(authed_client, mock_ie_table):
+    """Approve button reads 'Required fields are correct' for Billy/RTR certs."""
+    rec = _make_rec_with_policies()  # uses COI_forms_ prefix → _is_billy_rtr = True
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table):
+        resp = authed_client.get("/detail/recDETAIL")
+    assert resp.status_code == 200
+    assert b"Required fields are correct" in resp.data

@@ -253,7 +253,7 @@
               <div class="summary-row">
                 <span class="summary-key"></span>
                 <details class="other-pols-expand">
-                  <summary class="other-pols-toggle">{{ other_policy_count }} other {{ 'policy' if other_policy_count == 1 else 'policies' }} ▾</summary>
+                  <summary class="other-pols-toggle">{{ other_policy_count }} other {{ 'policy' if other_policy_count == 1 else 'policies' }}{% if required_policy_types %} (not required for this client){% endif %} ▾</summary>
                   <div class="other-pols-list">
                     {% for i, p in enumerate(raw_data.get('policies') or []) %}
                       {% if not (gl_idx is not none and i == gl_idx) and not (wc_idx is not none and i == wc_idx) %}
@@ -676,7 +676,7 @@
           </div>
           <div class="action-buttons">
             <button type="submit" id="btn-approve" name="action" value="approve"
-                    class="btn btn-primary">Data is correct</button>
+                    class="btn btn-primary">{{ approve_button_label }}</button>
             <button type="submit" name="action" value="save_draft"
                     class="btn btn-secondary">Save and keep in queue</button>
             <button type="submit" name="action" value="reject"
@@ -711,7 +711,7 @@
   function updateBtn() {
     if (!btn) return;
     var n = countUndecided();
-    btn.textContent = n > 0 ? ('Confirm data (' + n + ' issue' + (n === 1 ? '' : 's') + ' open)') : 'Data is correct';
+    btn.textContent = n > 0 ? ('Confirm data (' + n + ' issue' + (n === 1 ? '' : 's') + ' open)') : '{{ approve_button_label }}';
   }
 
   function markDecided(card) {

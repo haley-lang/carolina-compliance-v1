@@ -72,6 +72,12 @@ def _norm_polnum(v: str) -> str:
 _GL_KEYWORDS = ("general", "liability", "cgl", "commercial general")
 _WC_KEYWORDS = ("workers", "work comp", "w/c", "wc", "workers'", "employers liability")
 
+# Required policy types for RTR Construction (no Airtable requirement rows → default to GL + WC)
+RTR_REQUIRED_POLICY_TYPES = [
+    (_GL_KEYWORDS, "General Liability"),
+    (_WC_KEYWORDS, "Workers' Comp"),
+]
+
 def _find_key_policy(policies: list, keywords: tuple) -> tuple:
     """Return (index, policy_dict) for the first policy whose type matches any keyword."""
     for i, p in enumerate(policies):
@@ -81,20 +87,29 @@ def _find_key_policy(policies: list, keywords: tuple) -> tuple:
     return None, None
 
 
-def _split_issues(issues: list, gl_idx, wc_idx) -> tuple:
-    """Return (primary, secondary) where primary = issues affecting NI, GL, WC, or doc type."""
-    prefix_gl = f"policy_{gl_idx}_" if gl_idx is not None else None
-    prefix_wc = f"policy_{wc_idx}_" if wc_idx is not None else None
+def _get_required_indices(policies: list, required_policy_types: list) -> set:
+    """Return set of policy indices matching any required type."""
+    indices = set()
+    for keywords, _ in required_policy_types:
+        idx, _ = _find_key_policy(policies, keywords)
+        if idx is not None:
+            indices.add(idx)
+    return indices
+
+
+def _split_issues(issues: list, required_indices: set) -> tuple:
+    """Return (primary, secondary) where primary = issues on required types, NI, or doc type."""
     primary_exact = {"named_insured", "document_type"}
+    required_prefixes = {f"policy_{i}_" for i in required_indices}
     primary, secondary = [], []
     for issue in issues:
         field = issue.get("field") or ""
         is_primary = (
             field in primary_exact
-            or issue.get("type") == "non_coi"
+            or issue.get("type") in ("non_coi", "possible_duplicate")
             or issue.get("id") in ("ai_named_insured", "possible_duplicate")
-            or (prefix_gl and field.startswith(prefix_gl))
-            or (prefix_wc and field.startswith(prefix_wc))
+            or "missing_required" in (issue.get("id") or "")
+            or any(field.startswith(pfx) for pfx in required_prefixes)
         )
         (primary if is_primary else secondary).append(issue)
     return primary, secondary
@@ -317,7 +332,7 @@ _MULTI_COMPANY_RE = re.compile(
 )
 
 
-def compute_flags(airtable_fields: dict, raw_data: dict) -> dict:
+def compute_flags(airtable_fields: dict, raw_data: dict, required_policy_types=None) -> dict:
     """Return a dict of flag_name → bool for one record."""
     flags = {}
 
@@ -333,7 +348,18 @@ def compute_flags(airtable_fields: dict, raw_data: dict) -> dict:
     #    OR is missing both effective_date AND expiration_date
     policies = raw_data.get("policies") or []
     _content_keys = ("policy_number", "carrier", "effective_date", "expiration_date", "coverage_limits")
-    flags["missing_fields"] = any(
+    if required_policy_types:
+        req_indices = _get_required_indices(policies, required_policy_types)
+        check_pols = [p for i, p in enumerate(policies) if i in req_indices]
+        has_nonrequired = any(True for i in range(len(policies)) if i not in req_indices)
+        missing_required_type = (
+            any(_find_key_policy(policies, kws)[0] is None for kws, _ in required_policy_types)
+            and not has_nonrequired
+        )
+    else:
+        check_pols = policies
+        missing_required_type = False
+    flags["missing_fields"] = missing_required_type or any(
         isinstance(p, dict)
         and any(str(p.get(k) or "").strip() for k in _content_keys)
         and (
@@ -343,7 +369,7 @@ def compute_flags(airtable_fields: dict, raw_data: dict) -> dict:
                 and not (p.get("expiration_date") or "").strip()
             )
         )
-        for p in policies
+        for p in check_pols
     )
 
     # 3. Low confidence
@@ -440,7 +466,7 @@ def _highlight_cells(raw_data: dict, second_data: dict) -> set:
 _TRISTATE_LABELS = {"checked": "Checked", "not_checked": "Not checked", "not_applicable": "N/A"}
 
 
-def compute_issues(raw_data: dict, second_data, flags: dict, duplicate_match: str = "") -> list:
+def compute_issues(raw_data: dict, second_data, flags: dict, duplicate_match: str = "", required_policy_types=None) -> list:
     """Return ordered list of issue dicts for the 'Why this needs you' panel.
 
     Each issue has:
@@ -455,6 +481,12 @@ def compute_issues(raw_data: dict, second_data, flags: dict, duplicate_match: st
     """
     issues = []
     policies = raw_data.get("policies") or []
+
+    # Indices of policies that matter for flags and issue cards
+    if required_policy_types:
+        req_indices = _get_required_indices(policies, required_policy_types)
+    else:
+        req_indices = None  # None = include all
 
     # 1. AI disagreements — one issue per disagreed field
     if second_data:
@@ -489,6 +521,8 @@ def compute_issues(raw_data: dict, second_data, flags: dict, duplicate_match: st
         ]
 
         for i, pol_a in enumerate(policies):
+            if req_indices is not None and i not in req_indices:
+                continue
             if i >= len(sec_policies):
                 break
             pol_b = sec_policies[i]
@@ -557,6 +591,8 @@ def compute_issues(raw_data: dict, second_data, flags: dict, duplicate_match: st
     # 2. Missing field issues
     _content_keys = ("policy_number", "carrier", "effective_date", "expiration_date", "coverage_limits")
     for i, p in enumerate(policies):
+        if req_indices is not None and i not in req_indices:
+            continue
         pol_label = (p.get("policy_type") or f"Policy {i + 1}").strip()
         has_content = any(str(p.get(k) or "").strip() for k in _content_keys)
         if not has_content:
@@ -581,6 +617,24 @@ def compute_issues(raw_data: dict, second_data, flags: dict, duplicate_match: st
                 "field": f"policy_{i}_effective_date",
                 "current": "",
             })
+
+    # 2b. Required policy types that are completely absent from the certificate
+    if required_policy_types:
+        for keywords, label in required_policy_types:
+            idx, _ = _find_key_policy(policies, keywords)
+            if idx is None:
+                safe_id = label.lower().replace(" ", "_").replace("'", "").replace("/", "")
+                issues.append({
+                    "id": f"missing_required_{safe_id}",
+                    "type": "missing_field",
+                    "title": f"{label}: not on file on this certificate",
+                    "description": (
+                        f"No {label} policy was found. "
+                        "If the certificate has one, check that the policy type is labeled correctly."
+                    ),
+                    "control": "none",
+                    "field": None,
+                })
 
     # 3. Non-COI document type
     if flags.get("non_coi"):
@@ -668,7 +722,8 @@ def queue():
             raw_data = {}
 
         review_status = (f.get("Review Status") or "").strip()
-        flags = compute_flags(f, raw_data)
+        _rpt = RTR_REQUIRED_POLICY_TYPES if _is_billy_rtr(f.get("Source Filename") or "") else None
+        flags = compute_flags(f, raw_data, _rpt)
 
         rows.append({
             "id": rec["id"],
@@ -836,17 +891,22 @@ def detail(record_id):
     )
     ai_disagrees = [d.strip() for d in str(ai_raw).split("\n") if d.strip()] if ai_raw else []
 
-    flags = compute_flags(f, raw_data)
+    source_filename = f.get("Source Filename") or ""
+    required_policy_types = RTR_REQUIRED_POLICY_TYPES if _is_billy_rtr(source_filename) else None
+    flags = compute_flags(f, raw_data, required_policy_types)
 
     duplicate_match = (session.get("queue_duplicate_matches") or {}).get(record_id, "")
-    issues = compute_issues(raw_data, second_data, flags, duplicate_match)
+    issues = compute_issues(raw_data, second_data, flags, duplicate_match, required_policy_types)
 
     _policies = raw_data.get("policies") or []
     gl_idx, gl_policy = _find_key_policy(_policies, _GL_KEYWORDS)
     wc_idx, wc_policy = _find_key_policy(_policies, _WC_KEYWORDS)
-    _skip = {i for i in (gl_idx, wc_idx) if i is not None}
-    other_policy_count = sum(1 for i in range(len(_policies)) if i not in _skip)
-    primary_issues, secondary_issues = _split_issues(issues, gl_idx, wc_idx)
+    if required_policy_types:
+        _req_indices = _get_required_indices(_policies, required_policy_types)
+    else:
+        _req_indices = {i for i in (gl_idx, wc_idx) if i is not None}
+    other_policy_count = sum(1 for i in range(len(_policies)) if i not in _req_indices)
+    primary_issues, secondary_issues = _split_issues(issues, _req_indices)
     contact_email = ", ".join(raw_data.get("contact_emails") or []) or ""
 
     corrections_logged = request.args.get("corrections_logged", type=int, default=None)
@@ -900,6 +960,8 @@ def detail(record_id):
         queue_chip=queue_chip,
         queue_position=queue_position,
         queue_total=queue_total,
+        approve_button_label="Required fields are correct" if required_policy_types else "Data is correct",
+        required_policy_types=required_policy_types,
     )
 
 
@@ -935,8 +997,9 @@ def action(record_id):
         next_id = queue_ids[idx + 1] if idx < len(queue_ids) - 1 else None
 
     if action_type == "approve":
+        required_policy_types = RTR_REQUIRED_POLICY_TYPES if _is_billy_rtr(source_filename) else None
         corrections_count = _handle_approve(
-            table, record_id, source_filename, original_data, why_note, now_iso,
+            table, record_id, source_filename, original_data, why_note, now_iso, required_policy_types,
         )
         if next_id:
             if corrections_count > 0:
@@ -1127,7 +1190,7 @@ _AIRTABLE_FIELD_NAMES = {
 }
 
 
-def _handle_approve(table, record_id, source_filename, original_data, why_note, now_iso):
+def _handle_approve(table, record_id, source_filename, original_data, why_note, now_iso, required_policy_types=None):
     """Apply edits, write Corrections rows, set Review Status. Returns corrections count."""
     corrections, new_policies = _collect_corrections(original_data)
 
@@ -1148,6 +1211,31 @@ def _handle_approve(table, record_id, source_filename, original_data, why_note, 
         update["Raw JSON"] = json.dumps(new_data, indent=2)
 
     table.update(record_id, update, typecast=True)
+
+    # Write reviewed-fields audit record
+    policies = original_data.get("policies") or []
+    reviewed_fields = ["named_insured", "contact_email"]
+    if required_policy_types:
+        for keywords, label in required_policy_types:
+            pol_idx, _ = _find_key_policy(policies, keywords)
+            if pol_idx is not None:
+                reviewed_fields += [
+                    f"policy_{pol_idx}_policy_number",
+                    f"policy_{pol_idx}_effective_date",
+                    f"policy_{pol_idx}_expiration_date",
+                ]
+            else:
+                safe_lbl = label.lower().replace(" ", "_").replace("'", "")
+                reviewed_fields.append(f"{safe_lbl}_not_found")
+    audit_val = json.dumps({
+        "reviewed_at": now_iso,
+        "required_types": [lbl for _, lbl in (required_policy_types or [])],
+        "fields_reviewed": reviewed_fields,
+        "review_status": review_status,
+    })
+    _write_correction(source_filename, record_id, "reviewed_fields_audit",
+                      "", audit_val, why_note, now_iso)
+
     return len(corrections)
 
 
