@@ -418,3 +418,63 @@ def test_run_refuses_wrong_inbox(tmp_path):
         front.run(apply=False, limit=None, token="fake",
                   index_csv=idx, ledger_path=tmp_path / "ledger.json",
                   inbox_id="inb_WRONG")
+
+
+# ── metadata[is_archived]=false is sent on every import ──────────────────────
+
+def test_import_message_sends_is_archived_false(tmp_path):
+    """import_message must include metadata[is_archived]=false in the POST body."""
+    _make_pdf(tmp_path, "cert.pdf")
+    msg = {
+        "inbox_id":      "inb_k4xih",
+        "sender_handle": CCS_ADDR,
+        "to":            [CCS_ADDR],
+        "type":          "email",
+        "subject":       "Certificate - cert",
+        "body":          "X",
+        "external_id":   f"ccs-rtr-{FAKE_SHA_1}",
+        "created_at":    0,
+        "tags":          ["RTR"],
+        "metadata":      {"is_inbound": True, "should_skip_rules": True, "is_archived": False},
+        "pdf_path":      tmp_path / "cert.pdf",
+    }
+    fake_resp = MagicMock()
+    fake_resp.status_code = 202
+    fake_resp.text = '{"status": "accepted", "message_uid": "uid1"}'
+    fake_resp.json.return_value = {"status": "accepted", "message_uid": "uid1"}
+
+    with patch("requests.post", return_value=fake_resp) as mock_post:
+        front.import_message(msg, "fake-token")
+
+    data_sent = mock_post.call_args[1]["data"]
+    assert data_sent.get("metadata[is_archived]") == "false", (
+        "metadata[is_archived] must be 'false' — Front defaults to true (archived)"
+    )
+
+
+# ── reopen_conversation ───────────────────────────────────────────────────────
+
+def test_reopen_conversation_calls_patch():
+    """reopen_conversation PATCHes /conversations/{id} with status=open."""
+    fake_resp = MagicMock()
+    fake_resp.status_code = 204
+    fake_resp.text = ""
+
+    with patch("requests.patch", return_value=fake_resp) as mock_patch:
+        front.reopen_conversation("cnv_abc123", "fake-token")
+
+    mock_patch.assert_called_once()
+    call_args = mock_patch.call_args
+    assert "conversations/cnv_abc123" in call_args[0][0]
+    assert call_args[1]["json"] == {"status": "open"}
+
+
+def test_reopen_conversation_raises_on_error():
+    """reopen_conversation raises RuntimeError on non-200/204 response."""
+    fake_resp = MagicMock()
+    fake_resp.status_code = 403
+    fake_resp.text = '{"error": "forbidden"}'
+
+    with patch("requests.patch", return_value=fake_resp):
+        with pytest.raises(RuntimeError, match="Could not reopen"):
+            front.reopen_conversation("cnv_abc123", "fake-token")

@@ -13,6 +13,8 @@ Hard guarantees (enforced at runtime, not just convention):
   - Before any --apply, GETs the channel list and refuses if sender or to
     address matches any Front channel address (prevents routing to wrong inbox).
   - is_inbound is always True.
+  - is_archived is always False — conversations land as open/unassigned (Front
+    defaults to archived on import; this override is explicit every time).
   - thread_ref = external_id so every certificate becomes its own conversation.
   - FRONT_API_TOKEN loaded from .env; never printed, logged, or committed.
   - No Airtable writes.
@@ -182,6 +184,7 @@ def build_message(row: dict) -> dict:
         "metadata": {
             "is_inbound":        True,
             "should_skip_rules": True,
+            "is_archived":       False,   # Front defaults to True; must be explicit
         },
     }
 
@@ -205,6 +208,7 @@ def import_message(msg: dict, token: str) -> dict:
     # Multipart form-data — bracket notation for nested fields.
     # thread_ref = external_id ensures every certificate becomes its own
     # conversation (without it Front groups messages by sender+recipient).
+    # is_archived=false overrides Front's default (true) so conversations land open.
     data = {
         "sender[handle]":              msg["sender_handle"],
         "to[0]":                       msg["to"][0],
@@ -215,6 +219,7 @@ def import_message(msg: dict, token: str) -> dict:
         "created_at":                  str(msg["created_at"]),
         "metadata[is_inbound]":        "true",
         "metadata[should_skip_rules]": "true",
+        "metadata[is_archived]":       "false",
         "metadata[thread_ref]":        msg["external_id"],
         "tags[0]":                     msg["tags"][0],
     }
@@ -370,6 +375,105 @@ def verify_imports(imported_results: list[dict], token: str) -> None:
               f"(only {len(conv_ids_seen)}/{len(subjects_to_check)} conversations found)")
 
 
+# ── Front API: reopen archived conversations ──────────────────────────────────
+
+def reopen_conversation(conv_id: str, token: str) -> dict:
+    """PATCH /conversations/{id} to set status=open. Returns the response body."""
+    import requests
+    resp = requests.patch(
+        f"{FRONT_API_BASE}/conversations/{conv_id}",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json={"status": "open"},
+        timeout=10,
+    )
+    if resp.status_code not in (200, 204):
+        raise RuntimeError(
+            f"Could not reopen {conv_id}: {resp.status_code} {resp.text[:200]}"
+        )
+    return resp.json() if resp.text.strip() else {}
+
+
+def find_conversations_in_inbox(inbox_id: str, token: str, limit: int = 50) -> list[dict]:
+    """Return recent conversations from the given inbox (id + subject + status)."""
+    import requests
+    resp = requests.get(
+        f"{FRONT_API_BASE}/inboxes/{inbox_id}/conversations",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"limit": limit},
+        timeout=15,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"Could not list inbox conversations: {resp.status_code} {resp.text[:200]}"
+        )
+    return resp.json().get("_results", [])
+
+
+def reopen_by_filenames(filenames: list[str], token: str) -> None:
+    """Find archived COI@ conversations by subject and reopen them, then verify."""
+    import requests
+    import time as _time
+
+    headers = {"Authorization": f"Bearer {token}"}
+    subjects = {fn: f"Certificate - {Path(fn).stem}" for fn in filenames}
+
+    print(f"\nSearching COI@ inbox for {len(filenames)} conversation(s)…")
+    convs = find_conversations_in_inbox(ALLOWED_INBOX_ID, token)
+    fn_to_conv: dict[str, dict] = {}
+    for conv in convs:
+        subj = conv.get("subject") or ""
+        for fn, expected in subjects.items():
+            if subj == expected and fn not in fn_to_conv:
+                fn_to_conv[fn] = conv
+                break
+
+    for fn in filenames:
+        print(f"\n  ── {fn} ──")
+        conv = fn_to_conv.get(fn)
+        if not conv:
+            print(f"    NOT FOUND in COI@ inbox")
+            continue
+
+        conv_id = conv.get("id", "?")
+        current_status = conv.get("status", "?")
+        print(f"    conv_id: {conv_id}  current status: {current_status}")
+
+        if current_status in ("open", "unassigned", "assigned"):
+            print(f"    already active ({current_status}) — skipping PATCH")
+        else:
+            reopen_conversation(conv_id, token)
+            print(f"    PATCH /conversations/{conv_id} → status=open")
+
+        _time.sleep(1)
+
+        # GET post-reopen state
+        detail = requests.get(
+            f"{FRONT_API_BASE}/conversations/{conv_id}",
+            headers=headers, timeout=10
+        ).json()
+        inboxes_data = requests.get(
+            f"{FRONT_API_BASE}/conversations/{conv_id}/inboxes",
+            headers=headers, timeout=10
+        ).json().get("_results", [])
+
+        status_now    = detail.get("status", "?")
+        inbox_names   = [i.get("name", i.get("id", "?")) for i in inboxes_data]
+        inbox_ids_set = {i.get("id", "?") for i in inboxes_data}
+        tags          = [t.get("name", "?") for t in (detail.get("tags") or [])]
+        ticket_ids    = detail.get("ticket_ids") or []
+
+        # Front's team-inbox statuses for an active conversation are "assigned"
+        # (has an assignee) or "unassigned" (no assignee but open). "archived"
+        # means resolved. Accept either active state as success.
+        is_active = status_now in ("open", "unassigned", "assigned")
+        in_coi_only = (inbox_ids_set == {ALLOWED_INBOX_ID})
+        print(f"    status:     {status_now}  {'✓ (open/active)' if is_active else '✗ still archived'}")
+        print(f"    inboxes:    {inbox_names}  "
+              f"{'✓ COI@ only' if in_coi_only else '✗ unexpected: ' + str(sorted(inbox_ids_set - {ALLOWED_INBOX_ID}))}")
+        print(f"    tags:       {tags}  {'✓' if 'RTR' in tags else '✗ RTR missing'}")
+        print(f"    ticket_ids: {ticket_ids}")
+
+
 # ── Main runner ───────────────────────────────────────────────────────────────
 
 def run(
@@ -457,6 +561,7 @@ def run(
                 f"    tags:        {msg['tags']}\n"
                 f"    external_id: {ext_id}\n"
                 f"    is_inbound:  {msg['metadata']['is_inbound']}\n"
+                f"    is_archived: {msg['metadata']['is_archived']}\n"
                 f"    thread_ref:  {ext_id}\n"
                 f"    body:        {msg['body']}"
             )
@@ -482,6 +587,10 @@ def main() -> None:
                        help="Print what would be sent; call nothing (default safe mode)")
     group.add_argument("--apply",   action="store_true",
                        help="Actually POST to Front's import endpoint")
+    group.add_argument("--reopen-files", type=str, dest="reopen_files",
+                       metavar="FILES",
+                       help="Reopen archived COI@ conversations for comma-separated "
+                            "split_filenames (e.g. COI_forms_p05.pdf,COI_forms_p06.pdf)")
     ap.add_argument("--limit", type=int, default=None,
                     help="Process at most N rows (applied after dedup)")
     ap.add_argument("--start", type=int, default=None,
@@ -495,6 +604,11 @@ def main() -> None:
     token = (getattr(config, "FRONT_API_TOKEN", None) or "").strip()
     if not token:
         sys.exit("FRONT_API_TOKEN is not set in .env")
+
+    if args.reopen_files:
+        fns = [f.strip() for f in args.reopen_files.split(",") if f.strip()]
+        reopen_by_filenames(fns, token)
+        return
 
     files_filter: Optional[list[str]] = None
     if args.files:
