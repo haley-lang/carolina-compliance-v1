@@ -2417,3 +2417,113 @@ def test_source_page_prefers_last_image_over_pdf(authed_client, mock_ie_table):
     assert b"page_300dpi.png" in resp.data
     # The low-res thumbnail should NOT be used when a hi-res PNG is present
     assert b"thumb.png" not in resp.data
+
+
+# ── _find_key_policy ─────────────────────────────────────────────────────────
+
+def test_find_key_policy_finds_gl():
+    import review_app
+    policies = [
+        {"policy_type": "Workers Compensation", "policy_number": "WC-1"},
+        {"policy_type": "Commercial General Liability", "policy_number": "GL-1"},
+    ]
+    idx, pol = review_app._find_key_policy(policies, review_app._GL_KEYWORDS)
+    assert idx == 1
+    assert pol["policy_number"] == "GL-1"
+
+
+def test_find_key_policy_finds_wc():
+    import review_app
+    policies = [
+        {"policy_type": "Commercial General Liability", "policy_number": "GL-1"},
+        {"policy_type": "Workers' Compensation", "policy_number": "WC-1"},
+    ]
+    idx, pol = review_app._find_key_policy(policies, review_app._WC_KEYWORDS)
+    assert idx == 1
+    assert pol["policy_number"] == "WC-1"
+
+
+def test_find_key_policy_not_found_returns_none():
+    import review_app
+    policies = [{"policy_type": "Umbrella", "policy_number": "UMB-1"}]
+    idx, pol = review_app._find_key_policy(policies, review_app._WC_KEYWORDS)
+    assert idx is None
+    assert pol is None
+
+
+def test_find_key_policy_empty_list():
+    import review_app
+    idx, pol = review_app._find_key_policy([], review_app._GL_KEYWORDS)
+    assert idx is None
+    assert pol is None
+
+
+# ── _split_issues ─────────────────────────────────────────────────────────────
+
+def test_split_issues_named_insured_is_primary():
+    import review_app
+    issue = {"type": "ai_disagreement", "field": "named_insured", "id": "ai_named_insured",
+             "title": "Named insured mismatch", "description": "", "control": "text"}
+    primary, secondary = review_app._split_issues([issue], gl_idx=0, wc_idx=None)
+    assert issue in primary
+    assert issue not in secondary
+
+
+def test_split_issues_gl_field_is_primary():
+    import review_app
+    issue = {"type": "ai_disagreement", "field": "policy_0_policy_number", "id": "ai_0_pn",
+             "title": "GL policy number", "description": "", "control": "text"}
+    primary, secondary = review_app._split_issues([issue], gl_idx=0, wc_idx=None)
+    assert issue in primary
+
+
+def test_split_issues_other_policy_field_is_secondary():
+    import review_app
+    # Policy index 2 is not GL (idx=0) or WC (idx=1), so its fields go to secondary
+    issue = {"type": "ai_disagreement", "field": "policy_2_policy_number", "id": "ai_2_pn",
+             "title": "Umbrella policy number", "description": "", "control": "text"}
+    primary, secondary = review_app._split_issues([issue], gl_idx=0, wc_idx=1)
+    assert issue in secondary
+    assert issue not in primary
+
+
+def test_split_issues_non_coi_is_primary():
+    import review_app
+    issue = {"type": "non_coi", "field": "document_type", "id": "non_coi",
+             "title": "Not a certificate", "description": "", "control": "select"}
+    primary, secondary = review_app._split_issues([issue], gl_idx=None, wc_idx=None)
+    assert issue in primary
+
+
+def test_split_issues_mixed():
+    import review_app
+    gl_issue = {"type": "ai_disagreement", "field": "policy_0_effective_date", "id": "ai_0_ed",
+                "title": "GL eff date", "description": "", "control": "text"}
+    umb_issue = {"type": "ai_disagreement", "field": "policy_1_effective_date", "id": "ai_1_ed",
+                 "title": "Umbrella eff date", "description": "", "control": "text"}
+    primary, secondary = review_app._split_issues([gl_issue, umb_issue], gl_idx=0, wc_idx=None)
+    assert gl_issue in primary
+    assert umb_issue in secondary
+
+
+# ── Template renders "WHAT WE READ" summary card and keyboard hint ─────────────
+
+def test_detail_shows_what_we_read_card(authed_client, mock_ie_table):
+    """'WHAT WE READ' section label and summary card appear on the detail page."""
+    rec = _make_rec_with_policies()
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table):
+        resp = authed_client.get("/detail/recDETAIL")
+    assert resp.status_code == 200
+    assert b"WHAT WE READ" in resp.data
+
+
+def test_detail_shows_keyboard_hint(authed_client, mock_ie_table):
+    """Keyboard shortcut hint is present on the detail page."""
+    rec = _make_rec_with_policies()
+    mock_ie_table.get.return_value = rec
+    with patch("review_app._ie_table", return_value=mock_ie_table):
+        resp = authed_client.get("/detail/recDETAIL")
+    assert resp.status_code == 200
+    assert b"kbd-hint" in resp.data
+    assert b"Enter" in resp.data

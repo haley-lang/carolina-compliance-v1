@@ -28,12 +28,11 @@
 
 <div class="page-wrap">
 
-  <!-- Flashed messages from action() redirect -->
+  <!-- Flashed messages -->
   {% for category, message in get_flashed_messages(with_categories=True) %}
   <div class="flash flash-{{ category }}">{{ message }}</div>
   {% endfor %}
 
-  <!-- Corrections logged (same-page approve feedback) -->
   {% if corrections_logged is not none %}
   <div class="flash flash-success">
     {% if corrections_logged > 0 %}
@@ -44,13 +43,13 @@
   </div>
   {% endif %}
 
-  <!-- Queue navigation bar -->
+  <!-- Queue navigation -->
   {% if queue_total %}
   <div class="d-flex gap-8 mb-16" style="align-items:center">
     {% if prev_id %}
-      <a href="/detail/{{ prev_id }}" class="btn btn-sm btn-secondary">← Previous</a>
+      <a href="/detail/{{ prev_id }}" id="nav-prev" class="btn btn-sm btn-secondary">← Previous</a>
     {% else %}
-      <span class="btn btn-sm btn-secondary" style="opacity:0.35;cursor:default">← Previous</span>
+      <span id="nav-prev" class="btn btn-sm btn-secondary" style="opacity:0.35;cursor:default">← Previous</span>
     {% endif %}
     {% if queue_position and queue_total %}
       <span style="flex:1; text-align:center; font-size:0.85rem; color:var(--secondary); font-weight:600">
@@ -58,9 +57,9 @@
       </span>
     {% endif %}
     {% if next_id %}
-      <a href="/detail/{{ next_id }}" class="btn btn-sm btn-secondary">Next →</a>
+      <a href="/detail/{{ next_id }}" id="nav-next" class="btn btn-sm btn-secondary">Next →</a>
     {% else %}
-      <span class="btn btn-sm btn-secondary" style="opacity:0.35;cursor:default">Next →</span>
+      <span id="nav-next" class="btn btn-sm btn-secondary" style="opacity:0.35;cursor:default">Next →</span>
     {% endif %}
   </div>
   {% endif %}
@@ -83,7 +82,7 @@
 
     <div class="detail-grid">
 
-      <!-- Left: source page image -->
+      <!-- ── Left: source page image (sticky) ───────────────────────── -->
       <div class="source-sticky">
         <span class="section-label">THE PAGE</span>
         <div class="source-img-wrap">
@@ -106,27 +105,30 @@
               </div>
             {% endif %}
           </div>
-          <div class="card-footer">
-            <span>{{ f.get('Source Filename', '—') }}</span>
-            {% if f.get('Confidence Score') is not none %}
-              &nbsp;·&nbsp;Confidence:
-              <strong class="{% if f['Confidence Score'] < 0.85 %}conf-low{% elif f['Confidence Score'] < 0.95 %}conf-warn{% else %}conf-high{% endif %}">
-                {{ "%.0f"|format(f['Confidence Score'] * 100) }}%
-              </strong>
+          <div class="card-footer" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px">
+            <span>{{ f.get('Source Filename', '—') }}
+              {% if f.get('Confidence Score') is not none %}
+                &nbsp;·&nbsp;Confidence:
+                <strong class="{% if f['Confidence Score'] < 0.85 %}conf-low{% elif f['Confidence Score'] < 0.95 %}conf-warn{% else %}conf-high{% endif %}">
+                  {{ "%.0f"|format(f['Confidence Score'] * 100) }}%
+                </strong>
+              {% endif %}
+            </span>
+            {% if source_page_full_url %}
+            <a href="{{ source_page_full_url }}" target="_blank" rel="noopener" class="small" style="color:var(--blue)">Open at full size ↗</a>
             {% endif %}
           </div>
         </div>
       </div>
 
-      <!-- Right: decision panel + editable fields -->
+      <!-- ── Right: decision panel + summary + all-data collapse ──────── -->
       <div>
 
-        <!-- "Why this needs you" decision panel -->
-        {% if issues %}
+        <!-- "Why this needs you" — primary issues only -->
+        {% if primary_issues %}
         <span class="section-label">WHY THIS NEEDS YOU</span>
-        <div id="issues-panel" class="mb-16">
-          {% set undecided_ns = namespace(count=issues | length) %}
-          {% for issue in issues %}
+        <div id="issues-panel" class="mb-8">
+          {% for issue in primary_issues %}
           <div class="issue-card issue-{{ issue.type }}" data-issue-id="{{ issue.id }}" data-decided="false">
             <div class="issue-header">
               <span class="issue-title">{{ issue.title }}</span>
@@ -191,400 +193,479 @@
         </div>
         {% endif %}
 
-        <!-- All extracted data -->
-        <span class="section-label">ALL EXTRACTED DATA</span>
+        <!-- Secondary issues: collapsed one-liner -->
+        {% if secondary_issues %}
+        <details class="secondary-issues-wrap mb-16">
+          <summary class="secondary-issues-toggle">{{ secondary_issues | length }} other flag{{ 's' if secondary_issues | length != 1 else '' }} — click to view</summary>
+          <ul class="secondary-issues-list">
+            {% for issue in secondary_issues %}
+            <li class="secondary-issue-item">{{ issue.title }}</li>
+            {% endfor %}
+          </ul>
+        </details>
+        {% elif primary_issues %}
+        <div class="mb-16"></div>
+        {% endif %}
+
+        <!-- "What we read" — the key fields Haley actually decides on -->
+        <span class="section-label">WHAT WE READ</span>
         <div class="card mb-16">
-          <div class="card-header">Certificate details</div>
-          <div class="card-body">
-            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px 16px">
-              <div>
-                <label class="field-label" for="f-named-insured">Named Insured</label>
-                <input type="text" id="f-named-insured" name="named_insured"
-                       class="field-input {% if (-1, 'named_insured') in highlight_cells %}disagree-cell{% endif %}"
-                       value="{{ raw_data.get('named_insured') or '' }}" placeholder="(blank)">
-                {% if (-1, 'named_insured') in highlight_cells and second_data %}
-                  <p class="disagree-note">Other read said: {{ second_data.get('named_insured') or '(blank)' }}</p>
+          <div class="card-body" style="padding:14px 18px">
+            <div class="summary-table">
+
+              <div class="summary-row">
+                <span class="summary-key">Named insured</span>
+                <span class="summary-val">{{ raw_data.get('named_insured') or '—' }}</span>
+              </div>
+
+              <div class="summary-row">
+                <span class="summary-key">Contact email</span>
+                <span class="summary-val {% if not contact_email %}not-on-file{% endif %}">{{ contact_email or 'not on file' }}</span>
+              </div>
+
+              <div class="summary-divider"></div>
+
+              <div class="summary-row">
+                <span class="summary-key">General Liability</span>
+                {% if gl_policy %}
+                  <span class="summary-val">
+                    <span class="pol-num">{{ gl_policy.get('policy_number') or '—' }}</span>
+                    <span class="pol-dates">{{ gl_policy.get('effective_date') or '?' }} – {{ gl_policy.get('expiration_date') or '?' }}</span>
+                  </span>
+                {% else %}
+                  <span class="summary-val not-on-file">not on file</span>
                 {% endif %}
               </div>
-              <div>
-                <label class="field-label" for="f-cert-holder">Certificate Holder</label>
-                <input type="text" id="f-cert-holder" name="certificate_holder"
-                       class="field-input"
-                       value="{{ raw_data.get('certificate_holder') or '' }}" placeholder="(blank)">
+
+              <div class="summary-row">
+                <span class="summary-key">Workers' Comp</span>
+                {% if wc_policy %}
+                  <span class="summary-val">
+                    <span class="pol-num">{{ wc_policy.get('policy_number') or '—' }}</span>
+                    <span class="pol-dates">{{ wc_policy.get('effective_date') or '?' }} – {{ wc_policy.get('expiration_date') or '?' }}</span>
+                  </span>
+                {% else %}
+                  <span class="summary-val not-on-file">not on file</span>
+                {% endif %}
               </div>
-              <div>
-                <label class="field-label" for="f-doc-type">Document Type</label>
-                {% set cur_doc = (raw_data.get('document_type') or '') %}
-                <select id="f-doc-type" name="document_type" class="field-input">
-                  <option value="" {% if not cur_doc %}selected{% endif %}>(blank)</option>
-                  <option value="COI" {% if cur_doc == 'COI' %}selected{% endif %}>COI</option>
-                  <option value="cancellation_notice" {% if cur_doc == 'cancellation_notice' %}selected{% endif %}>cancellation_notice</option>
-                  <option value="endorsement" {% if cur_doc == 'endorsement' %}selected{% endif %}>endorsement</option>
-                  <option value="reinstatement" {% if cur_doc == 'reinstatement' %}selected{% endif %}>reinstatement</option>
-                  <option value="unknown" {% if cur_doc == 'unknown' %}selected{% endif %}>unknown</option>
-                </select>
+
+              {% if other_policy_count > 0 %}
+              <div class="summary-row">
+                <span class="summary-key"></span>
+                <details class="other-pols-expand">
+                  <summary class="other-pols-toggle">{{ other_policy_count }} other {{ 'policy' if other_policy_count == 1 else 'policies' }} ▾</summary>
+                  <div class="other-pols-list">
+                    {% for i, p in enumerate(raw_data.get('policies') or []) %}
+                      {% if not (gl_idx is not none and i == gl_idx) and not (wc_idx is not none and i == wc_idx) %}
+                      <div class="other-pol-row">
+                        <span class="other-pol-type">{{ p.get('policy_type') or '—' }}</span>
+                        <span class="pol-num">{{ p.get('policy_number') or '—' }}</span>
+                        <span class="pol-dates">{{ p.get('effective_date') or '?' }} – {{ p.get('expiration_date') or '?' }}</span>
+                      </div>
+                      {% endif %}
+                    {% endfor %}
+                  </div>
+                </details>
               </div>
-              <div>
-                <label class="field-label">Contact Emails</label>
-                <input type="text" class="field-input" readonly
-                       placeholder="(blank)"
-                       value="{{ (raw_data.get('contact_emails') or []) | join(', ') }}">
-              </div>
-              <div>
-                <label class="field-label" for="f-cert-date">Certificate Date</label>
-                <input type="text" id="f-cert-date" name="certificate_date"
-                       class="field-input"
-                       value="{{ raw_data.get('certificate_date') or '' }}" placeholder="(blank)">
-              </div>
-              <div>
-                <label class="field-label">Confidence</label>
-                <input type="text" class="field-input" readonly
-                       placeholder="(blank)"
-                       value="{% if raw_data.get('confidence') is not none %}{{ '%.0f'|format((raw_data.get('confidence') or 0) * 100) }}%{% endif %}">
-              </div>
-              <div style="grid-column:1 / -1">
-                <label class="field-label" for="f-desc-ops">Description of Operations</label>
-                <textarea id="f-desc-ops" name="description_of_operations"
-                          class="field-input field-textarea" rows="4"
-                          placeholder="(blank)">{{ raw_data.get('description_of_operations') or '' }}</textarea>
-              </div>
+              {% endif %}
+
             </div>
           </div>
         </div>
 
-        <!-- Policies -->
-        <div class="card mb-16">
-          <div class="card-header">
-            Policies ({{ (raw_data.get('policies') or []) | length }})
-          </div>
-          {% set policies = raw_data.get('policies') or [] %}
-          {% if policies %}
-          <div class="card-body">
-          {% for i, p in enumerate(policies) %}
-          <div class="policy-card {% if not loop.last %}mb-12{% endif %}">
-            <div class="policy-card-hd">
-              <span class="policy-card-num">{{ i + 1 }}</span>
-              <span class="policy-card-type">
-                <input type="text" name="policy_{{ i }}_policy_type"
-                       class="policy-type-input {% if (i, 'policy_type') in highlight_cells %}disagree-cell{% endif %}"
-                       value="{{ p.get('policy_type') or '' }}" placeholder="(blank)">
-              </span>
-              <span class="policy-card-polnum">
-                <input type="text" name="policy_{{ i }}_policy_number"
-                       class="policy-num-input {% if (i, 'policy_number') in highlight_cells %}disagree-cell{% endif %}"
-                       value="{{ p.get('policy_number') or '' }}" placeholder="(blank)">
-              </span>
-              {% if (i, 'policy_number') in highlight_cells and second_data and second_data.get('policies') and i < (second_data.get('policies') | length) %}
-                <p class="disagree-note">Other read: {{ second_data['policies'][i].get('policy_number') or '(blank)' }}</p>
-              {% endif %}
-            </div>
-            <div class="policy-card-body">
-              <div class="policy-card-grid">
+        <!-- All extracted data — collapsed by default; corrections work inside here -->
+        <details class="all-data-section mb-16">
+          <summary class="all-data-toggle">ALL EXTRACTED DATA — show all fields &amp; corrections</summary>
+
+          <!-- Certificate details -->
+          <div class="card mb-16 mt-12">
+            <div class="card-header">Certificate details</div>
+            <div class="card-body">
+              <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px 16px">
                 <div>
-                  <label class="field-label-sm">Carrier</label>
-                  <input type="text" name="policy_{{ i }}_carrier"
-                         class="policy-input {% if (i, 'carrier') in highlight_cells %}disagree-cell{% endif %}"
-                         value="{{ p.get('carrier') or '' }}" placeholder="(blank)">
+                  <label class="field-label" for="f-named-insured">Named Insured</label>
+                  <input type="text" id="f-named-insured" name="named_insured"
+                         class="field-input {% if (-1, 'named_insured') in highlight_cells %}disagree-cell{% endif %}"
+                         value="{{ raw_data.get('named_insured') or '' }}" placeholder="(blank)">
+                  {% if (-1, 'named_insured') in highlight_cells and second_data %}
+                    <p class="disagree-note">Other read said: {{ second_data.get('named_insured') or '(blank)' }}</p>
+                  {% endif %}
                 </div>
                 <div>
-                  <label class="field-label-sm">Effective</label>
-                  <input type="text" name="policy_{{ i }}_effective_date"
-                         class="policy-input {% if (i, 'effective_date') in highlight_cells %}disagree-cell{% endif %}"
-                         value="{{ p.get('effective_date') or '' }}" placeholder="(blank)">
+                  <label class="field-label" for="f-cert-holder">Certificate Holder</label>
+                  <input type="text" id="f-cert-holder" name="certificate_holder"
+                         class="field-input"
+                         value="{{ raw_data.get('certificate_holder') or '' }}" placeholder="(blank)">
                 </div>
                 <div>
-                  <label class="field-label-sm">Expiration</label>
-                  <input type="text" name="policy_{{ i }}_expiration_date"
-                         class="policy-input {% if (i, 'expiration_date') in highlight_cells %}disagree-cell{% endif %}"
-                         value="{{ p.get('expiration_date') or '' }}" placeholder="(blank)">
-                </div>
-                <div>
-                  <label class="field-label-sm">Basis</label>
-                  <select name="policy_{{ i }}_policy_basis"
-                          class="policy-input {% if (i, 'policy_basis') in highlight_cells %}disagree-cell{% endif %}">
-                    <option value="" {% if not p.get('policy_basis') %}selected{% endif %}>—</option>
-                    <option value="occurrence" {% if p.get('policy_basis') == 'occurrence' %}selected{% endif %}>Occurrence</option>
-                    <option value="claims-made" {% if p.get('policy_basis') == 'claims-made' %}selected{% endif %}>Claims-made</option>
+                  <label class="field-label" for="f-doc-type">Document Type</label>
+                  {% set cur_doc = (raw_data.get('document_type') or '') %}
+                  <select id="f-doc-type" name="document_type" class="field-input">
+                    <option value="" {% if not cur_doc %}selected{% endif %}>(blank)</option>
+                    <option value="COI" {% if cur_doc == 'COI' %}selected{% endif %}>COI</option>
+                    <option value="cancellation_notice" {% if cur_doc == 'cancellation_notice' %}selected{% endif %}>cancellation_notice</option>
+                    <option value="endorsement" {% if cur_doc == 'endorsement' %}selected{% endif %}>endorsement</option>
+                    <option value="reinstatement" {% if cur_doc == 'reinstatement' %}selected{% endif %}>reinstatement</option>
+                    <option value="unknown" {% if cur_doc == 'unknown' %}selected{% endif %}>unknown</option>
                   </select>
                 </div>
                 <div>
-                  <label class="field-label-sm">Retro Date</label>
-                  <input type="text" name="policy_{{ i }}_retro_date"
-                         class="policy-input"
-                         value="{{ p.get('retro_date') or '' }}" placeholder="(blank)">
+                  <label class="field-label">Contact Emails</label>
+                  <input type="text" class="field-input" readonly
+                         placeholder="(blank)"
+                         value="{{ (raw_data.get('contact_emails') or []) | join(', ') }}">
                 </div>
-                <div style="grid-column:1/-1">
-                  <label class="field-label-sm">Coverage Limits</label>
-                  <input type="text" name="policy_{{ i }}_coverage_limits"
-                         class="policy-input"
-                         value="{{ p.get('coverage_limits') or '' }}" placeholder="(blank)">
+                <div>
+                  <label class="field-label" for="f-cert-date">Certificate Date</label>
+                  <input type="text" id="f-cert-date" name="certificate_date"
+                         class="field-input"
+                         value="{{ raw_data.get('certificate_date') or '' }}" placeholder="(blank)">
                 </div>
-              </div>
-
-              <!-- Checkbox toggles -->
-              <div class="policy-toggles">
-                {% set tristate_fields = [
-                  ('additional_insured_checked',    'Additional Insured (AI)'),
-                  ('waiver_of_subrogation_checked', 'Waiver of Subrogation (WoS)'),
-                ] %}
-                {% for chk_key, chk_label in tristate_fields %}
-                {% set cur_val = norm_tristate(p.get(chk_key)) %}
-                {% set disagree = (i, chk_key) in highlight_cells %}
-                <div class="toggle-row{% if disagree %} toggle-disagree{% endif %}">
-                  <span class="toggle-label">{{ chk_label }}</span>
-                  <div class="toggle-group">
-                    <label class="toggle-opt">
-                      <input type="radio" name="policy_{{ i }}_{{ chk_key }}" value="checked"
-                             {% if cur_val == 'checked' %}checked{% endif %}>
-                      <span class="toggle-pill">Checked</span>
-                    </label>
-                    <label class="toggle-opt">
-                      <input type="radio" name="policy_{{ i }}_{{ chk_key }}" value="not_checked"
-                             {% if cur_val == 'not_checked' %}checked{% endif %}>
-                      <span class="toggle-pill">Not checked</span>
-                    </label>
-                    <label class="toggle-opt">
-                      <input type="radio" name="policy_{{ i }}_{{ chk_key }}" value="not_applicable"
-                             {% if cur_val == 'not_applicable' %}checked{% endif %}>
-                      <span class="toggle-pill">N/A</span>
-                    </label>
-                  </div>
-                  {% if disagree and second_data and second_data.get('policies') and i < (second_data.get('policies') | length) %}
-                    {% set other_val = norm_tristate(second_data['policies'][i].get(chk_key)) %}
-                    <p class="disagree-note">
-                      Other read: {{ {'checked': 'Checked', 'not_checked': 'Not checked', 'not_applicable': 'N/A'}[other_val] }}
-                    </p>
-                  {% endif %}
+                <div>
+                  <label class="field-label">Confidence</label>
+                  <input type="text" class="field-input" readonly
+                         placeholder="(blank)"
+                         value="{% if raw_data.get('confidence') is not none %}{{ '%.0f'|format((raw_data.get('confidence') or 0) * 100) }}%{% endif %}">
                 </div>
-                {% endfor %}
-                {% set is_pnc = p.get('primary_noncontributory_checked') %}
-                {% set disagree_pnc = (i, 'primary_noncontributory_checked') in highlight_cells %}
-                <div class="toggle-row{% if disagree_pnc %} toggle-disagree{% endif %}">
-                  <span class="toggle-label">Primary & Non-Contributory (P&N)</span>
-                  <div class="toggle-group">
-                    <label class="toggle-opt">
-                      <input type="radio" name="policy_{{ i }}_primary_noncontributory_checked" value="true"
-                             {% if is_pnc %}checked{% endif %}>
-                      <span class="toggle-pill">Checked</span>
-                    </label>
-                    <label class="toggle-opt">
-                      <input type="radio" name="policy_{{ i }}_primary_noncontributory_checked" value="false"
-                             {% if not is_pnc %}checked{% endif %}>
-                      <span class="toggle-pill">Not checked</span>
-                    </label>
-                  </div>
-                  {% if disagree_pnc and second_data and second_data.get('policies') and i < (second_data.get('policies') | length) %}
-                    <p class="disagree-note">
-                      Other read: {{ 'Checked' if second_data['policies'][i].get('primary_noncontributory_checked') else 'Not checked' }}
-                    </p>
-                  {% endif %}
-                </div>
-
-                {% set is_tail = p.get('tail_coverage_evidenced') %}
-                <div class="toggle-row">
-                  <span class="toggle-label">Tail Coverage Evidenced</span>
-                  <div class="toggle-group">
-                    <label class="toggle-opt">
-                      <input type="radio" name="policy_{{ i }}_tail_coverage_evidenced" value="true"
-                             {% if is_tail %}checked{% endif %}>
-                      <span class="toggle-pill">Yes</span>
-                    </label>
-                    <label class="toggle-opt">
-                      <input type="radio" name="policy_{{ i }}_tail_coverage_evidenced" value="false"
-                             {% if not is_tail %}checked{% endif %}>
-                      <span class="toggle-pill">No</span>
-                    </label>
-                  </div>
-                </div>
-
-                {% set is_invalid = p.get('policy_number_invalid') %}
-                <div class="toggle-row">
-                  <span class="toggle-label">Policy Number Invalid</span>
-                  <div class="toggle-group">
-                    <label class="toggle-opt">
-                      <input type="radio" name="policy_{{ i }}_policy_number_invalid" value="true"
-                             {% if is_invalid %}checked{% endif %}>
-                      <span class="toggle-pill">Yes</span>
-                    </label>
-                    <label class="toggle-opt">
-                      <input type="radio" name="policy_{{ i }}_policy_number_invalid" value="false"
-                             {% if not is_invalid %}checked{% endif %}>
-                      <span class="toggle-pill">No</span>
-                    </label>
-                  </div>
+                <div style="grid-column:1 / -1">
+                  <label class="field-label" for="f-desc-ops">Description of Operations</label>
+                  <textarea id="f-desc-ops" name="description_of_operations"
+                            class="field-input field-textarea" rows="4"
+                            placeholder="(blank)">{{ raw_data.get('description_of_operations') or '' }}</textarea>
                 </div>
               </div>
             </div>
           </div>
-          {% endfor %}
-          </div>
-          {% else %}
-            <div class="card-body text-secondary">No policies extracted.</div>
-          {% endif %}
-        </div>
 
-        <!-- Endorsement statements -->
-        <div class="card mb-16">
-          <div class="card-header">Endorsements — column vs. description of operations</div>
-          {# rule for what counts toward compliance is Haley's decision, not decided yet #}
-          <div class="card-body">
-            {% set ai_stmt = raw_data.get('additional_insured_statement') or {} %}
-            {% set wos_stmt = raw_data.get('waiver_of_subrogation_statement') or {} %}
-            {% set ai_stmt_flag = (-1, 'additional_insured_statement') in highlight_cells %}
-            {% set wos_stmt_flag = (-1, 'waiver_of_subrogation_statement') in highlight_cells %}
-            {# Compute column-box summaries across all policies #}
-            {% set ai_ns = namespace(any_checked=false, any_na=false) %}
-            {% set wos_ns = namespace(any_checked=false, any_na=false) %}
-            {% for p in raw_data.get('policies') or [] %}
-              {% set ai_v = norm_tristate(p.get('additional_insured_checked')) %}
-              {% set wos_v = norm_tristate(p.get('waiver_of_subrogation_checked')) %}
-              {% if ai_v == 'checked' %}{% set ai_ns.any_checked = true %}{% endif %}
-              {% if ai_v == 'not_applicable' %}{% set ai_ns.any_na = true %}{% endif %}
-              {% if wos_v == 'checked' %}{% set wos_ns.any_checked = true %}{% endif %}
-              {% if wos_v == 'not_applicable' %}{% set wos_ns.any_na = true %}{% endif %}
-            {% endfor %}
-            <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px 24px">
-
-              {% for stmt_name, stmt_label, stmt_data, stmt_flag, form_prefix, ns_data in [
-                   ('additional_insured_statement', 'Additional Insured (AI)', ai_stmt, ai_stmt_flag, 'ai_stmt', ai_ns),
-                   ('waiver_of_subrogation_statement', 'Waiver of Subrogation (WoS)', wos_stmt, wos_stmt_flag, 'wos_stmt', wos_ns),
-                 ] %}
-              <div>
-                <div class="field-label mb-4">{{ stmt_label }}</div>
-                {# Computed box-vs-description summary (not captured yet when old row has no statement obj) #}
-                {% if raw_data.get(stmt_name) is none %}
-                  <span class="flag flag-muted small">Boxes: {% if ns_data.any_checked %}checked on ≥1 policy{% elif ns_data.any_na %}N/A on all policies{% else %}not checked{% endif %}</span>
-                  <div class="small text-secondary mt-8 mb-4"><em>not captured yet</em></div>
-                {% else %}
-                  {% if ns_data.any_checked and stmt_data.get('present') %}
-                    <span class="flag flag-muted small">Confirmed in both places</span>
-                  {% elif ns_data.any_checked %}
-                    <span class="flag flag-muted small">Only in the box</span>
-                  {% elif stmt_data.get('present') %}
-                    <span class="flag flag-muted small">Only in the description</span>
-                  {% elif ns_data.any_na %}
-                    <span class="flag flag-muted small">Column is N/A</span>
-                  {% else %}
-                    <span class="flag flag-muted small">Not shown</span>
-                  {% endif %}
-                {% endif %}
-
-                <div class="toggle-row mt-8{% if stmt_flag %} toggle-disagree{% endif %}">
-                  <span class="toggle-label">Statement present</span>
-                  <div class="toggle-group">
-                    <label class="toggle-opt">
-                      <input type="radio" name="{{ form_prefix }}_present" value="true"
-                             {% if stmt_data.get('present') %}checked{% endif %}>
-                      <span class="toggle-pill">Yes</span>
-                    </label>
-                    <label class="toggle-opt">
-                      <input type="radio" name="{{ form_prefix }}_present" value="false"
-                             {% if not stmt_data.get('present') %}checked{% endif %}>
-                      <span class="toggle-pill">No</span>
-                    </label>
-                  </div>
-                </div>
-
-                <label class="field-label-sm mt-8">Quote</label>
-                <textarea name="{{ form_prefix }}_quote" class="field-input field-textarea" rows="3"
-                          placeholder="(blank)">{{ stmt_data.get('quote') or '' }}</textarea>
-
-                <label class="field-label-sm mt-8">Policies named (comma-separated)</label>
-                <input type="text" name="{{ form_prefix }}_policies_named"
-                       class="field-input"
-                       value="{{ (stmt_data.get('policies_named') or []) | join(', ') }}"
-                       placeholder="(blank)">
-
-                {% if stmt_flag and second_data %}
-                  {% set other_stmt = second_data.get(stmt_name) or {} %}
-                  <p class="disagree-note">Other read: statement {{ 'present' if other_stmt.get('present') else 'absent' }}</p>
+          <!-- Policies (all) -->
+          <div class="card mb-16">
+            <div class="card-header">
+              Policies ({{ (raw_data.get('policies') or []) | length }})
+            </div>
+            {% set policies = raw_data.get('policies') or [] %}
+            {% if policies %}
+            <div class="card-body">
+            {% for i, p in enumerate(policies) %}
+            <div class="policy-card {% if not loop.last %}mb-12{% endif %}">
+              <div class="policy-card-hd">
+                <span class="policy-card-num">{{ i + 1 }}</span>
+                <span class="policy-card-type">
+                  <input type="text" name="policy_{{ i }}_policy_type"
+                         class="policy-type-input {% if (i, 'policy_type') in highlight_cells %}disagree-cell{% endif %}"
+                         value="{{ p.get('policy_type') or '' }}" placeholder="(blank)">
+                </span>
+                <span class="policy-card-polnum">
+                  <input type="text" name="policy_{{ i }}_policy_number"
+                         class="policy-num-input {% if (i, 'policy_number') in highlight_cells %}disagree-cell{% endif %}"
+                         value="{{ p.get('policy_number') or '' }}" placeholder="(blank)">
+                </span>
+                {% if (i, 'policy_number') in highlight_cells and second_data and second_data.get('policies') and i < (second_data.get('policies') | length) %}
+                  <p class="disagree-note">Other read: {{ second_data['policies'][i].get('policy_number') or '(blank)' }}</p>
                 {% endif %}
               </div>
-              {% endfor %}
+              <div class="policy-card-body">
+                <div class="policy-card-grid">
+                  <div>
+                    <label class="field-label-sm">Carrier</label>
+                    <input type="text" name="policy_{{ i }}_carrier"
+                           class="policy-input {% if (i, 'carrier') in highlight_cells %}disagree-cell{% endif %}"
+                           value="{{ p.get('carrier') or '' }}" placeholder="(blank)">
+                  </div>
+                  <div>
+                    <label class="field-label-sm">Effective</label>
+                    <input type="text" name="policy_{{ i }}_effective_date"
+                           class="policy-input {% if (i, 'effective_date') in highlight_cells %}disagree-cell{% endif %}"
+                           value="{{ p.get('effective_date') or '' }}" placeholder="(blank)">
+                  </div>
+                  <div>
+                    <label class="field-label-sm">Expiration</label>
+                    <input type="text" name="policy_{{ i }}_expiration_date"
+                           class="policy-input {% if (i, 'expiration_date') in highlight_cells %}disagree-cell{% endif %}"
+                           value="{{ p.get('expiration_date') or '' }}" placeholder="(blank)">
+                  </div>
+                  <div>
+                    <label class="field-label-sm">Basis</label>
+                    <select name="policy_{{ i }}_policy_basis"
+                            class="policy-input {% if (i, 'policy_basis') in highlight_cells %}disagree-cell{% endif %}">
+                      <option value="" {% if not p.get('policy_basis') %}selected{% endif %}>—</option>
+                      <option value="occurrence" {% if p.get('policy_basis') == 'occurrence' %}selected{% endif %}>Occurrence</option>
+                      <option value="claims-made" {% if p.get('policy_basis') == 'claims-made' %}selected{% endif %}>Claims-made</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="field-label-sm">Retro Date</label>
+                    <input type="text" name="policy_{{ i }}_retro_date"
+                           class="policy-input"
+                           value="{{ p.get('retro_date') or '' }}" placeholder="(blank)">
+                  </div>
+                  <div style="grid-column:1/-1">
+                    <label class="field-label-sm">Coverage Limits</label>
+                    <input type="text" name="policy_{{ i }}_coverage_limits"
+                           class="policy-input"
+                           value="{{ p.get('coverage_limits') or '' }}" placeholder="(blank)">
+                  </div>
+                </div>
 
-            </div>
-          </div>
-        </div>
+                <!-- Checkbox toggles -->
+                <div class="policy-toggles">
+                  {% set tristate_fields = [
+                    ('additional_insured_checked',    'Additional Insured (AI)'),
+                    ('waiver_of_subrogation_checked', 'Waiver of Subrogation (WoS)'),
+                  ] %}
+                  {% for chk_key, chk_label in tristate_fields %}
+                  {% set cur_val = norm_tristate(p.get(chk_key)) %}
+                  {% set disagree = (i, chk_key) in highlight_cells %}
+                  <div class="toggle-row{% if disagree %} toggle-disagree{% endif %}">
+                    <span class="toggle-label">{{ chk_label }}</span>
+                    <div class="toggle-group">
+                      <label class="toggle-opt">
+                        <input type="radio" name="policy_{{ i }}_{{ chk_key }}" value="checked"
+                               {% if cur_val == 'checked' %}checked{% endif %}>
+                        <span class="toggle-pill">Checked</span>
+                      </label>
+                      <label class="toggle-opt">
+                        <input type="radio" name="policy_{{ i }}_{{ chk_key }}" value="not_checked"
+                               {% if cur_val == 'not_checked' %}checked{% endif %}>
+                        <span class="toggle-pill">Not checked</span>
+                      </label>
+                      <label class="toggle-opt">
+                        <input type="radio" name="policy_{{ i }}_{{ chk_key }}" value="not_applicable"
+                               {% if cur_val == 'not_applicable' %}checked{% endif %}>
+                        <span class="toggle-pill">N/A</span>
+                      </label>
+                    </div>
+                    {% if disagree and second_data and second_data.get('policies') and i < (second_data.get('policies') | length) %}
+                      {% set other_val = norm_tristate(second_data['policies'][i].get(chk_key)) %}
+                      <p class="disagree-note">
+                        Other read: {{ {'checked': 'Checked', 'not_checked': 'Not checked', 'not_applicable': 'N/A'}[other_val] }}
+                      </p>
+                    {% endif %}
+                  </div>
+                  {% endfor %}
+                  {% set is_pnc = p.get('primary_noncontributory_checked') %}
+                  {% set disagree_pnc = (i, 'primary_noncontributory_checked') in highlight_cells %}
+                  <div class="toggle-row{% if disagree_pnc %} toggle-disagree{% endif %}">
+                    <span class="toggle-label">Primary & Non-Contributory (P&N)</span>
+                    <div class="toggle-group">
+                      <label class="toggle-opt">
+                        <input type="radio" name="policy_{{ i }}_primary_noncontributory_checked" value="true"
+                               {% if is_pnc %}checked{% endif %}>
+                        <span class="toggle-pill">Checked</span>
+                      </label>
+                      <label class="toggle-opt">
+                        <input type="radio" name="policy_{{ i }}_primary_noncontributory_checked" value="false"
+                               {% if not is_pnc %}checked{% endif %}>
+                        <span class="toggle-pill">Not checked</span>
+                      </label>
+                    </div>
+                    {% if disagree_pnc and second_data and second_data.get('policies') and i < (second_data.get('policies') | length) %}
+                      <p class="disagree-note">
+                        Other read: {{ 'Checked' if second_data['policies'][i].get('primary_noncontributory_checked') else 'Not checked' }}
+                      </p>
+                    {% endif %}
+                  </div>
 
-        <!-- Other data (any top-level JSON keys not in the known schema) -->
-        {% set _known_keys = ['document_type', 'named_insured', 'certificate_holder',
-                              'certificate_date', 'contact_emails', 'description_of_operations',
-                              'confidence', 'additional_insured_statement',
-                              'waiver_of_subrogation_statement', 'policies'] %}
-        {% set _ns = namespace(other_keys=[]) %}
-        {% for k in raw_data.keys() %}
-          {% if k not in _known_keys %}
-            {% set _ns.other_keys = _ns.other_keys + [k] %}
-          {% endif %}
-        {% endfor %}
-        {% set _other_keys = _ns.other_keys %}
-        {% if _other_keys %}
-        <div class="card mb-16">
-          <div class="card-header">Other data</div>
-          <div class="card-body">
-            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px 16px">
-            {% for k in _other_keys %}
-              <div>
-                <label class="field-label">{{ k }}</label>
-                <input type="text" class="field-input" readonly
-                       placeholder="(blank)"
-                       value="{% if raw_data[k] is mapping or raw_data[k] is iterable and raw_data[k] is not string %}{{ raw_data[k] | tojson }}{% else %}{{ raw_data[k] if raw_data[k] is not none else '' }}{% endif %}">
+                  {% set is_tail = p.get('tail_coverage_evidenced') %}
+                  <div class="toggle-row">
+                    <span class="toggle-label">Tail Coverage Evidenced</span>
+                    <div class="toggle-group">
+                      <label class="toggle-opt">
+                        <input type="radio" name="policy_{{ i }}_tail_coverage_evidenced" value="true"
+                               {% if is_tail %}checked{% endif %}>
+                        <span class="toggle-pill">Yes</span>
+                      </label>
+                      <label class="toggle-opt">
+                        <input type="radio" name="policy_{{ i }}_tail_coverage_evidenced" value="false"
+                               {% if not is_tail %}checked{% endif %}>
+                        <span class="toggle-pill">No</span>
+                      </label>
+                    </div>
+                  </div>
+
+                  {% set is_invalid = p.get('policy_number_invalid') %}
+                  <div class="toggle-row">
+                    <span class="toggle-label">Policy Number Invalid</span>
+                    <div class="toggle-group">
+                      <label class="toggle-opt">
+                        <input type="radio" name="policy_{{ i }}_policy_number_invalid" value="true"
+                               {% if is_invalid %}checked{% endif %}>
+                        <span class="toggle-pill">Yes</span>
+                      </label>
+                      <label class="toggle-opt">
+                        <input type="radio" name="policy_{{ i }}_policy_number_invalid" value="false"
+                               {% if not is_invalid %}checked{% endif %}>
+                        <span class="toggle-pill">No</span>
+                      </label>
+                    </div>
+                  </div>
+                </div>
               </div>
+            </div>
             {% endfor %}
             </div>
-          </div>
-        </div>
-        {% endif %}
-
-        <!-- AI disagreements -->
-        {% if ai_disagrees %}
-        <div class="disagree-panel mb-16">
-          <div class="disagree-panel-header">
-            The two AI reads disagreed on {{ ai_disagrees | length }} field(s) — highlighted above
-          </div>
-          <ul class="disagree-panel-list">
-            {% for d in ai_disagrees %}
-            <li>{{ d }}</li>
-            {% endfor %}
-          </ul>
-        </div>
-        {% endif %}
-
-        <!-- Prior extraction collapsible -->
-        {% if prior_data %}
-        <details class="prior-section mb-16">
-          <summary><span class="prior-toggle">What the AI said before ▾</span></summary>
-          <div class="prior-content">
-            <p class="mb-8 small">
-              <strong>Named Insured:</strong> {{ prior_data.get('named_insured') or '—' }}&nbsp;·&nbsp;
-              <strong>Document Type:</strong> {{ prior_data.get('document_type') or '—' }}&nbsp;·&nbsp;
-              <strong>Policies:</strong> {{ (prior_data.get('policies') or []) | length }}
-            </p>
-            {% set prior_pols = prior_data.get('policies') or [] %}
-            {% if prior_pols %}
-            <div class="policy-table-wrap">
-              <table class="policy-table">
-                <thead>
-                  <tr><th>Type</th><th>Number</th><th>Eff</th><th>Exp</th><th>AI</th><th>WoS</th></tr>
-                </thead>
-                <tbody>
-                {% for p in prior_pols %}
-                <tr>
-                  <td>{{ p.get('policy_type') or '—' }}</td>
-                  <td>{{ p.get('policy_number') or '—' }}</td>
-                  <td>{{ p.get('effective_date') or '—' }}</td>
-                  <td>{{ p.get('expiration_date') or '—' }}</td>
-                  <td>{{ {'checked': 'Y', 'not_checked': 'N', 'not_applicable': 'N/A'}[norm_tristate(p.get('additional_insured_checked'))] }}</td>
-                  <td>{{ {'checked': 'Y', 'not_checked': 'N', 'not_applicable': 'N/A'}[norm_tristate(p.get('waiver_of_subrogation_checked'))] }}</td>
-                </tr>
-                {% endfor %}
-                </tbody>
-              </table>
-            </div>
+            {% else %}
+              <div class="card-body text-secondary">No policies extracted.</div>
             {% endif %}
           </div>
-        </details>
-        {% endif %}
+
+          <!-- Endorsement statements -->
+          <div class="card mb-16">
+            <div class="card-header">Endorsements — column vs. description of operations</div>
+            <div class="card-body">
+              {% set ai_stmt = raw_data.get('additional_insured_statement') or {} %}
+              {% set wos_stmt = raw_data.get('waiver_of_subrogation_statement') or {} %}
+              {% set ai_stmt_flag = (-1, 'additional_insured_statement') in highlight_cells %}
+              {% set wos_stmt_flag = (-1, 'waiver_of_subrogation_statement') in highlight_cells %}
+              {% set ai_ns = namespace(any_checked=false, any_na=false) %}
+              {% set wos_ns = namespace(any_checked=false, any_na=false) %}
+              {% for p in raw_data.get('policies') or [] %}
+                {% set ai_v = norm_tristate(p.get('additional_insured_checked')) %}
+                {% set wos_v = norm_tristate(p.get('waiver_of_subrogation_checked')) %}
+                {% if ai_v == 'checked' %}{% set ai_ns.any_checked = true %}{% endif %}
+                {% if ai_v == 'not_applicable' %}{% set ai_ns.any_na = true %}{% endif %}
+                {% if wos_v == 'checked' %}{% set wos_ns.any_checked = true %}{% endif %}
+                {% if wos_v == 'not_applicable' %}{% set wos_ns.any_na = true %}{% endif %}
+              {% endfor %}
+              <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px 24px">
+                {% for stmt_name, stmt_label, stmt_data, stmt_flag, form_prefix, ns_data in [
+                     ('additional_insured_statement', 'Additional Insured (AI)', ai_stmt, ai_stmt_flag, 'ai_stmt', ai_ns),
+                     ('waiver_of_subrogation_statement', 'Waiver of Subrogation (WoS)', wos_stmt, wos_stmt_flag, 'wos_stmt', wos_ns),
+                   ] %}
+                <div>
+                  <div class="field-label mb-4">{{ stmt_label }}</div>
+                  {% if raw_data.get(stmt_name) is none %}
+                    <span class="flag flag-muted small">Boxes: {% if ns_data.any_checked %}checked on ≥1 policy{% elif ns_data.any_na %}N/A on all policies{% else %}not checked{% endif %}</span>
+                    <div class="small text-secondary mt-8 mb-4"><em>not captured yet</em></div>
+                  {% else %}
+                    {% if ns_data.any_checked and stmt_data.get('present') %}
+                      <span class="flag flag-muted small">Confirmed in both places</span>
+                    {% elif ns_data.any_checked %}
+                      <span class="flag flag-muted small">Only in the box</span>
+                    {% elif stmt_data.get('present') %}
+                      <span class="flag flag-muted small">Only in the description</span>
+                    {% elif ns_data.any_na %}
+                      <span class="flag flag-muted small">Column is N/A</span>
+                    {% else %}
+                      <span class="flag flag-muted small">Not shown</span>
+                    {% endif %}
+                  {% endif %}
+
+                  <div class="toggle-row mt-8{% if stmt_flag %} toggle-disagree{% endif %}">
+                    <span class="toggle-label">Statement present</span>
+                    <div class="toggle-group">
+                      <label class="toggle-opt">
+                        <input type="radio" name="{{ form_prefix }}_present" value="true"
+                               {% if stmt_data.get('present') %}checked{% endif %}>
+                        <span class="toggle-pill">Yes</span>
+                      </label>
+                      <label class="toggle-opt">
+                        <input type="radio" name="{{ form_prefix }}_present" value="false"
+                               {% if not stmt_data.get('present') %}checked{% endif %}>
+                        <span class="toggle-pill">No</span>
+                      </label>
+                    </div>
+                  </div>
+
+                  <label class="field-label-sm mt-8">Quote</label>
+                  <textarea name="{{ form_prefix }}_quote" class="field-input field-textarea" rows="3"
+                            placeholder="(blank)">{{ stmt_data.get('quote') or '' }}</textarea>
+
+                  <label class="field-label-sm mt-8">Policies named (comma-separated)</label>
+                  <input type="text" name="{{ form_prefix }}_policies_named"
+                         class="field-input"
+                         value="{{ (stmt_data.get('policies_named') or []) | join(', ') }}"
+                         placeholder="(blank)">
+
+                  {% if stmt_flag and second_data %}
+                    {% set other_stmt = second_data.get(stmt_name) or {} %}
+                    <p class="disagree-note">Other read: statement {{ 'present' if other_stmt.get('present') else 'absent' }}</p>
+                  {% endif %}
+                </div>
+                {% endfor %}
+              </div>
+            </div>
+          </div>
+
+          <!-- Other data -->
+          {% set _known_keys = ['document_type', 'named_insured', 'certificate_holder',
+                                'certificate_date', 'contact_emails', 'description_of_operations',
+                                'confidence', 'additional_insured_statement',
+                                'waiver_of_subrogation_statement', 'policies'] %}
+          {% set _ns = namespace(other_keys=[]) %}
+          {% for k in raw_data.keys() %}
+            {% if k not in _known_keys %}
+              {% set _ns.other_keys = _ns.other_keys + [k] %}
+            {% endif %}
+          {% endfor %}
+          {% if _ns.other_keys %}
+          <div class="card mb-16">
+            <div class="card-header">Other data</div>
+            <div class="card-body">
+              <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px 16px">
+              {% for k in _ns.other_keys %}
+                <div>
+                  <label class="field-label">{{ k }}</label>
+                  <input type="text" class="field-input" readonly
+                         placeholder="(blank)"
+                         value="{% if raw_data[k] is mapping or raw_data[k] is iterable and raw_data[k] is not string %}{{ raw_data[k] | tojson }}{% else %}{{ raw_data[k] if raw_data[k] is not none else '' }}{% endif %}">
+                </div>
+              {% endfor %}
+              </div>
+            </div>
+          </div>
+          {% endif %}
+
+          <!-- AI disagreements list -->
+          {% if ai_disagrees %}
+          <div class="disagree-panel mb-16">
+            <div class="disagree-panel-header">
+              The two AI reads disagreed on {{ ai_disagrees | length }} field(s) — highlighted above
+            </div>
+            <ul class="disagree-panel-list">
+              {% for d in ai_disagrees %}
+              <li>{{ d }}</li>
+              {% endfor %}
+            </ul>
+          </div>
+          {% endif %}
+
+          <!-- Prior extraction collapsible -->
+          {% if prior_data %}
+          <details class="prior-section mb-16">
+            <summary><span class="prior-toggle">What the AI said before ▾</span></summary>
+            <div class="prior-content">
+              <p class="mb-8 small">
+                <strong>Named Insured:</strong> {{ prior_data.get('named_insured') or '—' }}&nbsp;·&nbsp;
+                <strong>Document Type:</strong> {{ prior_data.get('document_type') or '—' }}&nbsp;·&nbsp;
+                <strong>Policies:</strong> {{ (prior_data.get('policies') or []) | length }}
+              </p>
+              {% set prior_pols = prior_data.get('policies') or [] %}
+              {% if prior_pols %}
+              <div class="policy-table-wrap">
+                <table class="policy-table">
+                  <thead>
+                    <tr><th>Type</th><th>Number</th><th>Eff</th><th>Exp</th><th>AI</th><th>WoS</th></tr>
+                  </thead>
+                  <tbody>
+                  {% for p in prior_pols %}
+                  <tr>
+                    <td>{{ p.get('policy_type') or '—' }}</td>
+                    <td>{{ p.get('policy_number') or '—' }}</td>
+                    <td>{{ p.get('effective_date') or '—' }}</td>
+                    <td>{{ p.get('expiration_date') or '—' }}</td>
+                    <td>{{ {'checked': 'Y', 'not_checked': 'N', 'not_applicable': 'N/A'}[norm_tristate(p.get('additional_insured_checked'))] }}</td>
+                    <td>{{ {'checked': 'Y', 'not_checked': 'N', 'not_applicable': 'N/A'}[norm_tristate(p.get('waiver_of_subrogation_checked'))] }}</td>
+                  </tr>
+                  {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+              {% endif %}
+            </div>
+          </details>
+          {% endif %}
+
+        </details><!-- /all-data-section -->
 
         <!-- Action bar -->
         <div class="action-bar">
@@ -606,6 +687,7 @@
           <p class="action-note">
             This confirms the data matches the page. It does not approve the vendor's coverage and nothing is sent.
           </p>
+          <p class="kbd-hint">Keyboard: <kbd>Enter</kbd> = Data is correct &nbsp;·&nbsp; <kbd>J</kbd> = next &nbsp;·&nbsp; <kbd>K</kbd> = previous</p>
         </div>
 
       </div><!-- /right -->
@@ -615,7 +697,7 @@
 </div>
 
 <script>
-/* ── Issue panel ── */
+/* ── Issue panel (primary issues only) ── */
 (function () {
   var panel = document.getElementById('issues-panel');
   if (!panel) return;
@@ -639,20 +721,15 @@
     updateBtn();
   }
 
-  /* Sync a radio/select value to the real form input below */
   function driveField(fieldName, value) {
-    /* radio inputs */
-    var radios = document.querySelectorAll('input[type="radio"][name="' + fieldName + '"]');
-    radios.forEach(function (r) { r.checked = (r.value === value); });
-    /* text inputs */
-    var texts = document.querySelectorAll('input[type="text"][name="' + fieldName + '"], textarea[name="' + fieldName + '"]');
-    texts.forEach(function (t) { t.value = value; });
-    /* select */
-    var selects = document.querySelectorAll('select[name="' + fieldName + '"]');
-    selects.forEach(function (s) { s.value = value; });
+    document.querySelectorAll('input[type="radio"][name="' + fieldName + '"]')
+      .forEach(function (r) { r.checked = (r.value === value); });
+    document.querySelectorAll('input[type="text"][name="' + fieldName + '"], textarea[name="' + fieldName + '"]')
+      .forEach(function (t) { t.value = value; });
+    document.querySelectorAll('select[name="' + fieldName + '"]')
+      .forEach(function (s) { s.value = value; });
   }
 
-  /* radio / checkbox controls inside issue cards */
   panel.addEventListener('change', function (e) {
     var input = e.target;
     if (input.tagName !== 'INPUT') return;
@@ -661,7 +738,6 @@
     markDecided(input.closest('[data-issue-id]'));
   });
 
-  /* pick buttons for text fields */
   panel.addEventListener('click', function (e) {
     var btn2 = e.target.closest('.issue-pick-btn');
     if (!btn2) return;
@@ -674,11 +750,10 @@
   updateBtn();
 }());
 
-/* ── Approve button text changes on any form edit ── */
+/* ── Approve button changes on any form edit (no issues) ── */
 (function () {
   var btn = document.getElementById('btn-approve');
   if (!btn) return;
-  /* Only override if there are no issues (issues panel sets its own text) */
   if (document.getElementById('issues-panel')) return;
   var form = btn.closest('form');
   var changed = false;
@@ -687,6 +762,7 @@
   });
 }());
 
+/* ── Image zoom ── */
 (function () {
   var outer = document.getElementById('zoom-outer');
   var canvas = document.getElementById('zoom-canvas');
@@ -722,13 +798,10 @@
     var pct = Math.round(scale * 100) + '%';
     var resetBtn = document.getElementById('zoom-reset');
     if (resetBtn) resetBtn.textContent = pct;
-    var outBtn = document.getElementById('zoom-out');
-    if (outBtn) outBtn.disabled = scale <= MIN;
-    var inBtn = document.getElementById('zoom-in');
-    if (inBtn) inBtn.disabled = scale >= MAX;
+    document.getElementById('zoom-out').disabled = scale <= MIN;
+    document.getElementById('zoom-in').disabled  = scale >= MAX;
   }
 
-  /* wheel zoom */
   outer.addEventListener('wheel', function (e) {
     e.preventDefault();
     var factor = e.deltaY < 0 ? 1.15 : (1 / 1.15);
@@ -736,7 +809,6 @@
     zoomTo(clamp(scale * factor, MIN, MAX), e.clientX - rect.left, e.clientY - rect.top);
   }, { passive: false });
 
-  /* double-click toggle */
   outer.addEventListener('dblclick', function (e) {
     var rect = outer.getBoundingClientRect();
     var target = scale > 1.2 ? 1 : 2.5;
@@ -744,7 +816,6 @@
     if (target === 1) { posX = 0; posY = 0; applyTransform(); syncButtons(); }
   });
 
-  /* buttons */
   document.getElementById('zoom-in').addEventListener('click', function () {
     zoomTo(clamp(scale * 1.3, MIN, MAX), outer.clientWidth / 2, outer.clientHeight / 2);
   });
@@ -755,7 +826,6 @@
     scale = 1; posX = 0; posY = 0; applyTransform(); syncButtons();
   });
 
-  /* fullscreen secondary option */
   var fsBtn = document.getElementById('zoom-fs');
   var img = document.getElementById('source-img');
   if (fsBtn && img) {
@@ -768,7 +838,6 @@
     });
   }
 
-  /* drag pan */
   var drag = null;
   outer.addEventListener('pointerdown', function (e) {
     if (e.button !== 0) return;
@@ -788,6 +857,27 @@
   outer.addEventListener('pointercancel', endDrag);
 
   syncButtons();
+}());
+
+/* ── Keyboard shortcuts ── */
+(function () {
+  document.addEventListener('keydown', function (e) {
+    var tag = (e.target.tagName || '').toUpperCase();
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      var approve = document.getElementById('btn-approve');
+      if (approve) approve.click();
+    } else if (e.key === 'j' || e.key === 'J') {
+      var next = document.getElementById('nav-next');
+      if (next && next.tagName === 'A') next.click();
+    } else if (e.key === 'k' || e.key === 'K') {
+      var prev = document.getElementById('nav-prev');
+      if (prev && prev.tagName === 'A') prev.click();
+    }
+  });
 }());
 </script>
 </body>

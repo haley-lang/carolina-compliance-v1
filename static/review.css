@@ -1030,3 +1030,170 @@ select.policy-input {
 .issue-pick-btn:hover {
   background: var(--border);
 }
+
+/* ── "What we read" summary card ─────────────────────────────────── */
+.summary-table {
+  display: flex;
+  flex-direction: column;
+}
+
+.summary-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+}
+.summary-row:last-child { border-bottom: none; }
+
+.summary-key {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  min-width: 130px;
+  flex-shrink: 0;
+}
+
+.summary-val {
+  font-size: 0.9rem;
+  color: var(--navy);
+  flex: 1;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.summary-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
+}
+
+.not-on-file {
+  color: var(--secondary);
+  font-style: italic;
+  font-size: 0.85rem;
+}
+
+.pol-num {
+  font-family: 'Courier New', monospace;
+  font-size: 0.85rem;
+  color: var(--navy);
+}
+
+.pol-dates {
+  font-size: 0.82rem;
+  color: var(--secondary);
+}
+
+/* ── Other policies expand ───────────────────────────────────────── */
+.other-pols-expand {
+  width: 100%;
+}
+
+.other-pols-toggle {
+  font-size: 0.82rem;
+  color: var(--blue);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+.other-pols-toggle::-webkit-details-marker { display: none; }
+.other-pols-toggle:hover { text-decoration: underline; }
+
+.other-pols-list {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.other-pol-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 0.82rem;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+.other-pol-row:last-child { border-bottom: none; }
+
+.other-pol-type {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--secondary);
+  min-width: 140px;
+}
+
+/* ── Secondary issues collapse ───────────────────────────────────── */
+.secondary-issues-toggle {
+  font-size: 0.82rem;
+  color: var(--secondary);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  padding: 6px 10px;
+  background: var(--offwhite);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: inline-block;
+}
+.secondary-issues-toggle::-webkit-details-marker { display: none; }
+.secondary-issues-toggle:hover { background: var(--border); }
+
+.secondary-issues-list {
+  list-style: none;
+  margin-top: 8px;
+  padding: 0;
+}
+
+.secondary-issue-item {
+  font-size: 0.83rem;
+  color: var(--secondary);
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.secondary-issue-item:last-child { border-bottom: none; }
+
+/* ── All extracted data collapse ─────────────────────────────────── */
+.all-data-toggle {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  background: var(--offwhite);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--secondary);
+  transition: background 0.12s;
+}
+.all-data-toggle::-webkit-details-marker { display: none; }
+.all-data-toggle:hover { background: var(--border); }
+
+/* ── Keyboard hint ───────────────────────────────────────────────── */
+.kbd-hint {
+  font-size: 0.78rem;
+  color: var(--secondary);
+  margin-top: 10px;
+}
+.kbd-hint kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--offwhite);
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--navy);
+}

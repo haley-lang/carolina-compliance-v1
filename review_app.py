@@ -68,6 +68,38 @@ def _norm_ni(name: str) -> str:
 def _norm_polnum(v: str) -> str:
     """Normalize a policy number for duplicate matching (strip punctuation/spaces)."""
     return re.sub(r"[^A-Z0-9]", "", str(v or "").upper())
+
+_GL_KEYWORDS = ("general", "liability", "cgl", "commercial general")
+_WC_KEYWORDS = ("workers", "work comp", "w/c", "wc", "workers'", "employers liability")
+
+def _find_key_policy(policies: list, keywords: tuple) -> tuple:
+    """Return (index, policy_dict) for the first policy whose type matches any keyword."""
+    for i, p in enumerate(policies):
+        pt = (p.get("policy_type") or "").lower()
+        if any(k in pt for k in keywords):
+            return i, p
+    return None, None
+
+
+def _split_issues(issues: list, gl_idx, wc_idx) -> tuple:
+    """Return (primary, secondary) where primary = issues affecting NI, GL, WC, or doc type."""
+    prefix_gl = f"policy_{gl_idx}_" if gl_idx is not None else None
+    prefix_wc = f"policy_{wc_idx}_" if wc_idx is not None else None
+    primary_exact = {"named_insured", "document_type"}
+    primary, secondary = [], []
+    for issue in issues:
+        field = issue.get("field") or ""
+        is_primary = (
+            field in primary_exact
+            or issue.get("type") == "non_coi"
+            or issue.get("id") in ("ai_named_insured", "possible_duplicate")
+            or (prefix_gl and field.startswith(prefix_gl))
+            or (prefix_wc and field.startswith(prefix_wc))
+        )
+        (primary if is_primary else secondary).append(issue)
+    return primary, secondary
+
+
 SECOND_READ_JSON_FIELD_ID = "fldJFX9EN6j40cdXD"
 AI_DISAGREEMENTS_FIELD_ID = "fldbiX9zZHdF3RGDQ"
 PRIOR_RAW_JSON_FIELD_NAME = "Prior Raw JSON (superseded)"
@@ -795,7 +827,6 @@ def detail(record_id):
             source_page_full_url = att.get("url")
         elif pdf_atts:
             att = pdf_atts[0]
-            source_page_full_url = att.get("url")
             thumbs = att.get("thumbnails") or {}
             large = (thumbs.get("large") or {}).get("url")
             source_page_url = large or att.get("url")
@@ -809,6 +840,14 @@ def detail(record_id):
 
     duplicate_match = (session.get("queue_duplicate_matches") or {}).get(record_id, "")
     issues = compute_issues(raw_data, second_data, flags, duplicate_match)
+
+    _policies = raw_data.get("policies") or []
+    gl_idx, gl_policy = _find_key_policy(_policies, _GL_KEYWORDS)
+    wc_idx, wc_policy = _find_key_policy(_policies, _WC_KEYWORDS)
+    _skip = {i for i in (gl_idx, wc_idx) if i is not None}
+    other_policy_count = sum(1 for i in range(len(_policies)) if i not in _skip)
+    primary_issues, secondary_issues = _split_issues(issues, gl_idx, wc_idx)
+    contact_email = ", ".join(raw_data.get("contact_emails") or []) or ""
 
     corrections_logged = request.args.get("corrections_logged", type=int, default=None)
 
@@ -845,6 +884,14 @@ def detail(record_id):
         ai_disagrees=ai_disagrees,
         flags=flags,
         issues=issues,
+        primary_issues=primary_issues,
+        secondary_issues=secondary_issues,
+        gl_idx=gl_idx,
+        gl_policy=gl_policy,
+        wc_idx=wc_idx,
+        wc_policy=wc_policy,
+        other_policy_count=other_policy_count,
+        contact_email=contact_email,
         corrections_logged=corrections_logged,
         airtable_url=airtable_url,
         prev_id=prev_id,
