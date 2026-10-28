@@ -22,6 +22,8 @@ import json
 import os
 import re
 import secrets
+import subprocess
+import threading
 import time
 import traceback
 from collections import defaultdict
@@ -357,6 +359,51 @@ def _corrections_table():
 
 def _training_log_table():
     return _api().table(clean_base_id(config.AIRTABLE_BASE_ID), TRAINING_LOG_TABLE_ID)
+
+
+def _trigger_post_confirm(record_id: str) -> None:
+    """Create vendor/VCA, set Processing Status = Imported, then run processor.py in background.
+
+    Runs synchronously for the Airtable steps (fast), then fires processor.py
+    as a detached subprocess so the HTTP response isn't blocked.
+    Called from _handle_approve for every RTR confirmation.
+    """
+    try:
+        from post_confirm_processor import post_confirm_single
+        from pyairtable import Api as _PApi
+        _key = (config.AIRTABLE_API_KEY or "").strip()
+        _bid = clean_base_id(config.AIRTABLE_BASE_ID)
+        _api_inst = _PApi(_key)
+        result = post_confirm_single(_api_inst, _bid, record_id, create_possible=True)
+        action = result.get("action", "")
+        if action == "error":
+            app.logger.error("post_confirm error for %s: %s", record_id, result.get("error"))
+            return
+        if action == "skip":
+            app.logger.info("post_confirm skip for %s: %s", record_id, result.get("reason"))
+            return
+        if action == "possible_match":
+            app.logger.warning(
+                "post_confirm possible_match for %s: '%s' ~ '%s' (%s) — created as new vendor",
+                record_id, result.get("named_insured"), result.get("vendor_name"), result.get("note"),
+            )
+            return
+        app.logger.info(
+            "post_confirm %s: vendor=%s (%s) vca=%s vca_new=%s",
+            action, result.get("vendor_name"), result.get("vendor_id"),
+            result.get("vca_id"), result.get("vca_created"),
+        )
+        # Fire processor.py as a daemon thread so it runs after this request returns
+        _script = str(os.path.join(os.path.dirname(__file__), ".venv", "bin", "python"))
+        _proc_py = str(os.path.join(os.path.dirname(__file__), "processor.py"))
+        def _run():
+            try:
+                subprocess.run([_script, _proc_py], cwd=os.path.dirname(__file__), timeout=300)
+            except Exception as exc:
+                app.logger.warning("processor.py subprocess error: %s", exc)
+        threading.Thread(target=_run, daemon=True).start()
+    except Exception as exc:
+        app.logger.error("_trigger_post_confirm failed for %s: %s", record_id, exc, exc_info=True)
 
 
 def _get_vendor_policies(vendor_record_id: str) -> list:
@@ -1338,6 +1385,10 @@ def _handle_approve(table, record_id, source_filename, original_data, why_note, 
 
     if why_note:
         _write_note_record(source_filename, record_id, why_note, now_iso, corrections)
+
+    # Vendor/VCA creation + schedule processor.py for RTR certs
+    if _is_billy_rtr(source_filename):
+        _trigger_post_confirm(record_id)
 
     return len(corrections)
 

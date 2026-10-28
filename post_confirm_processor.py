@@ -18,6 +18,10 @@ Modes:
   --dry-run          Scan all unprocessed RTR extractions; print vendor plan. No writes.
   --apply            Process all currently Approved/Approved+Edited extractions.
   --apply --record ID  Process a single extraction by Airtable record ID.
+  --apply --create-possible  Treat fuzzy "possible match" results as new creates.
+
+Public API (used by review_app.py on every confirm):
+  post_confirm_single(api, base_id, extraction_id, create_possible=False) -> dict
 """
 
 import argparse
@@ -48,6 +52,7 @@ RTR_CLIENT_ID = "recG2hxGoJKdgBr4M"
 REVIEW_STATUS_APPROVED = "Approved"
 REVIEW_STATUS_APPROVED_EDITED = "Approved + Edited"
 PROCESSING_STATUS_IMPORTED = "Imported"
+PROCESSING_STATUS_PROCESSED = "Processed"
 
 POSSIBLE_MATCH_THRESHOLD = 75  # fuzzy score below which we flag instead of auto-create
 
@@ -207,6 +212,143 @@ def create_vca(vca_table, vendor_id: str, client_id: str):
     return record
 
 
+# ── Single-record handler (public API for review_app.py) ─────────────────────
+
+def post_confirm_single(
+    api,
+    base_id: str,
+    extraction_id: str,
+    create_possible: bool = False,
+    incoming_table=None,
+    vendors_table=None,
+    vca_table=None,
+) -> dict:
+    """Vendor/VCA/Imported creation for one extraction.
+
+    Returns a result dict with keys:
+      action        — "created" | "matched" | "skip" | "possible_match" | "error"
+      vendor_id     — Airtable vendor record ID (on success)
+      vendor_name   — vendor name used
+      vca_id        — VCA record ID (on success)
+      vca_created   — True if a new VCA was made
+      reason/error  — on skip/error/possible_match
+    """
+    if incoming_table is None:
+        incoming_table = api.table(base_id, "Incoming Extractions")
+    if vendors_table is None:
+        vendors_table = api.table(base_id, "Vendors")
+    if vca_table is None:
+        vca_table = api.table(base_id, "Vendor Client Assignments")
+
+    rec = incoming_table.get(extraction_id)
+    if not rec:
+        return {"action": "error", "error": "record not found"}
+
+    fields = rec.get("fields", {})
+    raw_ni = fields.get("Named Insured") or ""
+    named_insured = clean_named_insured(raw_ni).strip()
+
+    if not named_insured:
+        return {"action": "skip", "reason": "blank named insured"}
+
+    if is_rtr_self(named_insured):
+        return {"action": "skip", "reason": "RTR self"}
+
+    if not is_rtr_cert(fields):
+        return {"action": "skip", "reason": "not RTR cert"}
+
+    # Skip if already fully processed
+    proc_status = fields.get("Processing Status") or ""
+    if proc_status == PROCESSING_STATUS_PROCESSED:
+        return {"action": "skip", "reason": "already processed"}
+
+    existing_vendors = vendors_table.all()
+    plan = plan_vendor_action(named_insured, existing_vendors)
+    action = plan["action"]
+
+    if action in ("skip_blank", "skip_client"):
+        return {"action": "skip", "reason": action}
+
+    if action == "possible_match" and not create_possible:
+        return {
+            "action": "possible_match",
+            "named_insured": named_insured,
+            "vendor_name": plan["vendor_name"],
+            "note": plan["note"],
+        }
+
+    if action == "possible_match" and create_possible:
+        logger.info(
+            "Overriding possible_match for '%s' (was matching '%s') — treating as create",
+            named_insured, plan["vendor_name"],
+        )
+        action = "create"
+        plan = {"action": "create", "vendor_id": None, "vendor_name": named_insured, "note": "override"}
+
+    vendor_id = plan.get("vendor_id")
+    vendor_name = plan.get("vendor_name") or named_insured
+
+    if action == "create":
+        vendor_rec = create_vendor(vendors_table, named_insured)
+        vendor_id = vendor_rec["id"]
+        vendor_name = named_insured
+        logger.info("Created vendor '%s' (%s)", named_insured, vendor_id)
+
+    elif action == "suffix_match":
+        existing_v = next((v for v in existing_vendors if v["id"] == vendor_id), None)
+        if existing_v:
+            vf = existing_v.get("fields", {})
+            cur_aliases = (vf.get("Aliases") or "").strip()
+            existing_alias_set = {a.strip().lower() for a in cur_aliases.split(",") if a.strip()}
+            if named_insured.lower() not in existing_alias_set:
+                new_aliases = (cur_aliases + ", " + named_insured).strip(", ")
+                try:
+                    vendors_table.update(vendor_id, {"Aliases": new_aliases}, typecast=True)
+                except Exception as exc:
+                    logger.warning("Could not add alias: %s", exc)
+
+    if not vendor_id:
+        return {"action": "error", "error": "no vendor_id after resolution"}
+
+    # VCA
+    try:
+        existing_vca = find_existing_vca(vca_table, vendor_id, RTR_CLIENT_ID)
+    except Exception as exc:
+        logger.warning("VCA lookup failed: %s — will attempt create", exc)
+        existing_vca = None
+
+    vca_created = False
+    if existing_vca:
+        vca_id = existing_vca["id"]
+    else:
+        try:
+            vca_rec = create_vca(vca_table, vendor_id, RTR_CLIENT_ID)
+            vca_id = vca_rec["id"]
+            vca_created = True
+        except Exception as exc:
+            return {"action": "error", "error": f"VCA create failed: {exc}",
+                    "vendor_id": vendor_id, "vendor_name": vendor_name}
+
+    # Set Processing Status = Imported
+    try:
+        incoming_table.update(
+            extraction_id,
+            {"Processing Status": PROCESSING_STATUS_IMPORTED},
+            typecast=True,
+        )
+    except Exception as exc:
+        return {"action": "error", "error": f"set Imported failed: {exc}",
+                "vendor_id": vendor_id, "vendor_name": vendor_name, "vca_id": vca_id}
+
+    return {
+        "action": "created" if action == "create" else "matched",
+        "vendor_id": vendor_id,
+        "vendor_name": vendor_name,
+        "vca_id": vca_id,
+        "vca_created": vca_created,
+    }
+
+
 # ── Dry run ───────────────────────────────────────────────────────────────────
 
 def run_dry_run(api, base_id: str) -> None:
@@ -281,12 +423,13 @@ def run_dry_run(api, base_id: str) -> None:
             p = plan_vendor_action(ni, existing_vendors)
             print(f"    '{ni}' → possible match with '{p['vendor_name']}' ({p['note']})")
 
-    print("\nRun with --apply to process all Approved/Approved+Edited extractions.\n")
+    print("\nRun with --apply to process all Approved/Approved+Edited extractions.")
+    print("Use --apply --create-possible to auto-create flagged possible matches.\n")
 
 
 # ── Apply ─────────────────────────────────────────────────────────────────────
 
-def run_apply(api, base_id: str, record_ids: list | None = None) -> None:
+def run_apply(api, base_id: str, record_ids: list | None = None, create_possible: bool = False) -> None:
     incoming_table = api.table(base_id, "Incoming Extractions")
     vendors_table = api.table(base_id, "Vendors")
     vca_table = api.table(base_id, "Vendor Client Assignments")
@@ -299,10 +442,11 @@ def run_apply(api, base_id: str, record_ids: list | None = None) -> None:
             rec for rec in all_extractions
             if (rec.get("fields", {}).get("Review Status") or "")
             in (REVIEW_STATUS_APPROVED, REVIEW_STATUS_APPROVED_EDITED)
+            and is_rtr_cert(rec.get("fields", {}))
         ]
 
     if not records_to_process:
-        print("No approved extractions found.")
+        print("No approved RTR extractions found.")
         return
 
     print(f"\n=== APPLY — {len(records_to_process)} extraction(s) ===\n")
@@ -327,107 +471,61 @@ def run_apply(api, base_id: str, record_ids: list | None = None) -> None:
         print(f"[{extraction_id}] '{named_insured or '(blank)'}'"
               f"  review={review_status}  proc={proc_status}")
 
-        if not named_insured:
-            print("  SKIP: blank Named Insured")
-            skipped.append({"id": extraction_id, "reason": "blank"})
-            continue
+        result = post_confirm_single(
+            api, base_id, extraction_id,
+            create_possible=create_possible,
+            incoming_table=incoming_table,
+            vendors_table=vendors_table,
+            vca_table=vca_table,
+        )
 
-        if is_rtr_self(named_insured):
-            print("  SKIP: named insured is RTR itself")
-            skipped.append({"id": extraction_id, "reason": "RTR self"})
-            continue
+        action = result["action"]
 
-        # Re-fetch vendor pool each iteration so we see vendors we just created
-        existing_vendors = vendors_table.all()
-        plan = plan_vendor_action(named_insured, existing_vendors)
-        action = plan["action"]
+        if action == "skip":
+            print(f"  SKIP: {result.get('reason', '')}")
+            skipped.append({"id": extraction_id, "reason": result.get("reason", "")})
 
-        if action == "possible_match":
-            print(f"  POSSIBLE MATCH: '{named_insured}' ~ '{plan['vendor_name']}' ({plan['note']})")
-            print("  Skipping — confirm the right vendor in Airtable, then re-run with --record")
+        elif action == "possible_match":
+            print(f"  POSSIBLE MATCH: '{result['named_insured']}' ~ '{result['vendor_name']}' ({result['note']})")
+            print("  Skipping — confirm the right vendor in Airtable, then re-run with --record --create-possible")
             possible_matches.append({
                 "id": extraction_id,
-                "named_insured": named_insured,
-                "match_name": plan["vendor_name"],
-                "note": plan["note"],
+                "named_insured": result["named_insured"],
+                "match_name": result["vendor_name"],
+                "note": result["note"],
             })
-            continue
 
-        vendor_id = plan.get("vendor_id")
+        elif action == "error":
+            print(f"  ERROR: {result.get('error', '')}")
+            errors.append({"id": extraction_id, "error": result.get("error", "")})
 
-        if action == "create":
-            print(f"  Creating vendor: '{named_insured}'")
-            try:
-                vendor_rec = create_vendor(vendors_table, named_insured)
-                vendor_id = vendor_rec["id"]
-                vendors_created.append({"id": vendor_id, "name": named_insured})
-                print(f"  Vendor created: {vendor_id}")
-            except Exception as exc:
-                print(f"  ERROR creating vendor: {exc}")
-                errors.append({"id": extraction_id, "step": "create_vendor", "error": str(exc)})
-                continue
-
-        elif action == "suffix_match":
-            print(f"  Suffix match → vendor {vendor_id} ('{plan['vendor_name']}')")
-            # Add the extraction's named insured as an alias for future exact matches
-            existing_v = next((v for v in existing_vendors if v["id"] == vendor_id), None)
-            if existing_v:
-                vf = existing_v.get("fields", {})
-                cur_aliases = (vf.get("Aliases") or "").strip()
-                existing_alias_set = {
-                    a.strip().lower() for a in cur_aliases.split(",") if a.strip()
-                }
-                if named_insured.lower() not in existing_alias_set:
-                    new_aliases = (cur_aliases + ", " + named_insured).strip(", ")
-                    try:
-                        vendors_table.update(vendor_id, {"Aliases": new_aliases}, typecast=True)
-                        print(f"  Added alias '{named_insured}' to vendor {vendor_id}")
-                    except Exception as exc:
-                        logger.warning("Could not add alias: %s", exc)
-            vendors_matched.append({"id": vendor_id, "name": plan["vendor_name"], "via": action})
-
-        else:  # exact_match or alias_match
-            print(f"  {action} → vendor {vendor_id} ('{plan['vendor_name']}')")
-            vendors_matched.append({"id": vendor_id, "name": plan["vendor_name"], "via": action})
-
-        if not vendor_id:
-            print("  ERROR: no vendor_id after resolution")
-            errors.append({"id": extraction_id, "step": "vendor_resolution", "error": "no vendor_id"})
-            continue
-
-        # VCA
-        try:
-            existing_vca = find_existing_vca(vca_table, vendor_id, RTR_CLIENT_ID)
-        except Exception as exc:
-            logger.warning("VCA lookup failed: %s — will attempt create", exc)
-            existing_vca = None
-
-        if existing_vca:
-            print(f"  VCA already exists: {existing_vca['id']}")
-            vcas_existing.append({"vendor_id": vendor_id, "vca_id": existing_vca["id"]})
-        else:
-            try:
-                vca_rec = create_vca(vca_table, vendor_id, RTR_CLIENT_ID)
-                vcas_created.append({"vendor_id": vendor_id, "vca_id": vca_rec["id"]})
-                print(f"  VCA created: {vca_rec['id']}")
-            except Exception as exc:
-                print(f"  ERROR creating VCA: {exc}")
-                errors.append({"id": extraction_id, "step": "create_vca", "error": str(exc)})
-                continue
-
-        # Set Processing Status = Imported
-        try:
-            incoming_table.update(
-                extraction_id,
-                {"Processing Status": PROCESSING_STATUS_IMPORTED},
-                typecast=True,
-            )
-            set_imported.append(extraction_id)
+        elif action == "created":
+            print(f"  Vendor created: '{result['vendor_name']}' ({result['vendor_id']})")
+            if result.get("vca_created"):
+                print(f"  VCA created: {result['vca_id']}")
+            else:
+                print(f"  VCA existing: {result['vca_id']}")
             print("  Processing Status → Imported")
-        except Exception as exc:
-            print(f"  ERROR setting Imported: {exc}")
-            errors.append({"id": extraction_id, "step": "set_imported", "error": str(exc)})
-            continue
+            vendors_created.append({"id": result["vendor_id"], "name": result["vendor_name"]})
+            if result.get("vca_created"):
+                vcas_created.append({"vendor_id": result["vendor_id"], "vca_id": result["vca_id"]})
+            else:
+                vcas_existing.append({"vendor_id": result["vendor_id"], "vca_id": result["vca_id"]})
+            set_imported.append(extraction_id)
+
+        elif action == "matched":
+            print(f"  Matched vendor: '{result['vendor_name']}' ({result['vendor_id']})")
+            if result.get("vca_created"):
+                print(f"  VCA created: {result['vca_id']}")
+            else:
+                print(f"  VCA existing: {result['vca_id']}")
+            print("  Processing Status → Imported")
+            vendors_matched.append({"id": result["vendor_id"], "name": result["vendor_name"]})
+            if result.get("vca_created"):
+                vcas_created.append({"vendor_id": result["vendor_id"], "vca_id": result["vca_id"]})
+            else:
+                vcas_existing.append({"vendor_id": result["vendor_id"], "vca_id": result["vca_id"]})
+            set_imported.append(extraction_id)
 
     # Run processor.py once after all extractions are staged
     if set_imported:
@@ -482,9 +580,11 @@ def main():
     mode.add_argument("--dry-run", action="store_true",
                       help="Print vendor plan for all RTR extractions; no writes")
     mode.add_argument("--apply", action="store_true",
-                      help="Process all Approved/Approved+Edited extractions")
+                      help="Process all Approved/Approved+Edited RTR extractions")
     parser.add_argument("--record", metavar="ID", action="append", dest="records",
                         help="Limit --apply to specific record IDs (repeatable)")
+    parser.add_argument("--create-possible", action="store_true",
+                        help="Treat fuzzy 'possible match' results as new creates instead of skipping")
     args = parser.parse_args()
 
     if args.dry_run and args.records:
@@ -501,7 +601,7 @@ def main():
     if args.dry_run:
         run_dry_run(api, base_id)
     else:
-        run_apply(api, base_id, record_ids=args.records)
+        run_apply(api, base_id, record_ids=args.records, create_possible=args.create_possible)
 
 
 if __name__ == "__main__":
