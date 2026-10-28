@@ -460,6 +460,32 @@ def _get_vendor_policies(vendor_record_id: str) -> list:
     return result
 
 
+def _get_active_vendor_ids_for_client(client_id: str) -> list:
+    """Return vendor record IDs for all active VCA records linked to the given client.
+
+    Uses the client record's 'Vendor Client Assignments' linked field to avoid the
+    ARRAYJOIN formula problem (linked record ARRAYJOIN returns display names, not IDs).
+    """
+    base_id = clean_base_id(config.AIRTABLE_BASE_ID)
+    api = _api()
+    try:
+        crec = api.table(base_id, CLIENTS_TABLE_ID).get(client_id)
+        vca_ids = crec["fields"].get("Vendor Client Assignments") or []
+    except Exception:
+        return []
+    if not vca_ids:
+        return []
+    vca_tbl = api.table(base_id, VCA_TABLE_ID)
+    vca_formula = "AND(OR(" + ", ".join(f"RECORD_ID()='{v}'" for v in vca_ids) + "), {Active})"
+    vca_records = vca_tbl.all(formula=vca_formula, fields=["Vendor Link"])
+    vendor_ids: list = []
+    for vca in vca_records:
+        for vid in (vca["fields"].get("Vendor Link") or []):
+            if vid not in vendor_ids:
+                vendor_ids.append(vid)
+    return vendor_ids
+
+
 def _check_shared_policy_numbers(vendor_record_id: str, extraction_record_id: str) -> None:
     """Check if any policy number for this vendor is shared across 2+ distinct policy types.
 
@@ -977,7 +1003,7 @@ def index():
 @app.route("/queue")
 @login_required
 def queue():
-    chip = request.args.get("filter", "needs_decision")
+    chip = request.args.get("filter", "pending")
     table = _ie_table()
     all_records = table.all()
 
@@ -1060,15 +1086,15 @@ def queue():
     else:
         batch_rows = [r for r in rows if not _is_billy_rtr(r["source_filename"])]
 
-    if chip == "needs_decision":
-        filtered = [r for r in batch_rows if r["flags"]["needs_decision"] and r["review_status"] in PENDING_SET]
-    elif chip == "just_confirm":
-        filtered = [r for r in batch_rows if not r["flags"]["needs_decision"] and r["review_status"] in PENDING_SET]
+    if chip == "ai_disagreed":
+        filtered = [r for r in batch_rows if r["flags"]["ai_disagreed"] and r["review_status"] in PENDING_SET]
+    elif chip == "needs_look":
+        filtered = [r for r in batch_rows if r["flags"]["needs_look"] and not r["flags"]["ai_disagreed"] and r["review_status"] in PENDING_SET]
     elif chip == "approved":
         filtered = [r for r in batch_rows if r["review_status"] in APPROVED_SET]
     elif chip == "rejected":
         filtered = [r for r in batch_rows if r["review_status"] in REJECTED_SET]
-    else:
+    else:  # "pending" or default — show all pending
         filtered = [r for r in batch_rows if r["review_status"] in PENDING_SET]
 
     # Step 1: sort by extraction_at descending (newest first)
@@ -1085,7 +1111,8 @@ def queue():
     counts = {
         "pending": sum(1 for r in batch_rows if r["review_status"] in PENDING_SET),
         "ai_disagreed": sum(1 for r in batch_rows if r["flags"]["ai_disagreed"] and r["review_status"] in PENDING_SET),
-        "needs_look": sum(1 for r in batch_rows if r["flags"]["needs_look"] and r["review_status"] in PENDING_SET),
+        # needs_look excludes ai_disagreed so tile sub-counts are non-overlapping
+        "needs_look": sum(1 for r in batch_rows if r["flags"]["needs_look"] and not r["flags"]["ai_disagreed"] and r["review_status"] in PENDING_SET),
         "approved": sum(1 for r in batch_rows if r["review_status"] in APPROVED_SET),
         "rejected": sum(1 for r in batch_rows if r["review_status"] in REJECTED_SET),
     }
@@ -2017,7 +2044,7 @@ def gaps():
 
     # Load all clients for the dropdown
     clients_tbl = api.table(base_id, CLIENTS_TABLE_ID)
-    clients_raw = clients_tbl.all(fields=["Name"])
+    clients_raw = clients_tbl.all(fields=["Client Name"])
     clients = [
         {"id": r["id"], "name": r["fields"].get("Client Name") or r["id"]}
         for r in clients_raw
@@ -2027,32 +2054,26 @@ def gaps():
     # Determine client name
     client_name = next((c["name"] for c in clients if c["id"] == client_id), client_id)
 
-    # Get active VCA records for this client
-    vca_tbl = api.table(base_id, VCA_TABLE_ID)
-    vca_records = vca_tbl.all(
-        formula=f"AND(FIND('{client_id}', ARRAYJOIN({{Client Link}}, ',')), {{Active}})",
-        fields=["Vendor Link", "Client Link", "Active"],
-    )
-    vendor_ids = []
-    for vca in vca_records:
-        vlinks = vca["fields"].get("Vendor Link") or []
-        for vid in vlinks:
-            if vid not in vendor_ids:
-                vendor_ids.append(vid)
+    # Get active vendor IDs for this client via VCA (uses client record's linked field)
+    vendor_ids = _get_active_vendor_ids_for_client(client_id)
 
     # Load vendor details
     vendors_tbl = api.table(base_id, VENDORS_TABLE_ID)
     pol_tbl = api.table(base_id, INSURANCE_POLICIES_TABLE_ID)
 
-    # Load existing gap requests for this client
+    # Load existing gap requests for this client (fetch all, filter client-side)
     gap_tbl = api.table(base_id, GAP_REQUESTS_TABLE_ID)
-    gap_records = gap_tbl.all(
-        formula=f"FIND('{client_id}', ARRAYJOIN({{Client}}, ','))",
-        fields=["Vendor", "Coverage Type", "Gap Start", "Gap End", "Status", "Notes"],
-    )
+    try:
+        gap_records = gap_tbl.all(
+            fields=["Vendor", "Client", "Coverage Type", "Gap Start", "Gap End", "Status"],
+        )
+    except Exception:
+        gap_records = []
     existing_requests_by_vendor: dict = defaultdict(list)
     for gr in gap_records:
         gf = gr["fields"]
+        if client_id not in (gf.get("Client") or []):
+            continue
         vlinks = gf.get("Vendor") or []
         for vid in vlinks:
             existing_requests_by_vendor[vid].append({
@@ -2071,10 +2092,11 @@ def gaps():
 
     for vendor_id in vendor_ids:
         # Fetch vendor record
+        vrec = {"fields": {}}
         try:
             vrec = vendors_tbl.get(vendor_id)
             vendor_name = vrec["fields"].get("Vendor Name") or vendor_id
-            contact_email = vrec["fields"].get("Vendor Email") or vrec["fields"].get("fldxteHtQ5ITcx6Zw") or ""
+            contact_email = vrec["fields"].get("Vendor Email") or ""
         except Exception:
             vendor_name = vendor_id
             contact_email = ""
@@ -2366,7 +2388,7 @@ def audit():
     api = _api()
 
     clients_tbl = api.table(base_id, CLIENTS_TABLE_ID)
-    clients_raw = clients_tbl.all(fields=["Name"])
+    clients_raw = clients_tbl.all(fields=["Client Name"])
     clients = [
         {"id": r["id"], "name": r["fields"].get("Client Name") or r["id"]}
         for r in clients_raw
@@ -2418,17 +2440,8 @@ def audit_preview():
     base_id = clean_base_id(config.AIRTABLE_BASE_ID)
     api = _api()
 
-    # Get vendor IDs for this client via VCA
-    vca_tbl = api.table(base_id, VCA_TABLE_ID)
-    vca_records = vca_tbl.all(
-        formula=f"AND(FIND('{client_id}', ARRAYJOIN({{Client Link}}, ',')), {{Active}})",
-        fields=["Vendor Link"],
-    )
-    vendor_ids = []
-    for vca in vca_records:
-        for vid in (vca["fields"].get("Vendor Link") or []):
-            if vid not in vendor_ids:
-                vendor_ids.append(vid)
+    # Get vendor IDs for this client via active VCA records
+    vendor_ids = _get_active_vendor_ids_for_client(client_id)
 
     vendors_tbl = api.table(base_id, VENDORS_TABLE_ID)
 
@@ -2499,17 +2512,8 @@ def audit_build():
     except Exception:
         client_name = client_id
 
-    # Get vendors
-    vca_tbl = api.table(base_id, VCA_TABLE_ID)
-    vca_records = vca_tbl.all(
-        formula=f"AND(FIND('{client_id}', ARRAYJOIN({{Client Link}}, ',')), {{Active}})",
-        fields=["Vendor Link"],
-    )
-    vendor_ids = []
-    for vca in vca_records:
-        for vid in (vca["fields"].get("Vendor Link") or []):
-            if vid not in vendor_ids:
-                vendor_ids.append(vid)
+    # Get vendors via active VCA records
+    vendor_ids = _get_active_vendor_ids_for_client(client_id)
 
     vendors_tbl = api.table(base_id, VENDORS_TABLE_ID)
     ie_tbl = api.table(base_id, INCOMING_EXTRACTIONS_TABLE)
@@ -2699,7 +2703,7 @@ def payments_import():
     api = _api()
 
     clients_tbl = api.table(base_id, CLIENTS_TABLE_ID)
-    clients_raw = clients_tbl.all(fields=["Name"])
+    clients_raw = clients_tbl.all(fields=["Client Name"])
     clients = [
         {"id": r["id"], "name": r["fields"].get("Client Name") or r["id"]}
         for r in clients_raw
@@ -2730,10 +2734,10 @@ def payments_import():
 
         # Load vendor names for fuzzy matching
         vendors_tbl = api.table(base_id, VENDORS_TABLE_ID)
-        vendor_recs = vendors_tbl.all(fields=["Name"])
+        vendor_recs = vendors_tbl.all(fields=["Vendor Name"])
         vendor_list = [
-            {"id": r["id"], "name": r["fields"].get("Name") or "",
-             "norm": _norm_ni(r["fields"].get("Name") or "")}
+            {"id": r["id"], "name": r["fields"].get("Vendor Name") or "",
+             "norm": _norm_ni(r["fields"].get("Vendor Name") or "")}
             for r in vendor_recs
         ]
 
