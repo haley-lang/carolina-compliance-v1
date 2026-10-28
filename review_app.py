@@ -139,9 +139,10 @@ def _split_issues(issues: list, required_indices: set) -> tuple:
         field = issue.get("field") or ""
         is_primary = (
             field in primary_exact
-            or issue.get("type") in ("non_coi", "possible_duplicate")
+            or issue.get("type") in ("non_coi", "possible_duplicate", "expired_arrival", "surplus_lines")
             or issue.get("id") in ("ai_named_insured", "possible_duplicate")
             or "missing_required" in (issue.get("id") or "")
+            or "expired_arrival" in (issue.get("id") or "")
             or any(field.startswith(pfx) for pfx in required_prefixes)
         )
         (primary if is_primary else secondary).append(issue)
@@ -668,10 +669,22 @@ def compute_flags(airtable_fields: dict, raw_data: dict, required_policy_types=N
         )
     ))
 
+    # 8. Certificate holder mismatch (RTR only)
+    # Fires when the certificate_holder does NOT contain any expected RTR keyword
+    _RTR_HOLDER_KEYWORDS = ("rtr", "renovations", "construction")
+    if required_policy_types is not None:
+        _holder = (raw_data.get("certificate_holder") or "").lower()
+        if _holder:
+            flags["holder_mismatch"] = not any(kw in _holder for kw in _RTR_HOLDER_KEYWORDS)
+        else:
+            flags["holder_mismatch"] = False
+    else:
+        flags["holder_mismatch"] = False
+
     # changed_vs_prior is an informational note, not an action trigger
     flags["needs_look"] = any(
         v for k, v in flags.items()
-        if k not in ("needs_look", "changed_vs_prior")
+        if k not in ("needs_look", "changed_vs_prior", "holder_mismatch")
     )
 
     # needs_decision: routing trigger for "Needs your decision" chip.
@@ -989,7 +1002,287 @@ def compute_issues(raw_data: dict, second_data, flags: dict, duplicate_match: st
             "field": None,
         })
 
+    # 7. Expired on arrival
+    _today_for_issues = date.today()
+    for i, p in enumerate(policies):
+        if req_indices is not None and i not in req_indices:
+            continue
+        exp_str = (p.get("expiration_date") or "").strip()
+        if not exp_str:
+            continue
+        try:
+            from datetime import datetime as _dtm
+            exp_d = _dtm.strptime(exp_str, "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            continue
+        if exp_d < _today_for_issues:
+            pol_label = (p.get("policy_type") or f"Policy {i + 1}").strip()
+            exp_display = _fmt_date(exp_str) or exp_str
+            issues.append({
+                "id": f"expired_arrival_{i}",
+                "type": "expired_arrival",
+                "title": f"{pol_label} expired {exp_display}",
+                "description": (
+                    "This policy expired before today. Confirm you're reviewing this certificate "
+                    "correctly or reject it."
+                ),
+                "control": "none",
+                "field": None,
+            })
+
     return issues
+
+
+# ── Coverage Snapshot ─────────────────────────────────────────────────────────
+
+CLIENT_REQUIREMENTS_TABLE_ID = "tblFGQ6XgOIHSWtQN"
+
+
+def compute_snapshot(vendor_id: str, client_id, raw_data: dict, today) -> dict:
+    """Compute a coverage snapshot for the detail page.
+
+    Returns a dict with client info, per-type status, timeline data, and
+    a plain-text 'what changed' summary.
+    """
+    base_id = clean_base_id(config.AIRTABLE_BASE_ID)
+    api = _api()
+
+    # ── 1. Resolve client ───────────────────────────────────────────────────
+    resolved_client_id = client_id
+    client_name = ""
+    client_found = False
+
+    if not resolved_client_id:
+        # Try to find client via vendor's "Client Link" field
+        try:
+            vrec = api.table(base_id, VENDORS_TABLE_ID).get(vendor_id)
+            client_links = vrec["fields"].get("Client Link") or []
+            if isinstance(client_links, list) and client_links:
+                resolved_client_id = client_links[0]
+        except Exception:
+            pass
+
+    if resolved_client_id:
+        try:
+            crec = api.table(base_id, CLIENTS_TABLE_ID).get(resolved_client_id)
+            client_name = crec["fields"].get("Client Name") or ""
+            client_found = True
+        except Exception:
+            pass
+
+    # ── 2. Client requirements ──────────────────────────────────────────────
+    required_labels = []
+    if resolved_client_id and client_found:
+        try:
+            crec = api.table(base_id, CLIENTS_TABLE_ID).get(resolved_client_id)
+            req_ids = crec["fields"].get("Client Requirements") or []
+            if req_ids:
+                req_tbl = api.table(base_id, CLIENT_REQUIREMENTS_TABLE_ID)
+                formula = "OR(" + ", ".join(f"RECORD_ID()='{r}'" for r in req_ids) + ")"
+                req_records = req_tbl.all(
+                    formula=formula,
+                    fields=["Policy Type", "Required"],
+                )
+                for rr in req_records:
+                    rf = rr["fields"]
+                    if rf.get("Required") and rf.get("Policy Type"):
+                        required_labels.append(rf["Policy Type"])
+        except Exception:
+            pass
+
+    # Fall back to GL + WC if no client requirements found
+    if not required_labels:
+        required_labels = ["General Liability", "Workers' Comp"]
+
+    # ── 3. Existing policies on file for this vendor ────────────────────────
+    existing_policies = []
+    try:
+        pol_ids = _get_vendor_policy_ids(vendor_id)
+        if pol_ids:
+            pol_tbl = api.table(base_id, INSURANCE_POLICIES_TABLE_ID)
+            formula = "OR(" + ", ".join(f"RECORD_ID()='{p}'" for p in pol_ids) + ")"
+            pol_records = pol_tbl.all(
+                formula=formula,
+                fields=["Policy Type", "Policy Number", "Carrier", "Effective Date", "Expiration Date"],
+            )
+            for pr in pol_records:
+                pf = pr["fields"]
+                existing_policies.append({
+                    "policy_type":     pf.get("Policy Type") or "",
+                    "policy_number":   pf.get("Policy Number") or "",
+                    "carrier":         pf.get("Carrier") or "",
+                    "effective":       pf.get("Effective Date") or "",
+                    "expiration":      pf.get("Expiration Date") or "",
+                    "is_this_cert":    False,
+                })
+    except Exception:
+        pass
+
+    # ── 4. This cert's policies from raw_data ───────────────────────────────
+    cert_policies = []
+    for p in (raw_data.get("policies") or []):
+        cert_policies.append({
+            "policy_type":   p.get("policy_type") or "",
+            "policy_number": p.get("policy_number") or "",
+            "carrier":       p.get("carrier") or "",
+            "effective":     p.get("effective_date") or "",
+            "expiration":    p.get("expiration_date") or "",
+            "is_this_cert":  True,
+        })
+
+    named_insured = raw_data.get("named_insured") or ""
+
+    # ── 5. Per-type status ──────────────────────────────────────────────────
+    def _label_matches_keywords(label: str, keywords: tuple) -> bool:
+        ll = label.lower()
+        return any(k in ll for k in keywords)
+
+    def _type_matches_label(pol_type: str, label: str) -> bool:
+        """Check if a policy type string matches a required label."""
+        pt = pol_type.lower()
+        label_l = label.lower()
+        # Direct substring match
+        if label_l in pt or pt in label_l:
+            return True
+        # Keyword-based matching for GL and WC
+        if _label_matches_keywords(label, _GL_KEYWORDS) and _label_matches_keywords(pol_type, _GL_KEYWORDS):
+            return True
+        if _label_matches_keywords(label, _WC_KEYWORDS) and _label_matches_keywords(pol_type, _WC_KEYWORDS):
+            return True
+        return False
+
+    def _best_policy_for_type(candidates: list, label: str) -> dict | None:
+        """Return the best (most recent non-expired, else most recently expired) policy."""
+        matches = [p for p in candidates if _type_matches_label(p.get("policy_type") or "", label)]
+        if not matches:
+            return None
+        # Prefer non-expired, most recent expiration
+        non_expired = []
+        expired = []
+        for p in matches:
+            exp = _parse_date(p.get("expiration") or "")
+            if exp and exp >= today:
+                non_expired.append((exp, p))
+            else:
+                expired.append((exp or date.min, p))
+        if non_expired:
+            non_expired.sort(key=lambda x: x[0], reverse=True)
+            return non_expired[0][1]
+        if expired:
+            expired.sort(key=lambda x: x[0], reverse=True)
+            return expired[0][1]
+        return None
+
+    types_data = []
+    for label in required_labels:
+        cert_match = _best_policy_for_type(cert_policies, label)
+        existing_match = _best_policy_for_type(existing_policies, label)
+
+        best = cert_match or existing_match
+        if cert_match:
+            source = "this_cert"
+        elif existing_match:
+            source = "already_on_file"
+        else:
+            source = "not_on_file"
+
+        if best:
+            exp_d = _parse_date(best.get("expiration") or "")
+            eff_d = _parse_date(best.get("effective") or "")
+            expired_flag = bool(exp_d and exp_d < today)
+            days_left = None
+            if exp_d and not expired_flag:
+                days_left = (exp_d - today).days
+
+            types_data.append({
+                "label":         label,
+                "status":        "on_file",
+                "source":        source,
+                "policy_number": best.get("policy_number") or "",
+                "carrier":       best.get("carrier") or "",
+                "effective":     best.get("effective") or "",
+                "expiration":    best.get("expiration") or "",
+                "days_left":     days_left,
+                "expired":       expired_flag,
+            })
+        else:
+            types_data.append({
+                "label":         label,
+                "status":        "not_on_file",
+                "source":        "not_on_file",
+                "policy_number": "",
+                "carrier":       "",
+                "effective":     "",
+                "expiration":    "",
+                "days_left":     None,
+                "expired":       False,
+            })
+
+    # ── 6. Timeline data ────────────────────────────────────────────────────
+    timeline = {}
+    all_policies = existing_policies + cert_policies
+    for label in required_labels:
+        terms = [p for p in all_policies if _type_matches_label(p.get("policy_type") or "", label)]
+        # Sort by effective date
+        def _sort_key(p):
+            d = _parse_date(p.get("effective") or "")
+            return d or date.min
+        terms.sort(key=_sort_key)
+        timeline[label] = [
+            {
+                "effective":     t.get("effective") or "",
+                "expiration":    t.get("expiration") or "",
+                "carrier":       t.get("carrier") or "",
+                "policy_number": t.get("policy_number") or "",
+                "is_this_cert":  t.get("is_this_cert", False),
+            }
+            for t in terms
+        ]
+
+    # ── 7. What changed ─────────────────────────────────────────────────────
+    what_changed = []
+    for label in required_labels:
+        cert_match = _best_policy_for_type(cert_policies, label)
+        existing_match = _best_policy_for_type(existing_policies, label)
+
+        if not cert_match:
+            continue
+
+        cert_exp = _parse_date(cert_match.get("expiration") or "")
+        cert_eff = _parse_date(cert_match.get("effective") or "")
+
+        if not existing_match:
+            what_changed.append(f"New {label} coverage for this vendor.")
+        else:
+            existing_exp = _parse_date(existing_match.get("expiration") or "")
+            existing_eff = _parse_date(existing_match.get("effective") or "")
+
+            if cert_exp and existing_exp and cert_exp > existing_exp:
+                prev_str = _fmt_date(existing_match.get("expiration") or "") or str(existing_exp)
+                what_changed.append(f"Renews {label}. Previous term ended {prev_str}.")
+            elif cert_eff and existing_exp and cert_eff > existing_exp:
+                # Gap between last expiration and new effective
+                gap_start = _fmt_date(existing_match.get("expiration") or "") or str(existing_exp)
+                gap_end = _fmt_date(cert_match.get("effective") or "") or str(cert_eff)
+                what_changed.append(f"Closes a {label} gap ({gap_start} to {gap_end}).")
+            else:
+                # Cert pol number differs from existing
+                cert_norm = _norm_polnum(cert_match.get("policy_number") or "")
+                exist_norm = _norm_polnum(existing_match.get("policy_number") or "")
+                if cert_norm and exist_norm and cert_norm != exist_norm:
+                    what_changed.append(f"New {label} policy number (different from file).")
+                else:
+                    what_changed.append(f"No change: same {label} terms already on file.")
+
+    return {
+        "client_id":     resolved_client_id,
+        "client_name":   client_name,
+        "client_found":  client_found,
+        "named_insured": named_insured,
+        "types":         types_data,
+        "timeline":      timeline,
+        "what_changed":  what_changed,
+    }
 
 
 # ── Queue ─────────────────────────────────────────────────────────────────────
@@ -1208,6 +1501,20 @@ def detail(record_id):
             vendor_policies = []
     on_file_types = {p["policy_type"].lower() for p in vendor_policies if p.get("policy_type")}
 
+    # Coverage snapshot (Part 2)
+    _mv_clients = f.get("Matched Client") or []
+    snapshot = None
+    if _vendor_id:
+        try:
+            snapshot = compute_snapshot(
+                vendor_id=_vendor_id,
+                client_id=(_mv_clients[0] if isinstance(_mv_clients, list) and _mv_clients else None),
+                raw_data=raw_data,
+                today=date.today(),
+            )
+        except Exception:
+            app.logger.exception("compute_snapshot failed for %s", _vendor_id)
+
     duplicate_match = (session.get("queue_duplicate_matches") or {}).get(record_id, "")
     issues = compute_issues(raw_data, second_data, flags, duplicate_match, required_policy_types, on_file_types)
 
@@ -1277,6 +1584,7 @@ def detail(record_id):
         required_policy_types=required_policy_types,
         vendor_policies=vendor_policies,
         vendor_id=_vendor_id or "",
+        snapshot=snapshot,
     )
 
 

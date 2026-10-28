@@ -24,7 +24,11 @@
     {% if airtable_url %}
     <a href="{{ airtable_url }}" class="nav-link" target="_blank" rel="noopener">Open in Airtable ↗</a>
     {% endif %}
-    <a href="/logout" class="btn btn-gold btn-sm">Sign out</a>
+    <button type="button" id="topnav-confirm" class="btn btn-gold btn-sm"
+            onclick="document.getElementById('btn-approve').click(); this.disabled=true; this.textContent='Confirming…'">
+      Confirm
+    </button>
+    <a href="/logout" class="btn btn-gold btn-sm" style="background:transparent;border:1.5px solid rgba(194,169,117,0.6);color:rgba(194,169,117,0.9)">Sign out</a>
   </div>
 </nav>
 
@@ -77,6 +81,7 @@
     {% if flags.non_coi %}<span class="flag flag-blue">Not a certificate</span>{% endif %}
     {% if flags.changed_vs_prior %}<span class="flag flag-info">Changed since last read</span>{% endif %}
     {% if flags.multi_company %}<span class="flag flag-muted">More than one company named</span>{% endif %}
+    {% if flags.holder_mismatch %}<span class="flag flag-alert">Certificate holder is not RTR</span>{% endif %}
   </div>
   {% endif %}
 
@@ -130,6 +135,150 @@
 
       <!-- ── Right: decision panel + summary + all-data collapse ──────── -->
       <div>
+
+        <!-- Coverage Snapshot card (Part 2) -->
+        {% if snapshot %}
+        <div class="card mb-16" id="coverage-snapshot">
+          <div class="card-body" style="padding:14px 18px">
+            {% if snapshot.client_found %}
+            <div class="snapshot-header">
+              <span class="snapshot-client">{{ snapshot.client_name }}</span>
+              <span class="snapshot-sep">·</span>
+              <span class="snapshot-insured">{{ snapshot.named_insured }}</span>
+            </div>
+            {% else %}
+            <div class="snapshot-header snapshot-no-client">
+              Not linked to a client · {{ snapshot.named_insured }}
+            </div>
+            {% endif %}
+
+            <!-- Requirements checklist -->
+            <div class="snapshot-types mt-12">
+            {% for t in snapshot.types %}
+            <div class="snapshot-type-row">
+              <span class="snapshot-type-label">{{ t.label }}</span>
+              {% if t.status == 'on_file' %}
+                <span class="snapshot-status on-file-badge">&#10003; On file</span>
+                <span class="snapshot-source {% if t.source == 'this_cert' %}source-this{% else %}source-existing{% endif %}">
+                  {{ "this certificate" if t.source == "this_cert" else "already on file" }}
+                </span>
+                {% if t.expiration %}
+                  <span class="snapshot-dates">
+                    through {{ t.expiration | fmt_date }}
+                    {% if t.days_left is not none %}
+                      · {{ t.days_left }} day{{ 's' if t.days_left != 1 else '' }} left
+                    {% endif %}
+                    {% if t.expired %}<span class="snapshot-expired-tag">Expired</span>{% endif %}
+                    {% if t.days_left is not none and t.days_left < 30 and not t.expired %}<span class="snapshot-expiring-tag">Expiring soon</span>{% endif %}
+                  </span>
+                {% endif %}
+              {% else %}
+                <span class="snapshot-status not-on-file-badge">Not on file</span>
+              {% endif %}
+            </div>
+            {% endfor %}
+            </div>
+
+            <!-- Timeline strip -->
+            {% if snapshot.timeline %}
+            <div class="snapshot-timeline mt-16">
+            {% for type_label, terms in snapshot.timeline.items() %}
+            {% if terms %}
+            <div class="timeline-row">
+              <span class="timeline-label">{{ type_label[:2].upper() }}</span>
+              <div class="timeline-bar-wrap" data-type="{{ type_label }}" data-terms="{{ terms | tojson | e }}">
+                <!-- Rendered by JS -->
+              </div>
+            </div>
+            {% endif %}
+            {% endfor %}
+            </div>
+            {% endif %}
+
+            <!-- What changed -->
+            {% if snapshot.what_changed %}
+            <div class="snapshot-changes mt-12">
+            {% for line in snapshot.what_changed %}
+            <div class="snapshot-change-line">{{ line }}</div>
+            {% endfor %}
+            </div>
+            {% endif %}
+          </div>
+        </div>
+
+        <script>
+        /* ── Coverage Snapshot timeline renderer ── */
+        (function () {
+          var today = new Date();
+          today.setHours(0,0,0,0);
+          // Visible range: 24 months before today to 6 months after
+          var rangeStart = new Date(today);
+          rangeStart.setMonth(rangeStart.getMonth() - 24);
+          var rangeEnd = new Date(today);
+          rangeEnd.setMonth(rangeEnd.getMonth() + 6);
+          var totalMs = rangeEnd - rangeStart;
+
+          function pct(d) {
+            return Math.max(0, Math.min(100, ((d - rangeStart) / totalMs) * 100));
+          }
+
+          function fmtDate(s) {
+            if (!s) return '';
+            var parts = s.split('-');
+            if (parts.length === 3) return (parseInt(parts[1],10)) + '/' + parseInt(parts[2],10) + '/' + parts[0];
+            return s;
+          }
+
+          document.querySelectorAll('.timeline-bar-wrap').forEach(function (wrap) {
+            var raw = wrap.getAttribute('data-terms');
+            if (!raw) return;
+            var terms;
+            try { terms = JSON.parse(raw); } catch(e) { return; }
+
+            // Today line
+            var todayDiv = document.createElement('div');
+            todayDiv.className = 'timeline-today';
+            todayDiv.style.left = pct(today) + '%';
+            wrap.appendChild(todayDiv);
+
+            // Detect gaps between terms
+            var sorted = terms.slice().sort(function(a,b){
+              return (a.effective||'') < (b.effective||'') ? -1 : 1;
+            });
+            for (var g = 0; g < sorted.length - 1; g++) {
+              var cur = sorted[g], nxt = sorted[g+1];
+              if (!cur.expiration || !nxt.effective) continue;
+              var gStart = new Date(cur.expiration);
+              var gEnd = new Date(nxt.effective);
+              if (gEnd > gStart) {
+                var gDiv = document.createElement('div');
+                gDiv.className = 'timeline-gap';
+                gDiv.style.left = pct(gStart) + '%';
+                gDiv.style.width = (pct(gEnd) - pct(gStart)) + '%';
+                wrap.appendChild(gDiv);
+              }
+            }
+
+            terms.forEach(function (t) {
+              if (!t.effective || !t.expiration) return;
+              var eff = new Date(t.effective);
+              var exp = new Date(t.expiration);
+              if (exp < rangeStart || eff > rangeEnd) return;
+              var left = pct(eff);
+              var right = pct(exp);
+              var width = right - left;
+              if (width < 0.5) width = 0.5;
+              var bar = document.createElement('div');
+              bar.className = 'timeline-term ' + (t.is_this_cert ? 'this-cert' : 'existing');
+              bar.style.left = left + '%';
+              bar.style.width = width + '%';
+              bar.title = (t.carrier||'') + (t.policy_number ? ' · ' + t.policy_number : '') + ' · ' + fmtDate(t.effective) + ' to ' + fmtDate(t.expiration);
+              wrap.appendChild(bar);
+            });
+          });
+        }());
+        </script>
+        {% endif %}
 
         <!-- "Why this needs you" — primary issues only -->
         {% if primary_issues %}
@@ -753,7 +902,7 @@
           <p class="action-note">
             This confirms the data matches the page. It does not approve the vendor's coverage and nothing is sent.
           </p>
-          <p class="kbd-hint">Keyboard: <kbd>Enter</kbd> = Data is correct &nbsp;·&nbsp; <kbd>J</kbd> = next &nbsp;·&nbsp; <kbd>K</kbd> = previous</p>
+          <p class="kbd-hint">Keyboard: <kbd>Enter</kbd> = Confirm &nbsp;·&nbsp; <kbd>J</kbd> = next &nbsp;·&nbsp; <kbd>K</kbd> = previous &nbsp;·&nbsp; <kbd>?</kbd> = shortcuts</p>
         </div>
 
       </div><!-- /right -->
@@ -814,6 +963,57 @@
   });
 
   updateBtn();
+}());
+
+/* ── Collapse agreeing fields in ALL EXTRACTED DATA (Part 3e) ── */
+(function () {
+  var allData = document.querySelector('.all-data-section');
+  if (!allData) return;
+
+  // Run after the <details> is opened
+  allData.addEventListener('toggle', function () {
+    if (!allData.open) return;
+    // Only run once
+    if (allData.getAttribute('data-collapsed-init')) return;
+    allData.setAttribute('data-collapsed-init', '1');
+
+    // Find all policy-card divs
+    var policyCards = allData.querySelectorAll('.policy-card');
+    if (!policyCards.length) return;
+
+    var agreeing = [];
+    var disagreeing = [];
+
+    policyCards.forEach(function (card) {
+      // Card is "disagreeing" if any child has .disagree-cell or .toggle-disagree
+      var hasDisagree = card.querySelector('.disagree-cell, .toggle-disagree, .disagree-note');
+      if (hasDisagree) {
+        disagreeing.push(card);
+      } else {
+        agreeing.push(card);
+      }
+    });
+
+    if (agreeing.length === 0) return; // nothing to collapse
+
+    // Wrap agreeing cards in a <details>
+    var wrapper = document.createElement('details');
+    wrapper.className = 'agreeing-policies-wrap';
+    var summary = document.createElement('summary');
+    summary.className = 'agreeing-policies-toggle';
+    summary.textContent = 'Policies where both reads agree (' + agreeing.length + ')';
+    wrapper.appendChild(summary);
+
+    // Move agreeing cards into wrapper
+    var parentDiv = agreeing[0].closest('.card-body');
+    if (!parentDiv) return;
+
+    agreeing.forEach(function (card) {
+      wrapper.appendChild(card);
+    });
+
+    parentDiv.appendChild(wrapper);
+  });
 }());
 
 /* ── Approve button changes on any form edit (no issues) ── */
@@ -946,6 +1146,22 @@
 
 /* ── Keyboard shortcuts ── */
 (function () {
+  var _kbdTooltip = null;
+
+  function _showKbdTooltip() {
+    if (_kbdTooltip) { _kbdTooltip.remove(); _kbdTooltip = null; return; }
+    var el = document.createElement('div');
+    el.id = 'kbd-tooltip';
+    el.style.cssText = 'position:fixed;bottom:72px;right:24px;background:var(--navy);color:#fff;border-radius:8px;padding:12px 16px;font-size:0.82rem;line-height:1.8;z-index:999;box-shadow:0 4px 16px rgba(0,0,0,0.25)';
+    el.innerHTML = '<strong>Keyboard shortcuts</strong><br>' +
+      '<kbd style="background:#fff2;border-radius:3px;padding:1px 5px">Enter</kbd> Confirm<br>' +
+      '<kbd style="background:#fff2;border-radius:3px;padding:1px 5px">J</kbd> Next certificate<br>' +
+      '<kbd style="background:#fff2;border-radius:3px;padding:1px 5px">K</kbd> Previous certificate<br>' +
+      '<kbd style="background:#fff2;border-radius:3px;padding:1px 5px">?</kbd> Toggle this help';
+    document.body.appendChild(el);
+    _kbdTooltip = el;
+  }
+
   document.addEventListener('keydown', function (e) {
     var tag = (e.target.tagName || '').toUpperCase();
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
@@ -956,11 +1172,17 @@
       var approve = document.getElementById('btn-approve');
       if (approve) approve.click();
     } else if (e.key === 'j' || e.key === 'J') {
+      {% if next_id %}
       var next = document.getElementById('nav-next');
       if (next && next.tagName === 'A') next.click();
+      {% endif %}
     } else if (e.key === 'k' || e.key === 'K') {
+      {% if prev_id %}
       var prev = document.getElementById('nav-prev');
       if (prev && prev.tagName === 'A') prev.click();
+      {% endif %}
+    } else if (e.key === '?') {
+      _showKbdTooltip();
     }
   });
 }());

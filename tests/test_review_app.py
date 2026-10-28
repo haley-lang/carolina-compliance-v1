@@ -232,7 +232,7 @@ _GL = {
     "policy_number": "GL-001",
     "carrier": "Hartford",
     "effective_date": "2025-01-01",
-    "expiration_date": "2026-01-01",
+    "expiration_date": "2027-12-31",
     "coverage_limits": "$1M",
     "policy_basis": "occurrence",
     "additional_insured_checked": False,
@@ -374,7 +374,7 @@ def _approve_data(**overrides):
         "policy_0_policy_number": "GL-001",
         "policy_0_carrier": "Hartford",
         "policy_0_effective_date": "2025-01-01",
-        "policy_0_expiration_date": "2026-01-01",
+        "policy_0_expiration_date": "2027-12-31",
         "policy_0_coverage_limits": "$1M",
         "policy_0_policy_basis": "occurrence",
         "policy_0_additional_insured_checked": "not_checked",
@@ -426,9 +426,9 @@ def test_approve_each_changed_field_writes_one_correction(authed_client, mock_ie
             why="fixing",
         ))
 
-    # Two fields changed → two field Corrections rows + one reviewed_fields_audit row
+    # Two fields changed → two field Corrections rows + one reviewed_fields_audit row + one Note row
     fields_logged = [c[0][0]["Field"] for c in mock_corr_table.create.call_args_list]
-    field_corrections = [f for f in fields_logged if f != "reviewed_fields_audit"]
+    field_corrections = [f for f in fields_logged if f not in ("reviewed_fields_audit", "Note")]
     assert len(field_corrections) == 2
     for call in mock_corr_table.create.call_args_list:
         assert call[0][0]["Learning Status"] == "New"
@@ -444,9 +444,9 @@ def test_approve_correction_row_has_required_fields(authed_client, mock_ie_table
             why="the reason",
         ))
 
-    # First correction row is the field change (audit is the last row)
+    # First correction row is the field change (audit + Note are infrastructure rows)
     field_rows = [c[0][0] for c in mock_corr_table.create.call_args_list
-                  if c[0][0].get("Field") != "reviewed_fields_audit"]
+                  if c[0][0].get("Field") not in ("reviewed_fields_audit", "Note")]
     assert len(field_rows) == 1
     row = field_rows[0]
     assert row["Source Filename"] == "cert01.json"
@@ -609,7 +609,7 @@ def _make_rec_with_policies(source_filename="COI_forms_cert31.json"):
             "policy_number": "GL-001",
             "carrier": "Hartford",
             "effective_date": "2025-01-01",
-            "expiration_date": "2026-01-01",
+            "expiration_date": "2027-12-31",
             "coverage_limits": "$1M",
             "policy_basis": "occurrence",
             "additional_insured_checked": False,
@@ -853,7 +853,7 @@ def test_queue_possible_duplicate_no_fire_on_different_policy_numbers(authed_cli
 def test_queue_possible_duplicate_no_fire_on_different_effective_dates(authed_client):
     """Same NI + same policy number but different effective dates → NOT a duplicate."""
     rec1 = _make_queue_rec("recA", "Acme LLC", "GL-001", "2025-01-01")
-    rec2 = _make_queue_rec("recB", "Acme LLC", "GL-001", "2026-01-01")
+    rec2 = _make_queue_rec("recB", "Acme LLC", "GL-001", "2027-12-31")
     with patch("review_app._ie_table") as mock:
         mock.return_value.all.return_value = [rec1, rec2]
         resp = authed_client.get("/queue?batch=other")
@@ -893,7 +893,7 @@ def _make_billy_rec(rec_id, source_filename, named_insured="Test Co LLC",
             "policy_number": "GL-001",
             "carrier": "Hartford",
             "effective_date": "2025-01-01",
-            "expiration_date": "2026-01-01",
+            "expiration_date": "2027-12-31",
             "coverage_limits": "$1M/$2M",
             "policy_basis": "occurrence",
             "additional_insured_checked": False,
@@ -944,7 +944,7 @@ for _i in range(1, 48):
             "policy_number": f"GL-{_i:03d}",
             "carrier": "Hartford",
             "effective_date": "2025-01-01",
-            "expiration_date": "2026-01-01",
+            "expiration_date": "2027-12-31",
             "coverage_limits": "$1M/$2M",
             "policy_basis": "occurrence",
             "additional_insured_checked": bool(_i % 2),
@@ -956,7 +956,7 @@ for _i in range(1, 48):
             "policy_number": f"WC-{_i:03d}",
             "carrier": "Travelers",
             "effective_date": "2025-01-01",
-            "expiration_date": "2026-01-01",
+            "expiration_date": "2027-12-31",
             "coverage_limits": "$500K",
             "policy_basis": "",
             "additional_insured_checked": False,
@@ -986,7 +986,7 @@ for _j in range(1, 9):
         "policy_number": f"RTR-GL-{_j:03d}",
         "carrier": "State Farm",
         "effective_date": "2025-06-01",
-        "expiration_date": "2026-06-01",
+        "expiration_date": "2027-12-31",
         "coverage_limits": "$2M",
         "policy_basis": "claims-made",
         "additional_insured_checked": True,
@@ -1013,7 +1013,7 @@ _BILLY_RTR_RECORDS.append(
             "policy_number": "",  # missing policy number → missing_fields flag
             "carrier": "Nationwide",
             "effective_date": "2025-03-01",
-            "expiration_date": "2026-03-01",
+            "expiration_date": "2027-12-31",
             "coverage_limits": "$1M",
             "policy_basis": "",
             "additional_insured_checked": False,
@@ -1140,7 +1140,7 @@ def test_detail_tristate_na_rendered(authed_client, mock_ie_table):
             "policy_number": "GL-1",
             "carrier": "Hartford",
             "effective_date": "2025-01-01",
-            "expiration_date": "2026-01-01",
+            "expiration_date": "2027-12-31",
             "coverage_limits": "$1M",
             "policy_basis": "occurrence",
             "additional_insured_checked": "not_applicable",
@@ -1177,7 +1177,7 @@ def test_detail_statement_not_captured_for_old_rows(authed_client, mock_ie_table
             "policy_number": "GL-1",
             "carrier": "Hartford",
             "effective_date": "2025-01-01",
-            "expiration_date": "2026-01-01",
+            "expiration_date": "2027-12-31",
             "coverage_limits": "$1M",
             "policy_basis": "occurrence",
             "additional_insured_checked": False,
@@ -1219,7 +1219,7 @@ def test_detail_statement_present_shown(authed_client, mock_ie_table):
             "policy_number": "GL-1",
             "carrier": "Hartford",
             "effective_date": "2025-01-01",
-            "expiration_date": "2026-01-01",
+            "expiration_date": "2027-12-31",
             "coverage_limits": "$1M",
             "policy_basis": "occurrence",
             "additional_insured_checked": "not_applicable",
@@ -1256,7 +1256,7 @@ def test_approve_tristate_ai_stored_as_string(authed_client, mock_ie_table, mock
             "policy_number": "GL-1",
             "carrier": "Hartford",
             "effective_date": "2025-01-01",
-            "expiration_date": "2026-01-01",
+            "expiration_date": "2027-12-31",
             "coverage_limits": "$1M",
             "policy_basis": "occurrence",
             "additional_insured_checked": "not_checked",
@@ -1285,7 +1285,7 @@ def test_approve_tristate_ai_stored_as_string(authed_client, mock_ie_table, mock
             policy_0_policy_number="GL-1",
             policy_0_carrier="Hartford",
             policy_0_effective_date="2025-01-01",
-            policy_0_expiration_date="2026-01-01",
+            policy_0_expiration_date="2027-12-31",
             policy_0_coverage_limits="$1M",
             policy_0_policy_basis="occurrence",
             policy_0_additional_insured_checked="not_applicable",
@@ -1452,8 +1452,8 @@ def test_detail_policy_cards_not_table(authed_client, mock_ie_table):
 
 
 def test_detail_button_text_data_is_correct(authed_client, mock_ie_table):
-    """Approve button must say 'Data is correct', not 'Looks right'."""
-    rec = _make_rec_with_policies()
+    """Approve button must say 'Data is correct' for non-RTR certs (not 'Looks right')."""
+    rec = _make_rec_with_policies(source_filename="vendor_cert.json")  # non-RTR filename
     mock_ie_table.get.return_value = rec
     with patch("review_app._ie_table", return_value=mock_ie_table):
         resp = authed_client.get("/detail/recDETAIL")
@@ -1496,7 +1496,7 @@ def test_save_draft_leaves_review_status_pending(authed_client, mock_ie_table, m
             "policy_0_policy_number": "GL-001",
             "policy_0_carrier": "Hartford",
             "policy_0_effective_date": "2025-01-01",
-            "policy_0_expiration_date": "2026-01-01",
+            "policy_0_expiration_date": "2027-12-31",
             "policy_0_coverage_limits": "$1M",
             "policy_0_policy_basis": "occurrence",
             "policy_0_additional_insured_checked": "false",
@@ -1525,7 +1525,7 @@ def test_save_draft_with_edit_writes_corrections(authed_client, mock_ie_table, m
             "policy_0_policy_number": "GL-999",  # changed
             "policy_0_carrier": "Hartford",
             "policy_0_effective_date": "2025-01-01",
-            "policy_0_expiration_date": "2026-01-01",
+            "policy_0_expiration_date": "2027-12-31",
             "policy_0_coverage_limits": "$1M",
             "policy_0_policy_basis": "occurrence",
             "policy_0_additional_insured_checked": "false",
@@ -1553,7 +1553,7 @@ def test_save_draft_redirects_to_same_detail(authed_client, mock_ie_table, mock_
             "policy_0_policy_number": "GL-001",
             "policy_0_carrier": "Hartford",
             "policy_0_effective_date": "2025-01-01",
-            "policy_0_expiration_date": "2026-01-01",
+            "policy_0_expiration_date": "2027-12-31",
             "policy_0_coverage_limits": "$1M",
             "policy_0_policy_basis": "occurrence",
             "policy_0_additional_insured_checked": "false",
@@ -1714,7 +1714,7 @@ def test_approve_corrections_row_has_all_required_fields(authed_client):
             "policy_number": "GL-1",
             "carrier": "Hartford",
             "effective_date": "2025-01-01",
-            "expiration_date": "2026-01-01",
+            "expiration_date": "2027-12-31",
             "coverage_limits": "$1M",
             "policy_basis": "occurrence",
             "additional_insured_checked": "not_checked",
@@ -1744,7 +1744,7 @@ def test_approve_corrections_row_has_all_required_fields(authed_client):
                 "policy_0_policy_number": "GL-1",
                 "policy_0_carrier": "Hartford",
                 "policy_0_effective_date": "2025-01-01",
-                "policy_0_expiration_date": "2026-01-01",
+                "policy_0_expiration_date": "2027-12-31",
                 "policy_0_coverage_limits": "$1M",
                 "policy_0_policy_basis": "occurrence",
                 "policy_0_additional_insured_checked": "not_checked",
@@ -1873,7 +1873,7 @@ def test_detail_shows_retro_date_input(authed_client):
         "named_insured": "X",
         "policies": [{
             "policy_type": "GL", "policy_number": "GL-1", "carrier": "H",
-            "effective_date": "2025-01-01", "expiration_date": "2026-01-01",
+            "effective_date": "2025-01-01", "expiration_date": "2027-12-31",
             "coverage_limits": "$1M", "policy_basis": "claims-made",
             "retro_date": "2020-05-15",
             "additional_insured_checked": "not_checked",
@@ -1896,7 +1896,7 @@ def test_detail_shows_tail_and_policy_number_invalid_toggles(authed_client):
         "named_insured": "X",
         "policies": [{
             "policy_type": "GL", "policy_number": "GL-1", "carrier": "H",
-            "effective_date": "2025-01-01", "expiration_date": "2026-01-01",
+            "effective_date": "2025-01-01", "expiration_date": "2027-12-31",
             "coverage_limits": "$1M", "policy_basis": "occurrence",
             "tail_coverage_evidenced": True,
             "policy_number_invalid": False,
@@ -1983,7 +1983,7 @@ def test_approve_description_of_operations_edit_writes_correction(authed_client,
         "description_of_operations": "Original.",
         "policies": [{
             "policy_type": "GL", "policy_number": "GL-1", "carrier": "H",
-            "effective_date": "2025-01-01", "expiration_date": "2026-01-01",
+            "effective_date": "2025-01-01", "expiration_date": "2027-12-31",
             "coverage_limits": "$1M", "policy_basis": "occurrence",
             "additional_insured_checked": "not_checked",
             "waiver_of_subrogation_checked": "not_checked",
@@ -2005,7 +2005,7 @@ def test_approve_description_of_operations_edit_writes_correction(authed_client,
             "policy_0_policy_number": "GL-1",
             "policy_0_carrier": "H",
             "policy_0_effective_date": "2025-01-01",
-            "policy_0_expiration_date": "2026-01-01",
+            "policy_0_expiration_date": "2027-12-31",
             "policy_0_coverage_limits": "$1M",
             "policy_0_policy_basis": "occurrence",
             "policy_0_additional_insured_checked": "not_checked",
@@ -2036,7 +2036,7 @@ def test_approve_statement_edit_writes_correction(authed_client, mock_ie_table, 
         "additional_insured_statement": {"present": False, "quote": None, "policies_named": None},
         "policies": [{
             "policy_type": "GL", "policy_number": "GL-1", "carrier": "H",
-            "effective_date": "2025-01-01", "expiration_date": "2026-01-01",
+            "effective_date": "2025-01-01", "expiration_date": "2027-12-31",
             "coverage_limits": "$1M", "policy_basis": "occurrence",
             "additional_insured_checked": "not_checked",
             "waiver_of_subrogation_checked": "not_checked",
@@ -2060,7 +2060,7 @@ def test_approve_statement_edit_writes_correction(authed_client, mock_ie_table, 
             "policy_0_policy_number": "GL-1",
             "policy_0_carrier": "H",
             "policy_0_effective_date": "2025-01-01",
-            "policy_0_expiration_date": "2026-01-01",
+            "policy_0_expiration_date": "2027-12-31",
             "policy_0_coverage_limits": "$1M",
             "policy_0_policy_basis": "occurrence",
             "policy_0_additional_insured_checked": "not_checked",
@@ -2089,7 +2089,7 @@ def test_approve_document_type_edit_updates_airtable_column(authed_client, mock_
         "certificate_holder": "GC",
         "policies": [{
             "policy_type": "GL", "policy_number": "GL-1", "carrier": "H",
-            "effective_date": "2025-01-01", "expiration_date": "2026-01-01",
+            "effective_date": "2025-01-01", "expiration_date": "2027-12-31",
             "coverage_limits": "$1M", "policy_basis": "occurrence",
             "additional_insured_checked": "not_checked",
             "waiver_of_subrogation_checked": "not_checked",
@@ -2110,7 +2110,7 @@ def test_approve_document_type_edit_updates_airtable_column(authed_client, mock_
             "policy_0_policy_number": "GL-1",
             "policy_0_carrier": "H",
             "policy_0_effective_date": "2025-01-01",
-            "policy_0_expiration_date": "2026-01-01",
+            "policy_0_expiration_date": "2027-12-31",
             "policy_0_coverage_limits": "$1M",
             "policy_0_policy_basis": "occurrence",
             "policy_0_additional_insured_checked": "not_checked",
@@ -2133,7 +2133,7 @@ def test_approve_tail_coverage_edit_writes_correction(authed_client, mock_ie_tab
         "certificate_holder": "GC",
         "policies": [{
             "policy_type": "GL", "policy_number": "GL-1", "carrier": "H",
-            "effective_date": "2025-01-01", "expiration_date": "2026-01-01",
+            "effective_date": "2025-01-01", "expiration_date": "2027-12-31",
             "coverage_limits": "$1M", "policy_basis": "claims-made",
             "tail_coverage_evidenced": False,
             "additional_insured_checked": "not_checked",
@@ -2155,7 +2155,7 @@ def test_approve_tail_coverage_edit_writes_correction(authed_client, mock_ie_tab
             "policy_0_policy_number": "GL-1",
             "policy_0_carrier": "H",
             "policy_0_effective_date": "2025-01-01",
-            "policy_0_expiration_date": "2026-01-01",
+            "policy_0_expiration_date": "2027-12-31",
             "policy_0_coverage_limits": "$1M",
             "policy_0_policy_basis": "claims-made",
             "policy_0_additional_insured_checked": "not_checked",
@@ -2232,7 +2232,7 @@ def _raw_with_policy(**overrides):
         "policy_type": "Commercial General Liability",
         "policy_number": "GL-001",
         "effective_date": "2025-01-01",
-        "expiration_date": "2026-01-01",
+        "expiration_date": "2027-12-31",
         "additional_insured_checked": "not_checked",
         "waiver_of_subrogation_checked": "not_checked",
         "primary_noncontributory_checked": False,
@@ -2552,7 +2552,7 @@ def test_compute_flags_missing_fields_narrows_to_required():
         "policies": [
             {**_GL, "policy_number": "GL-001"},  # GL at index 0 — complete
             {"policy_type": "Umbrella", "carrier": "Hartford",
-             "effective_date": "2025-01-01", "expiration_date": "2026-01-01",
+             "effective_date": "2025-01-01", "expiration_date": "2027-12-31",
              "policy_number": ""},  # missing number
         ],
     }
@@ -2580,7 +2580,7 @@ def test_compute_issues_skips_nonrequired_disagreement():
     """AI disagreement on a non-required policy is not included in issues."""
     import review_app
     umbrella_pol = {"policy_type": "Umbrella", "policy_number": "UMB-1",
-                    "effective_date": "2025-01-01", "expiration_date": "2026-01-01",
+                    "effective_date": "2025-01-01", "expiration_date": "2027-12-31",
                     "additional_insured_checked": "checked", "waiver_of_subrogation_checked": "not_checked",
                     "primary_noncontributory_checked": False}
     raw = {"named_insured": "Acme", "document_type": "COI",
