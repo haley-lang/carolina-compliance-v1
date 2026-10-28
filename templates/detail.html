@@ -18,6 +18,8 @@
   </a>
   <div class="topnav-links">
     <a href="/queue" class="nav-link">← Queue</a>
+    <a href="/gaps" class="nav-link">Gaps</a>
+    <a href="/audit" class="nav-link">Audit Pack</a>
     <a href="/corrections" class="nav-link">Corrections</a>
     {% if airtable_url %}
     <a href="{{ airtable_url }}" class="nav-link" target="_blank" rel="noopener">Open in Airtable ↗</a>
@@ -210,6 +212,34 @@
         </details>
         {% elif primary_issues %}
         <div class="mb-16"></div>
+        {% endif %}
+
+        <!-- Shared policy number conflicts -->
+        {% set conflicts = raw_data.get('_shared_policy_conflicts') or [] %}
+        {% if conflicts %}
+        <div class="card mb-16" style="border-left:4px solid #e2a000">
+          <div class="card-body" style="padding:14px 18px">
+            <span class="section-label" style="color:#e2a000">SAME POLICY NUMBER — MULTIPLE TYPES</span>
+            {% for conflict in conflicts %}
+            <div class="mt-8 mb-8">
+              <p style="margin:0 0 6px;font-weight:600">Policy <code>{{ conflict.raw_number }}</code> appears under: {{ conflict.types | join(', ') }}</p>
+              <p class="small text-secondary" style="margin:0 0 8px">Check the certificate and confirm the policy number is the same for all of them, or fix the type before approving.</p>
+              {% if vendor_id %}
+              <form method="POST" action="/accept-policy-pattern/{{ record_id }}" style="display:inline">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="norm_number" value="{{ conflict.norm_number }}">
+                <input type="hidden" name="raw_number" value="{{ conflict.raw_number }}">
+                <input type="hidden" name="types_json" value="{{ conflict.types | tojson }}">
+                <input type="hidden" name="vendor_id" value="{{ vendor_id }}">
+                <input type="hidden" name="vendor_name" value="{{ raw_data.get('named_insured') or '' }}">
+                <button type="submit" class="btn btn-sm btn-secondary">Confirmed — accept this pattern</button>
+              </form>
+              {% endif %}
+            </div>
+            {% if not loop.last %}<hr style="border:none;border-top:1px solid #e5e5e5;margin:8px 0">{% endif %}
+            {% endfor %}
+          </div>
+        </div>
         {% endif %}
 
         <!-- "What we read" — the key fields Haley actually decides on -->

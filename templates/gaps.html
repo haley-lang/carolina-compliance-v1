@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CCS — Coverage Gaps</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='ccs_icon.svg') }}">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='review.css') }}">
+  <style>
+    .badge { display:inline-block; padding:2px 9px; border-radius:20px; font-size:0.75rem; font-weight:700; }
+    .badge-missing  { background:#fdecea; color:#b03a2e; }
+    .badge-date-gap { background:#fff3cd; color:#856404; }
+    .badge-expiring { background:#fff3cd; color:#856404; }
+    .badge-expired  { background:#f8d7da; color:#b03a2e; }
+    .gap-table { width:100%; border-collapse:collapse; font-size:0.88rem; }
+    .gap-table th { text-align:left; padding:6px 10px; border-bottom:1.5px solid var(--border);
+                    font-size:0.78rem; font-weight:700; color:var(--secondary); text-transform:uppercase; }
+    .gap-table td { padding:7px 10px; border-bottom:1px solid var(--border); vertical-align:middle; }
+    .gap-table tr:last-child td { border-bottom:none; }
+    .vendor-card { margin-bottom:24px; }
+    .vendor-card .card-header { font-weight:700; font-size:1rem; color:var(--navy);
+                                display:flex; justify-content:space-between; align-items:center; }
+    .contact-label { font-size:0.82rem; color:var(--secondary); font-weight:500; }
+    .contact-email { font-size:0.85rem; }
+    .draft-area { margin-top:10px; display:none; }
+    .draft-area textarea { width:100%; font-size:0.83rem; border:1px solid var(--border);
+                           border-radius:6px; padding:8px; font-family:monospace; line-height:1.5;
+                           min-height:140px; resize:vertical; }
+    .draft-area .draft-note { font-size:0.78rem; color:var(--secondary); margin-top:4px; }
+    .filter-chips { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:20px; }
+    .chip { padding:5px 14px; border-radius:20px; font-size:0.82rem; font-weight:600;
+            border:1.5px solid var(--border); background:#fff; color:var(--navy);
+            cursor:pointer; text-decoration:none; transition:all 0.12s; }
+    .chip:hover { background:var(--navy); color:#fff; border-color:var(--navy); }
+    .chip.active { background:var(--navy); color:#fff; border-color:var(--navy); }
+    .payments-banner { background:#fefce8; border:1px solid #fde68a; border-radius:8px;
+                       padding:10px 16px; font-size:0.85rem; color:#713f12; margin-bottom:20px; }
+    .existing-requests { margin-top:12px; }
+    .existing-requests .req-label { font-size:0.78rem; font-weight:700; color:var(--secondary);
+                                    text-transform:uppercase; margin-bottom:4px; }
+    .req-row { font-size:0.83rem; padding:4px 0; display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    .req-status { padding:2px 8px; border-radius:10px; font-size:0.75rem; font-weight:700;
+                  background:#e9ecef; color:#495057; }
+    .client-selector { margin-bottom:24px; }
+    .client-selector select { padding:8px 12px; border:1.5px solid var(--border); border-radius:7px;
+                               font-size:0.9rem; font-family:var(--font-sans); cursor:pointer; }
+    .stat-item .stat-num { font-family:var(--font-serif); font-size:2.1rem; color:var(--navy); }
+    .stat-item .stat-label { font-size:0.78rem; color:var(--secondary); font-weight:600;
+                              text-transform:uppercase; letter-spacing:0.04em; }
+    .page-title { font-family:var(--font-serif); font-size:1.7rem; margin-bottom:24px; color:var(--navy); }
+    .nav-link.active { color:#fff !important; font-weight:700; }
+    .no-gap-note { font-size:0.85rem; color:var(--secondary); padding:8px 0; }
+  </style>
+</head>
+<body>
+
+<nav class="topnav">
+  <a href="/queue" class="topnav-logo" aria-label="Carolina Compliance Solutions">
+    <img src="{{ url_for('static', filename='ccs_logo_dark.svg') }}" alt="CCS">
+  </a>
+  <div class="topnav-links">
+    <a href="/queue" class="nav-link">Queue</a>
+    <a href="/gaps" class="nav-link active">Gaps</a>
+    <a href="/audit" class="nav-link">Audit Pack</a>
+    <a href="/corrections" class="nav-link">Corrections</a>
+    <a href="/logout" class="btn btn-gold btn-sm">Sign out</a>
+  </div>
+</nav>
+
+<div class="page-wrap">
+
+  {% for category, message in get_flashed_messages(with_categories=True) %}
+  <div class="flash flash-{{ category }}">{{ message }}</div>
+  {% endfor %}
+
+  <h1 class="page-title">Coverage Gaps — {{ client_name }}</h1>
+
+  {% if not has_payments %}
+  <div class="payments-banner">
+    Payments not loaded. Showing all gaps for active vendors.
+  </div>
+  {% endif %}
+
+  <!-- Client selector -->
+  <div class="client-selector">
+    <span class="section-label">CLIENT</span>
+    <div class="mt-8">
+      <select onchange="window.location='/gaps?client_id='+this.value">
+        {% for c in clients %}
+        <option value="{{ c.id }}" {% if c.id == client_id %}selected{% endif %}>{{ c.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+  </div>
+
+  <!-- Stats band -->
+  <div class="stats-band" role="region" aria-label="Gap summary">
+    <div class="stat-item">
+      <span class="stat-num">{{ stat_total_vendors }}</span>
+      <span class="stat-label">active vendors</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-num">{{ stat_missing }}</span>
+      <span class="stat-label">missing coverage</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-num">{{ stat_date_gaps }}</span>
+      <span class="stat-label">date gaps</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-num">{{ stat_expiring }}</span>
+      <span class="stat-label">expiring soon</span>
+    </div>
+  </div>
+
+  <!-- Filter chips -->
+  <div class="filter-chips" id="filter-chips">
+    <a href="#" class="chip active" data-filter="all">All</a>
+    <a href="#" class="chip" data-filter="missing">Missing coverage</a>
+    <a href="#" class="chip" data-filter="date_gap">Date gaps</a>
+    <a href="#" class="chip" data-filter="expiring">Expiring soon</a>
+    <a href="#" class="chip" data-filter="expired">Expired</a>
+  </div>
+
+  <!-- Vendor gap cards -->
+  {% if vendors %}
+  <div id="vendor-cards">
+  {% for v in vendors %}
+  <div class="card vendor-card mb-16"
+       data-vendor-kinds="{{ v.gaps | map(attribute='kind') | list | join(',') }},{{ 'expiring' if v.expiring_soon else '' }}">
+    <div class="card-header">
+      <span>{{ v.vendor_name }}</span>
+      {% if v.contact_email %}
+      <span>
+        <span class="contact-label">Email:</span>
+        <a href="mailto:{{ v.contact_email }}" class="contact-email">{{ v.contact_email }}</a>
+      </span>
+      {% endif %}
+    </div>
+    <div class="card-body" style="padding:0">
+
+      {% if v.gaps %}
+      <table class="gap-table">
+        <thead>
+          <tr>
+            <th>Type</th>
+            <th>Gap</th>
+            <th>Days</th>
+            <th>Status</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for g in v.gaps %}
+        <tr>
+          <td>{{ g.type }}</td>
+          <td>
+            {% if g.kind == 'missing' %}
+              Not on file
+            {% elif g.kind == 'expired' %}
+              Expired {{ g.gap_start | fmt_date }} — no renewal on file
+            {% else %}
+              {{ g.gap_start | fmt_date }} – {{ g.gap_end | fmt_date if g.gap_end else 'present' }}
+            {% endif %}
+          </td>
+          <td>{{ g.days if g.days is not none else '—' }}</td>
+          <td>
+            {% if g.kind == 'missing' %}
+              <span class="badge badge-missing">Not on file</span>
+            {% elif g.kind == 'expired' %}
+              <span class="badge badge-expired">Expired</span>
+            {% else %}
+              <span class="badge badge-date-gap">Gap</span>
+            {% endif %}
+          </td>
+          <td>
+            <button class="btn btn-sm btn-secondary btn-draft-email"
+                    data-vendor-id="{{ v.vendor_id }}"
+                    data-coverage-type="{{ g.type }}"
+                    data-gap-start="{{ g.gap_start or '' }}"
+                    data-gap-end="{{ g.gap_end or '' }}"
+                    data-client-id="{{ client_id }}">
+              Draft email
+            </button>
+          </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+
+      {% if v.expiring_soon %}
+      <div style="padding:10px 10px 0">
+        <span class="section-label" style="font-size:0.72rem">EXPIRING WITHIN 30 DAYS</span>
+        {% for es in v.expiring_soon %}
+        <div style="font-size:0.85rem; padding:4px 0">
+          {{ es.type }}: {{ es.policy_number }} — expires {{ es.expiration_date | fmt_date }}
+          <button class="btn btn-sm btn-secondary btn-draft-email"
+                  data-vendor-id="{{ v.vendor_id }}"
+                  data-coverage-type="{{ es.type }}"
+                  data-gap-start="{{ es.expiration_date }}"
+                  data-gap-end=""
+                  data-client-id="{{ client_id }}"
+                  style="margin-left:8px">
+            Draft email
+          </button>
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      {% if v.existing_requests %}
+      <div class="existing-requests" style="padding:10px 10px 12px">
+        <div class="req-label">Existing requests</div>
+        {% for req in v.existing_requests %}
+        <div class="req-row">
+          <span>{{ req.coverage_type }}</span>
+          {% if req.gap_start %}<span>{{ req.gap_start | fmt_date }}{% if req.gap_end %} – {{ req.gap_end | fmt_date }}{% endif %}</span>{% endif %}
+          <span class="req-status">{{ req.status }}</span>
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      <!-- Draft email reveal area -->
+      <div class="draft-area" id="draft-{{ v.vendor_id }}" style="padding:0 12px 12px">
+        <div class="draft-area-inner">
+          <textarea readonly placeholder="Draft will appear here..."></textarea>
+          <p class="draft-note">This draft is saved in Airtable. Copy and send manually — nothing is sent automatically.</p>
+        </div>
+      </div>
+
+    </div>
+  </div>
+  {% endfor %}
+  </div>
+  {% else %}
+  <div class="card">
+    <div class="card-body">
+      <p class="no-gap-note">No coverage gaps found for active vendors under {{ client_name }}.</p>
+    </div>
+  </div>
+  {% endif %}
+
+</div><!-- /page-wrap -->
+
+<script>
+(function () {
+  // Filter chips
+  var chips = document.querySelectorAll('.chip[data-filter]');
+  chips.forEach(function (chip) {
+    chip.addEventListener('click', function (e) {
+      e.preventDefault();
+      chips.forEach(function (c) { c.classList.remove('active'); });
+      chip.classList.add('active');
+      var filter = chip.getAttribute('data-filter');
+      var cards = document.querySelectorAll('.vendor-card[data-vendor-kinds]');
+      cards.forEach(function (card) {
+        if (filter === 'all') {
+          card.style.display = '';
+          return;
+        }
+        var kinds = card.getAttribute('data-vendor-kinds') || '';
+        card.style.display = kinds.indexOf(filter) !== -1 ? '' : 'none';
+      });
+    });
+  });
+
+  // Draft email buttons
+  document.addEventListener('click', function (e) {
+    var btn = e.target.closest('.btn-draft-email');
+    if (!btn) return;
+    btn.disabled = true;
+    btn.textContent = 'Drafting…';
+
+    var vendorId    = btn.getAttribute('data-vendor-id');
+    var covType     = btn.getAttribute('data-coverage-type');
+    var gapStart    = btn.getAttribute('data-gap-start') || '';
+    var gapEnd      = btn.getAttribute('data-gap-end') || '';
+    var clientId    = btn.getAttribute('data-client-id');
+
+    var fd = new FormData();
+    fd.append('csrf_token', '{{ csrf_token() }}');
+    fd.append('client_id', clientId);
+    fd.append('coverage_type', covType);
+    fd.append('gap_start', gapStart);
+    fd.append('gap_end', gapEnd);
+
+    fetch('/gaps/draft-email/' + vendorId, { method: 'POST', body: fd })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.ok) {
+          var draftArea = document.getElementById('draft-' + vendorId);
+          if (draftArea) {
+            draftArea.style.display = 'block';
+            var ta = draftArea.querySelector('textarea');
+            if (ta) ta.value = data.draft;
+          }
+          btn.textContent = 'Draft saved';
+        } else {
+          btn.textContent = 'Error — try again';
+          btn.disabled = false;
+        }
+      })
+      .catch(function () {
+        btn.textContent = 'Error — try again';
+        btn.disabled = false;
+      });
+  });
+}());
+</script>
+</body>
+</html>

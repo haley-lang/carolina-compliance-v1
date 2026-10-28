@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CCS — Audit Pack</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='ccs_icon.svg') }}">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='review.css') }}">
+  <style>
+    .page-title { font-family:var(--font-serif); font-size:1.7rem; margin-bottom:28px; color:var(--navy); }
+    .form-section { margin-bottom:32px; }
+    .section-heading { font-family:var(--font-serif); font-size:1.2rem; margin-bottom:16px; color:var(--navy); }
+    .form-grid { display:grid; grid-template-columns:1fr 1fr; gap:16px 24px; }
+    .form-group { display:flex; flex-direction:column; gap:4px; }
+    .form-group label { font-size:0.82rem; font-weight:700; color:var(--secondary); text-transform:uppercase;
+                        letter-spacing:0.04em; }
+    .form-group select, .form-group input[type="date"], .form-group input[type="text"] {
+      padding:9px 12px; border:1.5px solid var(--border); border-radius:7px;
+      font-size:0.9rem; font-family:var(--font-sans); background:#fff; }
+    .form-group select:focus, .form-group input:focus { outline:none; border-color:var(--blue); }
+    .type-toggle { display:flex; gap:0; }
+    .type-toggle label { flex:1; }
+    .type-toggle input { display:none; }
+    .type-toggle .pill {
+      display:block; text-align:center; padding:9px 16px; border:1.5px solid var(--border);
+      font-size:0.88rem; font-weight:600; cursor:pointer; background:#fff; color:var(--navy);
+      transition:all 0.12s;
+    }
+    .type-toggle label:first-child .pill { border-radius:7px 0 0 7px; }
+    .type-toggle label:last-child  .pill { border-radius:0 7px 7px 0; border-left:none; }
+    .type-toggle input:checked + .pill { background:var(--navy); color:#fff; border-color:var(--navy); }
+    .disabled-row { display:flex; align-items:center; gap:8px; }
+    .disabled-check { opacity:0.5; cursor:not-allowed; }
+    .disabled-label { font-size:0.88rem; color:var(--secondary); cursor:not-allowed; }
+    .action-row { display:flex; gap:12px; align-items:center; margin-top:20px; flex-wrap:wrap; }
+    /* Preview section */
+    #preview-section { display:none; margin-top:32px; }
+    .count-boxes { display:flex; gap:16px; flex-wrap:wrap; margin-bottom:20px; }
+    .count-box { background:#fff; border:1.5px solid var(--border); border-radius:10px;
+                 padding:14px 20px; text-align:center; min-width:130px; }
+    .count-box .cb-num { font-family:var(--font-serif); font-size:2rem; color:var(--navy); display:block; }
+    .count-box .cb-label { font-size:0.75rem; font-weight:700; color:var(--secondary);
+                           text-transform:uppercase; letter-spacing:0.04em; }
+    .count-box.full { border-color:#198754; }
+    .count-box.short_gap { border-color:#ffc107; }
+    .count-box.gap { border-color:#dc3545; }
+    .count-box.none { border-color:#6c757d; }
+    .preview-table { width:100%; border-collapse:collapse; font-size:0.88rem; }
+    .preview-table th { text-align:left; padding:7px 10px; border-bottom:2px solid var(--border);
+                        font-size:0.78rem; font-weight:700; color:var(--secondary); text-transform:uppercase; }
+    .preview-table td { padding:8px 10px; border-bottom:1px solid var(--border); }
+    .preview-table tr:last-child td { border-bottom:none; }
+    .preview-table tr { cursor:pointer; }
+    .preview-table tr:hover td { background:#f8f7f5; }
+    .status-badge { display:inline-block; padding:2px 9px; border-radius:12px; font-size:0.75rem; font-weight:700; }
+    .status-full      { background:#d1e7dd; color:#0a3622; }
+    .status-short_gap { background:#fff3cd; color:#664d03; }
+    .status-gap       { background:#f8d7da; color:#58151c; }
+    .status-none      { background:#e2e3e5; color:#383d41; }
+    /* Recent audits table */
+    .audits-table { width:100%; border-collapse:collapse; font-size:0.88rem; }
+    .audits-table th { text-align:left; padding:7px 10px; border-bottom:2px solid var(--border);
+                       font-size:0.78rem; font-weight:700; color:var(--secondary); text-transform:uppercase; }
+    .audits-table td { padding:8px 10px; border-bottom:1px solid var(--border); }
+    .audits-table tr:hover td { background:#f8f7f5; cursor:pointer; }
+    .nav-link.active { color:#fff !important; font-weight:700; }
+    .spinner { display:none; }
+    .loading .spinner { display:inline; }
+    .preview-terms-expand { font-size:0.82rem; cursor:pointer; color:var(--blue); }
+    .preview-terms-list { display:none; margin-top:6px; font-size:0.82rem; color:var(--secondary); }
+  </style>
+</head>
+<body>
+
+<nav class="topnav">
+  <a href="/queue" class="topnav-logo" aria-label="Carolina Compliance Solutions">
+    <img src="{{ url_for('static', filename='ccs_logo_dark.svg') }}" alt="CCS">
+  </a>
+  <div class="topnav-links">
+    <a href="/queue" class="nav-link">Queue</a>
+    <a href="/gaps" class="nav-link">Gaps</a>
+    <a href="/audit" class="nav-link active">Audit Pack</a>
+    <a href="/corrections" class="nav-link">Corrections</a>
+    <a href="/logout" class="btn btn-gold btn-sm">Sign out</a>
+  </div>
+</nav>
+
+<div class="page-wrap">
+
+  {% for category, message in get_flashed_messages(with_categories=True) %}
+  <div class="flash flash-{{ category }}">{{ message }}</div>
+  {% endfor %}
+
+  <h1 class="page-title">Audit Pack Builder</h1>
+
+  <!-- Recent audits -->
+  {% if recent_audits %}
+  <div class="form-section">
+    <h2 class="section-heading">Recent audits</h2>
+    <div class="card">
+      <div class="card-body" style="padding:0">
+        <table class="audits-table" id="recent-table">
+          <thead>
+            <tr>
+              <th>Audit Name</th>
+              <th>Type</th>
+              <th>Period</th>
+              <th>Built</th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for a in recent_audits %}
+          <tr data-audit-type="{{ a.audit_type }}"
+              data-start="{{ a.start_date }}"
+              data-end="{{ a.end_date }}">
+            <td>{{ a.name or '—' }}</td>
+            <td>{{ a.audit_type or '—' }}</td>
+            <td>{{ a.start_date | fmt_date }} – {{ a.end_date | fmt_date }}</td>
+            <td>{{ a.created_at[:10] | fmt_date if a.created_at else '—' }}</td>
+          </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- New audit form -->
+  <div class="form-section">
+    <h2 class="section-heading">New audit</h2>
+    <div class="card">
+      <div class="card-body">
+        <form id="audit-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+          <div class="form-grid">
+            <!-- Client -->
+            <div class="form-group">
+              <label for="f-client">Client</label>
+              <select id="f-client" name="client_id" required>
+                {% for c in clients %}
+                <option value="{{ c.id }}" {% if c.id == rtr_client_id %}selected{% endif %}>{{ c.name }}</option>
+                {% endfor %}
+              </select>
+            </div>
+
+            <!-- Carrier / audit name -->
+            <div class="form-group">
+              <label for="f-carrier">Carrier / Audit Name (optional)</label>
+              <input type="text" id="f-carrier" name="carrier_filter"
+                     placeholder="e.g. Ohio Casualty audit">
+            </div>
+
+            <!-- Audit Type -->
+            <div class="form-group" style="grid-column:1 / -1">
+              <label>Audit Type</label>
+              <div class="type-toggle">
+                <label>
+                  <input type="radio" name="audit_type" value="General Liability" checked>
+                  <span class="pill">General Liability</span>
+                </label>
+                <label>
+                  <input type="radio" name="audit_type" value="Workers' Comp">
+                  <span class="pill">Workers' Comp</span>
+                </label>
+              </div>
+            </div>
+
+            <!-- Date range -->
+            <div class="form-group">
+              <label for="f-start">Start Date</label>
+              <input type="date" id="f-start" name="start_date" required>
+            </div>
+
+            <div class="form-group">
+              <label for="f-end">End Date</label>
+              <input type="date" id="f-end" name="end_date" required>
+            </div>
+
+            <!-- Payments checkbox (disabled) -->
+            <div class="form-group" style="grid-column:1 / -1">
+              <div class="disabled-row">
+                <input type="checkbox" class="disabled-check" disabled
+                       title="Payments not loaded">
+                <span class="disabled-label" title="Payments not loaded">Only subs paid in this period</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="action-row">
+            <button type="button" id="btn-preview" class="btn btn-secondary">
+              <span class="spinner">⟳ </span>Preview
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Preview results (shown after fetch) -->
+  <div id="preview-section">
+    <h2 class="section-heading">Preview</h2>
+    <div class="count-boxes" id="count-boxes">
+      <div class="count-box full">
+        <span class="cb-num" id="cnt-full">—</span>
+        <span class="cb-label">Full period on file</span>
+      </div>
+      <div class="count-box short_gap">
+        <span class="cb-num" id="cnt-short">—</span>
+        <span class="cb-label">Short gap (≤30 days)</span>
+      </div>
+      <div class="count-box gap">
+        <span class="cb-num" id="cnt-gap">—</span>
+        <span class="cb-label">Gap</span>
+      </div>
+      <div class="count-box none">
+        <span class="cb-num" id="cnt-none">—</span>
+        <span class="cb-label">None on file</span>
+      </div>
+    </div>
+
+    <div class="card mb-16">
+      <div class="card-body" style="padding:0">
+        <table class="preview-table" id="preview-table">
+          <thead>
+            <tr>
+              <th>Sub</th>
+              <th>Status</th>
+              <th>Days not on file</th>
+              <th>Certificates</th>
+            </tr>
+          </thead>
+          <tbody id="preview-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="action-row">
+      <button type="button" id="btn-build" class="btn btn-primary">Build audit pack (.zip)</button>
+      <span id="build-spinner" style="display:none; color:var(--secondary); font-size:0.88rem">Building — this may take a moment…</span>
+    </div>
+  </div>
+
+</div><!-- /page-wrap -->
+
+<script>
+(function () {
+  var form      = document.getElementById('audit-form');
+  var btnPreview = document.getElementById('btn-preview');
+  var btnBuild   = document.getElementById('btn-build');
+  var previewSec = document.getElementById('preview-section');
+
+  // Auto-preview when all 4 required fields are filled
+  ['f-client', 'f-start', 'f-end'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener('change', maybeAutoPreview);
+  });
+  form.querySelectorAll('input[name="audit_type"]').forEach(function (r) {
+    r.addEventListener('change', maybeAutoPreview);
+  });
+
+  function maybeAutoPreview() {
+    var clientId  = document.getElementById('f-client').value;
+    var startDate = document.getElementById('f-start').value;
+    var endDate   = document.getElementById('f-end').value;
+    var auditType = form.querySelector('input[name="audit_type"]:checked');
+    if (clientId && startDate && endDate && auditType) {
+      runPreview();
+    }
+  }
+
+  btnPreview.addEventListener('click', runPreview);
+
+  function runPreview() {
+    var fd = new FormData(form);
+    btnPreview.classList.add('loading');
+    btnPreview.disabled = true;
+
+    fetch('/audit/preview', { method: 'POST', body: fd })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        btnPreview.classList.remove('loading');
+        btnPreview.disabled = false;
+
+        if (data.error) {
+          alert('Preview error: ' + data.error);
+          return;
+        }
+
+        // Update counts
+        var c = data.counts || {};
+        document.getElementById('cnt-full').textContent  = c.full  || 0;
+        document.getElementById('cnt-short').textContent = c.short_gap || 0;
+        document.getElementById('cnt-gap').textContent   = c.gap   || 0;
+        document.getElementById('cnt-none').textContent  = c.none  || 0;
+
+        // Populate table
+        var tbody = document.getElementById('preview-tbody');
+        tbody.innerHTML = '';
+        (data.vendors || []).forEach(function (v) {
+          var tr = document.createElement('tr');
+          var termsHtml = '';
+          if (v.terms && v.terms.length) {
+            termsHtml = '<span class="preview-terms-expand" onclick="this.nextElementSibling.style.display=(this.nextElementSibling.style.display===\'none\'?\'block\':\'none\')">'
+              + v.terms.length + ' cert(s) ▾</span>'
+              + '<div class="preview-terms-list" style="display:none">'
+              + v.terms.map(function (t) {
+                  return t.policy_number + ' / ' + t.carrier + ' / ' + t.effective + ' – ' + t.expiration;
+                }).join('<br>')
+              + '</div>';
+          } else {
+            termsHtml = '<span style="color:var(--secondary)">—</span>';
+          }
+          tr.innerHTML =
+            '<td>' + escHtml(v.name) + '</td>'
+            + '<td><span class="status-badge status-' + v.status + '">' + v.status.replace('_', ' ') + '</span></td>'
+            + '<td>' + (v.days_not_on_file || 0) + '</td>'
+            + '<td>' + termsHtml + '</td>';
+          tbody.appendChild(tr);
+        });
+
+        previewSec.style.display = 'block';
+        previewSec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      })
+      .catch(function (err) {
+        btnPreview.classList.remove('loading');
+        btnPreview.disabled = false;
+        alert('Preview failed: ' + err);
+      });
+  }
+
+  // Build button
+  btnBuild.addEventListener('click', function () {
+    var spinner = document.getElementById('build-spinner');
+    btnBuild.disabled = true;
+    spinner.style.display = 'inline';
+
+    var fd = new FormData(form);
+    fetch('/audit/build', { method: 'POST', body: fd })
+      .then(function (r) {
+        if (!r.ok) throw new Error('Server error ' + r.status);
+        return r.blob();
+      })
+      .then(function (blob) {
+        var url = URL.createObjectURL(blob);
+        var a   = document.createElement('a');
+        // Extract filename from response not easily available; use a default
+        a.href = url;
+        a.download = 'audit_pack.zip';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        btnBuild.disabled = false;
+        spinner.style.display = 'none';
+      })
+      .catch(function (err) {
+        alert('Build failed: ' + err);
+        btnBuild.disabled = false;
+        spinner.style.display = 'none';
+      });
+  });
+
+  // Repopulate form from recent audits table
+  var recentTable = document.getElementById('recent-table');
+  if (recentTable) {
+    recentTable.addEventListener('click', function (e) {
+      var tr = e.target.closest('tr[data-audit-type]');
+      if (!tr) return;
+      var auditType = tr.getAttribute('data-audit-type');
+      var start     = tr.getAttribute('data-start');
+      var end       = tr.getAttribute('data-end');
+      if (auditType) {
+        form.querySelectorAll('input[name="audit_type"]').forEach(function (r) {
+          r.checked = r.value === auditType;
+        });
+        // Update toggle pill visuals
+        form.querySelectorAll('input[name="audit_type"]').forEach(function (r) {
+          r.dispatchEvent(new Event('change'));
+        });
+      }
+      if (start) document.getElementById('f-start').value = start;
+      if (end)   document.getElementById('f-end').value   = end;
+    });
+  }
+
+  function escHtml(s) {
+    return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+}());
+</script>
+</body>
+</html>

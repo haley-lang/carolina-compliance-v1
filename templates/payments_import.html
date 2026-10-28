@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CCS — Payments Import</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='ccs_icon.svg') }}">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='review.css') }}">
+  <style>
+    .page-title { font-family:var(--font-serif); font-size:1.7rem; margin-bottom:28px; color:var(--navy); }
+    .section-heading { font-family:var(--font-serif); font-size:1.2rem; margin-bottom:16px; color:var(--navy); }
+    .form-group { display:flex; flex-direction:column; gap:4px; margin-bottom:16px; }
+    .form-group label { font-size:0.82rem; font-weight:700; color:var(--secondary); text-transform:uppercase;
+                        letter-spacing:0.04em; }
+    .form-group select, .form-group input[type="file"] {
+      padding:9px 12px; border:1.5px solid var(--border); border-radius:7px;
+      font-size:0.9rem; font-family:var(--font-sans); background:#fff; }
+    .form-group select:focus { outline:none; border-color:var(--blue); }
+    .instructions { background:var(--offwhite); border:1px solid var(--border); border-radius:8px;
+                    padding:14px 18px; margin-bottom:24px; font-size:0.88rem; color:var(--secondary); }
+    .instructions strong { color:var(--navy); }
+    .results-table { width:100%; border-collapse:collapse; font-size:0.88rem; }
+    .results-table th { text-align:left; padding:7px 10px; border-bottom:2px solid var(--border);
+                        font-size:0.78rem; font-weight:700; color:var(--secondary); text-transform:uppercase; }
+    .results-table td { padding:8px 10px; border-bottom:1px solid var(--border); }
+    .results-table tr:last-child td { border-bottom:none; }
+    .badge-matched   { display:inline-block; padding:2px 8px; border-radius:10px; font-size:0.75rem;
+                       font-weight:700; background:#d1e7dd; color:#0a3622; }
+    .badge-unmatched { display:inline-block; padding:2px 8px; border-radius:10px; font-size:0.75rem;
+                       font-weight:700; background:#f8d7da; color:#58151c; }
+    .unmatched-list { font-size:0.85rem; }
+    .unmatched-list li { padding:3px 0; }
+    .stat-row { display:flex; gap:24px; margin-bottom:20px; flex-wrap:wrap; }
+    .stat-box { background:#fff; border:1.5px solid var(--border); border-radius:10px;
+                padding:12px 18px; text-align:center; }
+    .stat-box .num { font-family:var(--font-serif); font-size:1.8rem; color:var(--navy); display:block; }
+    .stat-box .lbl { font-size:0.75rem; font-weight:700; color:var(--secondary); text-transform:uppercase; }
+    .nav-link.active { color:#fff !important; font-weight:700; }
+  </style>
+</head>
+<body>
+
+<nav class="topnav">
+  <a href="/queue" class="topnav-logo" aria-label="Carolina Compliance Solutions">
+    <img src="{{ url_for('static', filename='ccs_logo_dark.svg') }}" alt="CCS">
+  </a>
+  <div class="topnav-links">
+    <a href="/queue" class="nav-link">Queue</a>
+    <a href="/gaps" class="nav-link">Gaps</a>
+    <a href="/audit" class="nav-link">Audit Pack</a>
+    <a href="/corrections" class="nav-link">Corrections</a>
+    <a href="/logout" class="btn btn-gold btn-sm">Sign out</a>
+  </div>
+</nav>
+
+<div class="page-wrap">
+
+  {% for category, message in get_flashed_messages(with_categories=True) %}
+  <div class="flash flash-{{ category }}">{{ message }}</div>
+  {% endfor %}
+
+  <h1 class="page-title">Payments — Import</h1>
+
+  <div class="instructions">
+    <strong>How it works:</strong> Upload a QuickBooks Transaction Detail report as CSV.
+    Payee names will be matched to your vendor list using name similarity.
+    Matched payments are saved in Airtable and used for filtered audit packs.
+    <br><br>
+    <strong>Expected columns:</strong> Date, Payee / Name, Amount. Column order does not matter.
+  </div>
+
+  {% if error %}
+  <div class="flash flash-danger">{{ error }}</div>
+  {% endif %}
+
+  <!-- Import form -->
+  <div class="card mb-24">
+    <div class="card-header">Import CSV</div>
+    <div class="card-body">
+      <form method="post" enctype="multipart/form-data" action="/payments/import">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+        <div class="form-group">
+          <label for="f-client">Client</label>
+          <select id="f-client" name="client_id" required>
+            {% for c in clients %}
+            <option value="{{ c.id }}">{{ c.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="f-csv">QuickBooks CSV File</label>
+          <input type="file" id="f-csv" name="csv_file" accept=".csv,text/csv" required>
+        </div>
+
+        <button type="submit" class="btn btn-primary">Import payments</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Recent count summary -->
+  <div class="stat-row">
+    <div class="stat-box">
+      <span class="num">{{ recent_count }}</span>
+      <span class="lbl">payments on file</span>
+    </div>
+    {% if results is defined %}
+    <div class="stat-box">
+      <span class="num">{{ matched_count }}</span>
+      <span class="lbl">matched this import</span>
+    </div>
+    <div class="stat-box">
+      <span class="num">{{ results | length - matched_count }}</span>
+      <span class="lbl">unmatched this import</span>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- Import results -->
+  {% if results is defined %}
+  <div class="mb-24">
+    <h2 class="section-heading">Import results</h2>
+    <div class="card">
+      <div class="card-body" style="padding:0">
+        <table class="results-table">
+          <thead>
+            <tr>
+              <th>Payee</th>
+              <th>Matched Vendor</th>
+              <th>Date</th>
+              <th>Amount</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for r in results %}
+          <tr>
+            <td>{{ r.payee or '—' }}</td>
+            <td>{{ r.matched_vendor or '—' }}</td>
+            <td>{{ r.date or '—' }}</td>
+            <td>{{ r.amount or '—' }}</td>
+            <td>
+              {% if r.status == 'Matched' %}
+                <span class="badge-matched">Matched</span>
+              {% else %}
+                <span class="badge-unmatched">Unmatched</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  {% if unmatched %}
+  <div class="mb-24">
+    <h2 class="section-heading">Unmatched payees ({{ unmatched | length }})</h2>
+    <div class="card">
+      <div class="card-body">
+        <p class="small text-secondary mb-8">
+          These payees could not be matched to a vendor. You may need to add them to Airtable
+          or correct the spelling in QuickBooks.
+        </p>
+        <ul class="unmatched-list">
+          {% for name in unmatched %}
+          <li>{{ name }}</li>
+          {% endfor %}
+        </ul>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+  {% endif %}
+
+</div><!-- /page-wrap -->
+
+</body>
+</html>

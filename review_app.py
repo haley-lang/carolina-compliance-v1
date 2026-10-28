@@ -18,6 +18,8 @@ What Approve triggers downstream:
     but will only re-enter the pipeline if Processing Status is manually
     set back to "Imported" or re-extracted.
 """
+import csv
+import io
 import json
 import os
 import re
@@ -26,8 +28,10 @@ import subprocess
 import threading
 import time
 import traceback
+import urllib.request
+import zipfile
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, date, timedelta, timezone
 from functools import wraps
 
 from dotenv import load_dotenv
@@ -52,6 +56,14 @@ CORRECTIONS_TABLE_ID       = "tblh6NTQikjzl8FFu"
 TRAINING_LOG_TABLE_ID      = "tblBW6HkbSVYkN2PN"  # Extraction Training Log (test set)
 EXTRACTIONS_TABLE_ID       = "tblT88Ty6d6M766oY"  # Incoming Extractions — for Airtable deep-links
 INSURANCE_POLICIES_TABLE_ID = "tblpPcmm5ANE0bMNB"  # Insurance Policies
+ACCEPTED_POLICY_PATTERNS_TABLE_ID = "tblnrj457WdtRhkei"
+GAP_REQUESTS_TABLE_ID      = "tbleY5UzcLYZFZFKF"
+AUDITS_TABLE_ID            = "tblbaTMKuM6yWeVjL"
+SUB_PAYMENTS_TABLE_ID      = "tbleeHHzDSZ2bpwd0"
+VENDORS_TABLE_ID           = "tblsOphSd5DKSZEro"
+CLIENTS_TABLE_ID           = "tbltnBIWke20IEI3K"
+VCA_TABLE_ID               = "tblpYKywfs0YHiQ98"
+RTR_CLIENT_ID              = "recG2hxGoJKdgBr4M"
 
 _BILLY_RTR_PREFIXES = ("COI_forms_", "RTR_COI_", "N9WC", "coi.json")
 
@@ -396,21 +408,39 @@ def _trigger_post_confirm(record_id: str) -> None:
         # Fire processor.py as a daemon thread so it runs after this request returns
         _script = str(os.path.join(os.path.dirname(__file__), ".venv", "bin", "python"))
         _proc_py = str(os.path.join(os.path.dirname(__file__), "processor.py"))
+        vendor_id = result.get("vendor_id")
         def _run():
             try:
                 subprocess.run([_script, _proc_py], cwd=os.path.dirname(__file__), timeout=300)
             except Exception as exc:
                 app.logger.warning("processor.py subprocess error: %s", exc)
+            if vendor_id:
+                try:
+                    _check_shared_policy_numbers(vendor_id, record_id)
+                except Exception as exc:
+                    app.logger.warning("_check_shared_policy_numbers failed for %s: %s", vendor_id, exc)
         threading.Thread(target=_run, daemon=True).start()
     except Exception as exc:
         app.logger.error("_trigger_post_confirm failed for %s: %s", record_id, exc, exc_info=True)
 
 
+def _get_vendor_policy_ids(vendor_record_id: str) -> list:
+    """Return the list of Insurance Policy record IDs linked to a vendor."""
+    base_id = clean_base_id(config.AIRTABLE_BASE_ID)
+    api = _api()
+    vrec = api.table(base_id, VENDORS_TABLE_ID).get(vendor_record_id)
+    return vrec["fields"].get("Insurance Policies") or []
+
+
 def _get_vendor_policies(vendor_record_id: str) -> list:
     """Return all Insurance Policy records linked to a vendor, sorted by type then expiry."""
     base_id = clean_base_id(config.AIRTABLE_BASE_ID)
-    tbl = _api().table(base_id, INSURANCE_POLICIES_TABLE_ID)
-    formula = f"FIND('{vendor_record_id}', ARRAYJOIN({{Vendor Link}}, ','))"
+    api = _api()
+    policy_ids = _get_vendor_policy_ids(vendor_record_id)
+    if not policy_ids:
+        return []
+    tbl = api.table(base_id, INSURANCE_POLICIES_TABLE_ID)
+    formula = "OR(" + ", ".join(f"RECORD_ID()='{p}'" for p in policy_ids) + ")"
     records = tbl.all(
         formula=formula,
         fields=["Policy Type", "Carrier", "Policy Number", "Effective Date", "Expiration Date", "Status"],
@@ -428,6 +458,90 @@ def _get_vendor_policies(vendor_record_id: str) -> list:
         })
     result.sort(key=lambda p: (p["policy_type"], p["expiration_date"] or ""))
     return result
+
+
+def _check_shared_policy_numbers(vendor_record_id: str, extraction_record_id: str) -> None:
+    """Check if any policy number for this vendor is shared across 2+ distinct policy types.
+
+    If a conflict is found and not already accepted in Accepted Policy Patterns,
+    stores _shared_policy_conflicts in the extraction's Raw JSON and sets it to Pending Review.
+    """
+    base_id = clean_base_id(config.AIRTABLE_BASE_ID)
+    api = _api()
+
+    # Load all policies for this vendor via vendor record link
+    pol_tbl = api.table(base_id, INSURANCE_POLICIES_TABLE_ID)
+    policy_ids = _get_vendor_policy_ids(vendor_record_id)
+    if not policy_ids:
+        return
+    pol_formula = "OR(" + ", ".join(f"RECORD_ID()='{p}'" for p in policy_ids) + ")"
+    records = pol_tbl.all(
+        formula=pol_formula,
+        fields=["Policy Type", "Policy Number"],
+    )
+
+    # Group normalized policy numbers → set of policy types
+    num_to_types: dict = defaultdict(set)
+    num_to_raw: dict = {}
+    for rec in records:
+        pf = rec["fields"]
+        raw_num = (pf.get("Policy Number") or "").strip()
+        pol_type = (pf.get("Policy Type") or "").strip()
+        if not raw_num or not pol_type:
+            continue
+        norm = _norm_polnum(raw_num)
+        if norm:
+            num_to_types[norm].add(pol_type)
+            if norm not in num_to_raw:
+                num_to_raw[norm] = raw_num
+
+    # Find conflicts: normalized number shared across 2+ distinct types
+    conflicts = []
+    for norm_num, types in num_to_types.items():
+        if len(types) < 2:
+            continue
+        # Check Accepted Policy Patterns for this vendor + normalized number
+        app_tbl = api.table(base_id, ACCEPTED_POLICY_PATTERNS_TABLE_ID)
+        accept_formula = (
+            f"AND({{Vendor Record ID}} = '{vendor_record_id}', "
+            f"{{Policy Number Normalized}} = '{norm_num}')"
+        )
+        accepted = app_tbl.all(formula=accept_formula, max_records=1)
+        if accepted:
+            continue
+        conflicts.append({
+            "norm_number": norm_num,
+            "raw_number": num_to_raw.get(norm_num, norm_num),
+            "types": sorted(types),
+        })
+
+    if not conflicts:
+        return
+
+    # Update the extraction record
+    ie_tbl = api.table(base_id, INCOMING_EXTRACTIONS_TABLE)
+    try:
+        rec = ie_tbl.get(extraction_record_id)
+    except Exception as exc:
+        app.logger.warning("Could not fetch extraction %s: %s", extraction_record_id, exc)
+        return
+
+    try:
+        raw_json = json.loads(rec["fields"].get("Raw JSON") or "{}")
+    except json.JSONDecodeError:
+        raw_json = {}
+
+    raw_json["_shared_policy_conflicts"] = conflicts
+    ie_tbl.update(extraction_record_id, {
+        "Raw JSON": json.dumps(raw_json, indent=2),
+        "Review Status": "Pending Review",
+        "Review Reason": "Shared policy number",
+    }, typecast=True)
+    app.logger.info(
+        "Queued extraction %s for shared policy number review: %s",
+        extraction_record_id,
+        [c["norm_number"] for c in conflicts],
+    )
 
 
 # ── Flag computation ─────────────────────────────────────────────────────────
@@ -1135,6 +1249,7 @@ def detail(record_id):
         approve_button_label="Required fields are correct" if required_policy_types else "Data is correct",
         required_policy_types=required_policy_types,
         vendor_policies=vendor_policies,
+        vendor_id=_vendor_id or "",
     )
 
 
@@ -1781,6 +1896,954 @@ def apply_reading_rule(record_id):
         pass
 
     return jsonify({"ok": True, "message": "Tests passed. Rule appended to extractor.py CHECKBOX_RULES."})
+
+
+# ── Accept policy pattern ────────────────────────────────────────────────────
+
+@app.route("/accept-policy-pattern/<extraction_id>", methods=["POST"])
+@login_required
+@csrf_protect
+def accept_policy_pattern(extraction_id):
+    from flask import jsonify
+    norm_number = (request.form.get("norm_number") or "").strip()
+    types_json  = (request.form.get("types_json") or "[]").strip()
+    raw_number  = (request.form.get("raw_number") or "").strip()
+    vendor_id   = (request.form.get("vendor_id") or "").strip()
+    vendor_name = (request.form.get("vendor_name") or "").strip()
+
+    if not norm_number or not vendor_id:
+        abort(400)
+
+    try:
+        types_list = json.loads(types_json)
+    except json.JSONDecodeError:
+        types_list = []
+
+    base_id = clean_base_id(config.AIRTABLE_BASE_ID)
+    api = _api()
+
+    # Create Accepted Policy Patterns record
+    app_tbl = api.table(base_id, ACCEPTED_POLICY_PATTERNS_TABLE_ID)
+    app_tbl.create({
+        "Vendor Name": vendor_name,
+        "Vendor Record ID": vendor_id,
+        "Policy Number Normalized": norm_number,
+        "Coverage Types": json.dumps(types_list),
+        "Policy Numbers Raw": raw_number,
+        "Accepted At": datetime.now(timezone.utc).isoformat(),
+    })
+
+    # Remove this conflict from the extraction's Raw JSON
+    ie_tbl = api.table(base_id, INCOMING_EXTRACTIONS_TABLE)
+    rec = ie_tbl.get(extraction_id)
+    try:
+        raw_json = json.loads(rec["fields"].get("Raw JSON") or "{}")
+    except json.JSONDecodeError:
+        raw_json = {}
+
+    conflicts = raw_json.get("_shared_policy_conflicts") or []
+    conflicts = [c for c in conflicts if c.get("norm_number") != norm_number]
+    raw_json["_shared_policy_conflicts"] = conflicts
+
+    update = {"Raw JSON": json.dumps(raw_json, indent=2)}
+    if not conflicts:
+        update["Review Status"] = "Approved"
+    ie_tbl.update(extraction_id, update, typecast=True)
+
+    return redirect(url_for("detail", record_id=extraction_id))
+
+
+# ── Gaps ─────────────────────────────────────────────────────────────────────
+
+def _parse_date(s):
+    """Parse YYYY-MM-DD string to date, or None."""
+    if not s:
+        return None
+    try:
+        return datetime.strptime(str(s).strip()[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _compute_date_gaps(policies_for_type: list, today: date) -> list:
+    """Given a list of policy dicts (all same type) sorted by effective date,
+    compute coverage gaps. Returns list of {gap_start, gap_end, days}.
+    """
+    # Sort by effective date
+    dated = []
+    for p in policies_for_type:
+        eff = _parse_date(p.get("effective_date"))
+        exp = _parse_date(p.get("expiration_date"))
+        if eff and exp:
+            dated.append((eff, exp, p))
+    dated.sort(key=lambda x: x[0])
+    if not dated:
+        return []
+
+    gaps = []
+    # Check gap between consecutive terms
+    for i in range(len(dated) - 1):
+        _, exp_curr, _ = dated[i]
+        eff_next, _, _ = dated[i + 1]
+        if eff_next > exp_curr + timedelta(days=1):
+            gap_days = (eff_next - exp_curr).days - 1
+            gaps.append({
+                "gap_start": exp_curr.isoformat(),
+                "gap_end": eff_next.isoformat(),
+                "days": gap_days,
+            })
+
+    # Check if latest policy is expired (no renewal)
+    _, latest_exp, _ = dated[-1]
+    if latest_exp < today:
+        gaps.append({
+            "gap_start": latest_exp.isoformat(),
+            "gap_end": None,  # open-ended (no renewal on file)
+            "days": (today - latest_exp).days,
+            "expired": True,
+        })
+
+    return gaps
+
+
+@app.route("/gaps")
+@login_required
+def gaps():
+    from flask import jsonify
+    client_id = request.args.get("client_id", RTR_CLIENT_ID)
+    base_id = clean_base_id(config.AIRTABLE_BASE_ID)
+    api = _api()
+    today = date.today()
+
+    # Load all clients for the dropdown
+    clients_tbl = api.table(base_id, CLIENTS_TABLE_ID)
+    clients_raw = clients_tbl.all(fields=["Name"])
+    clients = [
+        {"id": r["id"], "name": r["fields"].get("Client Name") or r["id"]}
+        for r in clients_raw
+    ]
+    clients.sort(key=lambda c: c["name"])
+
+    # Determine client name
+    client_name = next((c["name"] for c in clients if c["id"] == client_id), client_id)
+
+    # Get active VCA records for this client
+    vca_tbl = api.table(base_id, VCA_TABLE_ID)
+    vca_records = vca_tbl.all(
+        formula=f"AND(FIND('{client_id}', ARRAYJOIN({{Client Link}}, ',')), {{Active}})",
+        fields=["Vendor Link", "Client Link", "Active"],
+    )
+    vendor_ids = []
+    for vca in vca_records:
+        vlinks = vca["fields"].get("Vendor Link") or []
+        for vid in vlinks:
+            if vid not in vendor_ids:
+                vendor_ids.append(vid)
+
+    # Load vendor details
+    vendors_tbl = api.table(base_id, VENDORS_TABLE_ID)
+    pol_tbl = api.table(base_id, INSURANCE_POLICIES_TABLE_ID)
+
+    # Load existing gap requests for this client
+    gap_tbl = api.table(base_id, GAP_REQUESTS_TABLE_ID)
+    gap_records = gap_tbl.all(
+        formula=f"FIND('{client_id}', ARRAYJOIN({{Client}}, ','))",
+        fields=["Vendor", "Coverage Type", "Gap Start", "Gap End", "Status", "Notes"],
+    )
+    existing_requests_by_vendor: dict = defaultdict(list)
+    for gr in gap_records:
+        gf = gr["fields"]
+        vlinks = gf.get("Vendor") or []
+        for vid in vlinks:
+            existing_requests_by_vendor[vid].append({
+                "id": gr["id"],
+                "coverage_type": gf.get("Coverage Type") or "",
+                "gap_start": gf.get("Gap Start") or "",
+                "gap_end": gf.get("Gap End") or "",
+                "status": gf.get("Status") or "",
+            })
+
+    # Build per-vendor gap data
+    vendors_out = []
+    stat_missing = 0
+    stat_date_gaps = 0
+    stat_expiring = 0
+
+    for vendor_id in vendor_ids:
+        # Fetch vendor record
+        try:
+            vrec = vendors_tbl.get(vendor_id)
+            vendor_name = vrec["fields"].get("Vendor Name") or vendor_id
+            contact_email = vrec["fields"].get("Vendor Email") or vrec["fields"].get("fldxteHtQ5ITcx6Zw") or ""
+        except Exception:
+            vendor_name = vendor_id
+            contact_email = ""
+
+        # Fetch all policies for this vendor via vendor record link
+        policy_ids = vrec["fields"].get("Insurance Policies") or []
+        if not policy_ids:
+            pol_records = []
+        else:
+            pol_formula = "OR(" + ", ".join(f"RECORD_ID()='{p}'" for p in policy_ids) + ")"
+            pol_records = pol_tbl.all(
+                formula=pol_formula,
+                fields=["Policy Type", "Policy Number", "Effective Date", "Expiration Date", "Carrier"],
+            )
+
+        # Group by coverage type (GL, WC)
+        policies_by_type: dict = defaultdict(list)
+        for prec in pol_records:
+            pf = prec["fields"]
+            pt = (pf.get("Policy Type") or "").lower()
+            entry = {
+                "policy_number": pf.get("Policy Number") or "",
+                "effective_date": pf.get("Effective Date") or "",
+                "expiration_date": pf.get("Expiration Date") or "",
+                "carrier": pf.get("Carrier") or "",
+            }
+            if any(k in pt for k in _GL_KEYWORDS):
+                policies_by_type["General Liability"].append(entry)
+            elif any(k in pt for k in _WC_KEYWORDS):
+                policies_by_type["Workers' Comp"].append(entry)
+
+        vendor_gaps = []
+        expiring_soon = []
+
+        for _, label in RTR_REQUIRED_POLICY_TYPES:
+            pols = policies_by_type.get(label) or []
+
+            if not pols:
+                vendor_gaps.append({
+                    "type": label,
+                    "kind": "missing",
+                    "gap_start": None,
+                    "gap_end": None,
+                    "days": None,
+                })
+                stat_missing += 1
+            else:
+                # Check for expiring soon (within 30 days)
+                for p in pols:
+                    exp = _parse_date(p.get("expiration_date"))
+                    if exp and today <= exp <= today + timedelta(days=30):
+                        expiring_soon.append({
+                            "type": label,
+                            "expiration_date": p["expiration_date"],
+                            "policy_number": p["policy_number"],
+                        })
+                        stat_expiring += 1
+
+                # Compute date gaps
+                dg = _compute_date_gaps(pols, today)
+                for g in dg:
+                    vendor_gaps.append({
+                        "type": label,
+                        "kind": "expired" if g.get("expired") else "date_gap",
+                        "gap_start": g["gap_start"],
+                        "gap_end": g.get("gap_end"),
+                        "days": g["days"],
+                    })
+                    stat_date_gaps += 1
+
+        if vendor_gaps or expiring_soon:
+            vendors_out.append({
+                "vendor_id": vendor_id,
+                "vendor_name": vendor_name,
+                "contact_email": contact_email,
+                "gaps": vendor_gaps,
+                "expiring_soon": expiring_soon,
+                "policies_by_type": {k: v for k, v in policies_by_type.items()},
+                "existing_requests": existing_requests_by_vendor.get(vendor_id) or [],
+            })
+
+    vendors_out.sort(key=lambda v: v["vendor_name"].lower())
+
+    return render_template(
+        "gaps.html",
+        vendors=vendors_out,
+        client_id=client_id,
+        client_name=client_name,
+        clients=clients,
+        today=today.isoformat(),
+        has_payments=False,
+        stat_total_vendors=len(vendor_ids),
+        stat_missing=stat_missing,
+        stat_date_gaps=stat_date_gaps,
+        stat_expiring=stat_expiring,
+    )
+
+
+@app.route("/gaps/draft-email/<vendor_id>", methods=["POST"])
+@login_required
+@csrf_protect
+def gaps_draft_email(vendor_id):
+    from flask import jsonify
+    client_id     = (request.form.get("client_id") or RTR_CLIENT_ID).strip()
+    coverage_type = (request.form.get("coverage_type") or "").strip()
+    gap_start     = (request.form.get("gap_start") or "").strip()
+    gap_end       = (request.form.get("gap_end") or "").strip()
+
+    # Look up vendor name
+    base_id = clean_base_id(config.AIRTABLE_BASE_ID)
+    api = _api()
+    try:
+        vrec = api.table(base_id, VENDORS_TABLE_ID).get(vendor_id)
+        vendor_name = vrec["fields"].get("Vendor Name") or vendor_id
+    except Exception:
+        vendor_name = vendor_id
+
+    # Format dates for display
+    def _fmt(s):
+        d = _parse_date(s)
+        return d.strftime("%m/%d/%Y") if d else s
+
+    gap_start_disp = _fmt(gap_start) if gap_start else "an earlier date"
+    gap_end_disp   = _fmt(gap_end) if gap_end else "the present"
+
+    email_body = (
+        f"Hello,\n\n"
+        f"We are reaching out on behalf of RTR Construction LLC regarding the "
+        f"{coverage_type} insurance certificate for {vendor_name}.\n\n"
+        f"Our records show that a {coverage_type} certificate is not on file for the period "
+        f"{gap_start_disp} through {gap_end_disp}. Could you please provide an updated "
+        f"certificate of insurance covering this period?\n\n"
+        f"Please send the certificate to coi-intake@carolinacompliancesolutions.com at your earliest convenience.\n\n"
+        f"Thank you,\nCarolina Compliance Solutions"
+    )
+
+    # Create Gap Request record
+    gap_tbl = api.table(base_id, GAP_REQUESTS_TABLE_ID)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    new_rec = gap_tbl.create({
+        "Vendor": [vendor_id],
+        "Client": [client_id],
+        "Coverage Type": coverage_type,
+        "Gap Start": gap_start or None,
+        "Gap End": gap_end or None,
+        "Status": "Email Drafted",
+        "Requested On": date.today().isoformat(),
+        "Draft Email Body": email_body,
+        "Created At": now_iso,
+    })
+
+    return jsonify({
+        "ok": True,
+        "draft": email_body,
+        "request_id": new_rec["id"],
+    })
+
+
+# ── Audit ─────────────────────────────────────────────────────────────────────
+
+_TEST_VENDOR_KEYWORDS = ("piedmont", "apex", "smith")
+
+
+def _is_test_vendor(name: str) -> bool:
+    n = (name or "").lower()
+    return any(k in n for k in _TEST_VENDOR_KEYWORDS)
+
+
+def _audit_coverage_keywords(audit_type: str):
+    if "workers" in audit_type.lower() or "wc" in audit_type.lower() or "comp" in audit_type.lower():
+        return _WC_KEYWORDS
+    return _GL_KEYWORDS
+
+
+def _audit_type_abbrev(audit_type: str) -> str:
+    kws = _audit_coverage_keywords(audit_type)
+    if kws is _WC_KEYWORDS:
+        return "WC"
+    return "GL"
+
+
+def _pol_type_abbrev(pol_type: str) -> str:
+    pt = pol_type.lower()
+    if any(k in pt for k in _WC_KEYWORDS):
+        return "WC"
+    if any(k in pt for k in _GL_KEYWORDS):
+        return "GL"
+    if "auto" in pt:
+        return "Auto"
+    if "umbrella" in pt or "excess" in pt:
+        return "Umb"
+    return re.sub(r"[^A-Za-z0-9]", "", pol_type)[:4].upper() or "POL"
+
+
+def _terms_for_vendor_audit(vendor_id: str, audit_type: str, start_date: date, end_date: date) -> list:
+    """Return policy terms that overlap the audit window for the given coverage type."""
+    kws = _audit_coverage_keywords(audit_type)
+    base_id = clean_base_id(config.AIRTABLE_BASE_ID)
+    api = _api()
+    pol_tbl = api.table(base_id, INSURANCE_POLICIES_TABLE_ID)
+    policy_ids = _get_vendor_policy_ids(vendor_id)
+    if not policy_ids:
+        return []
+    pol_formula = "OR(" + ", ".join(f"RECORD_ID()='{p}'" for p in policy_ids) + ")"
+    records = pol_tbl.all(
+        formula=pol_formula,
+        fields=["Policy Type", "Policy Number", "Carrier", "Effective Date", "Expiration Date",
+                "Last Updated From Extraction"],
+    )
+    terms = []
+    for rec in records:
+        pf = rec["fields"]
+        pt = (pf.get("Policy Type") or "").lower()
+        if not any(k in pt for k in kws):
+            continue
+        eff = _parse_date(pf.get("Effective Date"))
+        exp = _parse_date(pf.get("Expiration Date"))
+        if not eff or not exp:
+            continue
+        # Overlaps: effective <= end_date AND expiration >= start_date
+        if eff <= end_date and exp >= start_date:
+            terms.append({
+                "record_id": rec["id"],
+                "policy_number": pf.get("Policy Number") or "",
+                "carrier": pf.get("Carrier") or "",
+                "effective": eff.isoformat(),
+                "expiration": exp.isoformat(),
+                "extraction_ids": pf.get("Last Updated From Extraction") or [],
+            })
+    terms.sort(key=lambda t: t["effective"])
+    return terms
+
+
+def _compute_vendor_audit_status(terms: list, start_date: date, end_date: date) -> tuple:
+    """Return (status_str, days_not_on_file, gap_days_list).
+    status: 'full' | 'short_gap' | 'gap' | 'none'
+    """
+    if not terms:
+        total_days = (end_date - start_date).days + 1
+        return "none", total_days, []
+
+    # Compute coverage union within [start_date, end_date]
+    covered = set()
+    for t in terms:
+        eff = max(_parse_date(t["effective"]), start_date)
+        exp = min(_parse_date(t["expiration"]), end_date)
+        if eff <= exp:
+            d = eff
+            while d <= exp:
+                covered.add(d)
+                d += timedelta(days=1)
+
+    total_days = (end_date - start_date).days + 1
+    uncovered_days = total_days - len(covered)
+
+    if uncovered_days == 0:
+        return "full", 0, []
+
+    # Find individual gaps
+    gap_runs = []
+    current_gap_start = None
+    d = start_date
+    while d <= end_date:
+        if d not in covered:
+            if current_gap_start is None:
+                current_gap_start = d
+        else:
+            if current_gap_start is not None:
+                gap_runs.append((current_gap_start, d - timedelta(days=1)))
+                current_gap_start = None
+        d += timedelta(days=1)
+    if current_gap_start is not None:
+        gap_runs.append((current_gap_start, end_date))
+
+    max_gap = max((e - s).days + 1 for s, e in gap_runs) if gap_runs else 0
+
+    if max_gap > 30:
+        status = "gap"
+    else:
+        status = "short_gap"
+
+    return status, uncovered_days, gap_runs
+
+
+@app.route("/audit")
+@login_required
+def audit():
+    base_id = clean_base_id(config.AIRTABLE_BASE_ID)
+    api = _api()
+
+    clients_tbl = api.table(base_id, CLIENTS_TABLE_ID)
+    clients_raw = clients_tbl.all(fields=["Name"])
+    clients = [
+        {"id": r["id"], "name": r["fields"].get("Client Name") or r["id"]}
+        for r in clients_raw
+    ]
+    clients.sort(key=lambda c: c["name"])
+
+    # Load recent audits (last 5)
+    audit_tbl = api.table(base_id, AUDITS_TABLE_ID)
+    try:
+        recent_recs = audit_tbl.all(
+            fields=["Audit Name", "Client", "Audit Type", "Start Date", "End Date", "Created At"],
+            sort=["-Created At"],
+            max_records=5,
+        )
+        recent_audits = []
+        for rec in recent_recs:
+            af = rec["fields"]
+            recent_audits.append({
+                "id": rec["id"],
+                "name": af.get("Audit Name") or "",
+                "client_ids": af.get("Client") or [],
+                "audit_type": af.get("Audit Type") or "",
+                "start_date": af.get("Start Date") or "",
+                "end_date": af.get("End Date") or "",
+                "created_at": af.get("Created At") or "",
+            })
+    except Exception:
+        recent_audits = []
+
+    return render_template("audit.html", clients=clients, recent_audits=recent_audits,
+                           rtr_client_id=RTR_CLIENT_ID)
+
+
+@app.route("/audit/preview", methods=["POST"])
+@login_required
+@csrf_protect
+def audit_preview():
+    from flask import jsonify
+    client_id  = (request.form.get("client_id") or RTR_CLIENT_ID).strip()
+    audit_type = (request.form.get("audit_type") or "General Liability").strip()
+    start_str  = (request.form.get("start_date") or "").strip()
+    end_str    = (request.form.get("end_date") or "").strip()
+
+    start_date = _parse_date(start_str)
+    end_date   = _parse_date(end_str)
+    if not start_date or not end_date:
+        return jsonify({"error": "Invalid date range"}), 400
+
+    base_id = clean_base_id(config.AIRTABLE_BASE_ID)
+    api = _api()
+
+    # Get vendor IDs for this client via VCA
+    vca_tbl = api.table(base_id, VCA_TABLE_ID)
+    vca_records = vca_tbl.all(
+        formula=f"AND(FIND('{client_id}', ARRAYJOIN({{Client Link}}, ',')), {{Active}})",
+        fields=["Vendor Link"],
+    )
+    vendor_ids = []
+    for vca in vca_records:
+        for vid in (vca["fields"].get("Vendor Link") or []):
+            if vid not in vendor_ids:
+                vendor_ids.append(vid)
+
+    vendors_tbl = api.table(base_id, VENDORS_TABLE_ID)
+
+    counts = {"full": 0, "short_gap": 0, "gap": 0, "none": 0}
+    vendors_out = []
+
+    for vendor_id in vendor_ids:
+        try:
+            vrec = vendors_tbl.get(vendor_id)
+            vendor_name = vrec["fields"].get("Vendor Name") or vendor_id
+        except Exception:
+            vendor_name = vendor_id
+
+        if _is_test_vendor(vendor_name):
+            continue
+
+        terms = _terms_for_vendor_audit(vendor_id, audit_type, start_date, end_date)
+        status, days_not_on_file, _ = _compute_vendor_audit_status(terms, start_date, end_date)
+
+        counts[status] += 1
+
+        terms_out = []
+        for t in terms:
+            eff = _parse_date(t["effective"])
+            days_before = (eff - start_date).days if eff and eff > start_date else 0
+            terms_out.append({
+                "policy_number": t["policy_number"],
+                "carrier": t["carrier"],
+                "effective": t["effective"],
+                "expiration": t["expiration"],
+                "days_before": max(0, days_before),
+            })
+
+        vendors_out.append({
+            "name": vendor_name,
+            "vendor_id": vendor_id,
+            "status": status,
+            "days_not_on_file": days_not_on_file,
+            "terms": terms_out,
+        })
+
+    vendors_out.sort(key=lambda v: v["name"].lower())
+    return jsonify({"vendors": vendors_out, "counts": counts})
+
+
+@app.route("/audit/build", methods=["POST"])
+@login_required
+@csrf_protect
+def audit_build():
+    client_id      = (request.form.get("client_id") or RTR_CLIENT_ID).strip()
+    audit_type     = (request.form.get("audit_type") or "General Liability").strip()
+    start_str      = (request.form.get("start_date") or "").strip()
+    end_str        = (request.form.get("end_date") or "").strip()
+    carrier_filter = (request.form.get("carrier_filter") or "").strip()
+
+    start_date = _parse_date(start_str)
+    end_date   = _parse_date(end_str)
+    if not start_date or not end_date:
+        abort(400)
+
+    base_id = clean_base_id(config.AIRTABLE_BASE_ID)
+    api = _api()
+
+    # Get client name
+    try:
+        crec = api.table(base_id, CLIENTS_TABLE_ID).get(client_id)
+        client_name = crec["fields"].get("Client Name") or client_id
+    except Exception:
+        client_name = client_id
+
+    # Get vendors
+    vca_tbl = api.table(base_id, VCA_TABLE_ID)
+    vca_records = vca_tbl.all(
+        formula=f"AND(FIND('{client_id}', ARRAYJOIN({{Client Link}}, ',')), {{Active}})",
+        fields=["Vendor Link"],
+    )
+    vendor_ids = []
+    for vca in vca_records:
+        for vid in (vca["fields"].get("Vendor Link") or []):
+            if vid not in vendor_ids:
+                vendor_ids.append(vid)
+
+    vendors_tbl = api.table(base_id, VENDORS_TABLE_ID)
+    ie_tbl = api.table(base_id, INCOMING_EXTRACTIONS_TABLE)
+
+    # Save audit record
+    audit_name = f"{client_name} — {audit_type} — {start_str} to {end_str}"
+    if carrier_filter:
+        audit_name += f" ({carrier_filter})"
+    try:
+        api.table(base_id, AUDITS_TABLE_ID).create({
+            "Audit Name": audit_name,
+            "Client": [client_id],
+            "Audit Type": audit_type,
+            "Start Date": start_str,
+            "End Date": end_str,
+            "Carrier Filter": carrier_filter or None,
+            "Created At": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception as exc:
+        app.logger.warning("Failed to save audit record: %s", exc)
+
+    # Build vendor data
+    audit_vendors = []
+    counts = {"full": 0, "short_gap": 0, "gap": 0, "none": 0}
+
+    for vendor_id in vendor_ids:
+        try:
+            vrec = vendors_tbl.get(vendor_id)
+            vendor_name = vrec["fields"].get("Vendor Name") or vendor_id
+        except Exception:
+            vendor_name = vendor_id
+
+        if _is_test_vendor(vendor_name):
+            continue
+
+        terms = _terms_for_vendor_audit(vendor_id, audit_type, start_date, end_date)
+        status, days_not_on_file, _ = _compute_vendor_audit_status(terms, start_date, end_date)
+        counts[status] += 1
+
+        # Gather PDF attachment URLs for each term via extraction links
+        term_pdfs = []  # list of {term_idx, url, filename}
+        seen_urls = set()
+        for t in terms:
+            pol_type_abbrev = _audit_type_abbrev(audit_type)
+            for ext_id in (t.get("extraction_ids") or []):
+                try:
+                    ext_rec = ie_tbl.get(ext_id)
+                    attachments = ext_rec["fields"].get("Source Page") or []
+                    if not isinstance(attachments, list):
+                        attachments = []
+                    for att in attachments:
+                        url = att.get("url") or ""
+                        if url and url not in seen_urls:
+                            seen_urls.add(url)
+                            term_pdfs.append({
+                                "url": url,
+                                "carrier": t["carrier"],
+                                "policy_number": t["policy_number"],
+                                "effective": t["effective"],
+                                "expiration": t["expiration"],
+                                "type_abbrev": pol_type_abbrev,
+                            })
+                except Exception:
+                    pass
+
+        audit_vendors.append({
+            "vendor_id": vendor_id,
+            "vendor_name": vendor_name,
+            "status": status,
+            "days_not_on_file": days_not_on_file,
+            "terms": terms,
+            "pdfs": term_pdfs,
+        })
+
+    audit_vendors.sort(key=lambda v: v["vendor_name"].lower())
+
+    # Build ZIP
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment
+        HAS_OPENPYXL = True
+    except ImportError:
+        HAS_OPENPYXL = False
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        if HAS_OPENPYXL:
+            wb = openpyxl.Workbook()
+
+            # ── Summary sheet ──
+            ws_sum = wb.active
+            ws_sum.title = "Summary"
+            ws_sum.append(["Audit Pack"])
+            ws_sum.append(["Client", client_name])
+            ws_sum.append(["Audit Type", audit_type])
+            ws_sum.append(["Period", f"{start_str} to {end_str}"])
+            ws_sum.append(["Generated", datetime.now().strftime("%Y-%m-%d %H:%M")])
+            ws_sum.append([])
+            ws_sum.append(["Status", "Count"])
+            for k, v in counts.items():
+                ws_sum.append([k.replace("_", " ").title(), v])
+
+            # ── Grid sheet ──
+            ws_grid = wb.create_sheet("Grid")
+            ws_grid.append(["Sub Name", "Status", "Days Not On File"])
+            for v in audit_vendors:
+                ws_grid.append([v["vendor_name"], v["status"], v["days_not_on_file"]])
+
+            # ── Terms sheet ──
+            ws_terms = wb.create_sheet("Terms")
+            ws_terms.append(["Sub Name", "Coverage Type", "Policy Number", "Carrier",
+                              "Effective", "Expiration", "Days Before Term"])
+            for v in audit_vendors:
+                for t in v["terms"]:
+                    eff = _parse_date(t["effective"])
+                    days_before = max(0, (eff - start_date).days) if eff and eff > start_date else 0
+                    ws_terms.append([
+                        v["vendor_name"], audit_type,
+                        t["policy_number"], t["carrier"],
+                        t["effective"], t["expiration"], days_before,
+                    ])
+
+            # ── Flags sheet ──
+            ws_flags = wb.create_sheet("Flags")
+            ws_flags.append(["Sub Name", "Issue"])
+            for v in audit_vendors:
+                if v["status"] in ("gap", "none"):
+                    issue = (
+                        f"No policies on file in audit window"
+                        if v["status"] == "none"
+                        else f"{v['days_not_on_file']} day(s) not on file"
+                    )
+                    ws_flags.append([v["vendor_name"], issue])
+
+            idx_buf = io.BytesIO()
+            wb.save(idx_buf)
+            zf.writestr("00 Index.xlsx", idx_buf.getvalue())
+
+        # ── Per-vendor folders ──
+        for v in audit_vendors:
+            folder = v["vendor_name"]
+            if not v["terms"]:
+                zf.writestr(f"{folder}/Not on file.txt",
+                            f"{v['vendor_name']} — no {audit_type} policies on file for this period.\n")
+                continue
+
+            for seq, pdf_info in enumerate(v["pdfs"], start=1):
+                raw_name = (
+                    f"{seq:02d} - {v['vendor_name']} - {pdf_info['type_abbrev']} - "
+                    f"{pdf_info['carrier']} - {pdf_info['policy_number']} - "
+                    f"{pdf_info['effective']} to {pdf_info['expiration']}.pdf"
+                )
+                # Sanitize filename
+                safe_name = re.sub(r'[\\/:*?"<>|]', "_", raw_name)
+                url = pdf_info["url"]
+                try:
+                    req = urllib.request.Request(url, headers={"User-Agent": "CCS-Audit/1.0"})
+                    with urllib.request.urlopen(req, timeout=30) as resp:
+                        pdf_data = resp.read()
+                    zf.writestr(f"{folder}/{safe_name}", pdf_data)
+                except Exception as exc:
+                    app.logger.warning("Could not download %s: %s", url, exc)
+                    zf.writestr(f"{folder}/{safe_name}.error.txt",
+                                f"Could not download: {url}\nError: {exc}\n")
+
+    zip_buf.seek(0)
+    safe_client = re.sub(r'[\\/:*?"<>|]', "_", client_name)
+    safe_type   = re.sub(r'[\\/:*?"<>|]', "_", audit_type)
+    filename = f"{safe_client} - {safe_type} - {start_str} to {end_str}.zip"
+
+    from flask import send_file
+    return send_file(
+        zip_buf,
+        as_attachment=True,
+        download_name=filename,
+        mimetype="application/zip",
+    )
+
+
+# ── Payments ──────────────────────────────────────────────────────────────────
+
+@app.route("/payments/import", methods=["GET", "POST"])
+@login_required
+def payments_import():
+    from flask import jsonify
+    base_id = clean_base_id(config.AIRTABLE_BASE_ID)
+    api = _api()
+
+    clients_tbl = api.table(base_id, CLIENTS_TABLE_ID)
+    clients_raw = clients_tbl.all(fields=["Name"])
+    clients = [
+        {"id": r["id"], "name": r["fields"].get("Client Name") or r["id"]}
+        for r in clients_raw
+    ]
+    clients.sort(key=lambda c: c["name"])
+
+    # Count recent sub payments
+    try:
+        pay_recs = api.table(base_id, SUB_PAYMENTS_TABLE_ID).all(max_records=1000)
+        recent_count = len(pay_recs)
+    except Exception:
+        recent_count = 0
+
+    if request.method == "GET":
+        return render_template("payments_import.html", clients=clients, recent_count=recent_count)
+
+    # POST: handle file upload
+    if request.method == "POST":
+        if "csv_file" not in request.files:
+            return render_template("payments_import.html", clients=clients,
+                                   recent_count=recent_count, error="No file uploaded.")
+
+        client_id = (request.form.get("client_id") or RTR_CLIENT_ID).strip()
+        csv_file = request.files["csv_file"]
+        if not csv_file.filename:
+            return render_template("payments_import.html", clients=clients,
+                                   recent_count=recent_count, error="No file selected.")
+
+        # Load vendor names for fuzzy matching
+        vendors_tbl = api.table(base_id, VENDORS_TABLE_ID)
+        vendor_recs = vendors_tbl.all(fields=["Name"])
+        vendor_list = [
+            {"id": r["id"], "name": r["fields"].get("Name") or "",
+             "norm": _norm_ni(r["fields"].get("Name") or "")}
+            for r in vendor_recs
+        ]
+
+        # Parse CSV
+        try:
+            content = csv_file.read().decode("utf-8-sig", errors="replace")
+            reader = csv.DictReader(io.StringIO(content))
+            rows_raw = list(reader)
+        except Exception as exc:
+            return render_template("payments_import.html", clients=clients,
+                                   recent_count=recent_count, error=f"Could not parse CSV: {exc}")
+
+        # Detect column names (flexible)
+        if not rows_raw:
+            return render_template("payments_import.html", clients=clients,
+                                   recent_count=recent_count, error="CSV appears to be empty.")
+
+        sample = rows_raw[0]
+        headers_lower = {k.lower().strip(): k for k in sample.keys()}
+
+        def _find_col(*candidates):
+            for c in candidates:
+                if c in headers_lower:
+                    return headers_lower[c]
+            return None
+
+        date_col   = _find_col("date", "txn date", "transaction date")
+        payee_col  = _find_col("payee", "name", "vendor", "payee name")
+        amount_col = _find_col("amount", "debit", "credit", "total")
+
+        results = []
+        unmatched = []
+        batch = []
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        for row in rows_raw:
+            payee  = (row.get(payee_col) or "").strip() if payee_col else ""
+            amount = (row.get(amount_col) or "").strip() if amount_col else ""
+            txn_date = (row.get(date_col) or "").strip() if date_col else ""
+
+            if not payee and not amount:
+                continue
+
+            norm_payee = _norm_ni(payee)
+            # Fuzzy match: find vendor with highest token overlap
+            best_vendor = None
+            best_score = 0
+            payee_tokens = set(norm_payee.split())
+            for v in vendor_list:
+                if not v["norm"]:
+                    continue
+                v_tokens = set(v["norm"].split())
+                if not v_tokens:
+                    continue
+                overlap = len(payee_tokens & v_tokens)
+                score = overlap / max(len(payee_tokens | v_tokens), 1)
+                if score > best_score and overlap >= 1:
+                    best_score = score
+                    best_vendor = v
+
+            matched = best_vendor and best_score >= 0.3
+
+            result_row = {
+                "payee": payee,
+                "matched_vendor": best_vendor["name"] if matched else "",
+                "matched_vendor_id": best_vendor["id"] if matched else "",
+                "date": txn_date,
+                "amount": amount,
+                "status": "Matched" if matched else "Unmatched",
+            }
+            results.append(result_row)
+            if not matched:
+                unmatched.append(payee)
+
+            # Build Airtable record
+            pay_rec = {
+                "Client": client_id,
+                "Vendor Name QB": payee,
+                "Payment Date": txn_date or None,
+                "Amount": float(re.sub(r"[^0-9.\-]", "", amount)) if amount else None,
+                "Source File": csv_file.filename,
+                "Match Status": "Matched" if matched else "Unmatched",
+                "Imported At": now_iso,
+            }
+            if matched:
+                pay_rec["Vendor"] = best_vendor["id"]
+            batch.append(pay_rec)
+
+            # Flush batch in groups of 10
+            if len(batch) >= 10:
+                try:
+                    api.table(base_id, SUB_PAYMENTS_TABLE_ID).batch_create(batch)
+                except Exception as exc:
+                    app.logger.warning("Failed to create sub-payment batch: %s", exc)
+                batch = []
+
+        if batch:
+            try:
+                api.table(base_id, SUB_PAYMENTS_TABLE_ID).batch_create(batch)
+            except Exception as exc:
+                app.logger.warning("Failed to create final sub-payment batch: %s", exc)
+
+        return render_template(
+            "payments_import.html",
+            clients=clients,
+            recent_count=recent_count,
+            results=results,
+            unmatched=sorted(set(unmatched)),
+            matched_count=sum(1 for r in results if r["status"] == "Matched"),
+        )
 
 
 if __name__ == "__main__":
