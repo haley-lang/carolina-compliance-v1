@@ -109,7 +109,11 @@ Rules:
 - If a field cannot be found, return null (for scalar fields) or [] (for arrays).
 - Do not infer, guess, or fabricate policy numbers, dates, or coverage limits.
 - If the document type is ambiguous or unrecognizable, set document_type to "unknown".
-- For contact_emails, include any email addresses visible anywhere in the document.
+- For contact_emails, include email addresses from the PRODUCER/AGENT section of the
+  ACORD form (upper-left, where the broker or agent is listed) and from the
+  description of operations. Do NOT include email addresses that appear only in the
+  CERTIFICATE HOLDER section — those belong to the requesting party, not the insured
+  or their agent, and must not be used as vendor contact information.
 - For ACORD forms, extract certificate_holder from the "CERTIFICATE HOLDER" section (bottom-left of the form).
 - certificate_holder is usually the company/entity receiving the certificate.
 - Do NOT confuse certificate_holder with named_insured.
@@ -199,6 +203,14 @@ Rules:
   - Do NOT look at the SUBR WVD column to determine this — that is a separate source.
     The column and the description text are two independent captures; never merge them.
 - DESCRIPTION OF OPERATIONS: Extract the full text from the "DESCRIPTION OF OPERATIONS / LOCATIONS / VEHICLES" section at the bottom of the ACORD form. Return as description_of_operations at the top level. Return null if blank or not present.
+- NOTICES AND WARNINGS: Look for any non-standard advisory, disclaimer, or warning
+  text printed on the certificate that is NOT the standard ACORD boilerplate
+  ("THIS CERTIFICATE IS ISSUED AS A MATTER OF INFORMATION ONLY..."). This includes:
+  "NOT LICENSED by the [State] Department of Insurance",
+  "SURPLUS LINES INSURANCE — Not protected by the [State] Guaranty Fund",
+  "NON-ADMITTED", "NONADMITTED", "not authorized to do business in [State]",
+  or any other warning indicating licensing issues or non-admitted carrier status.
+  Return the verbatim notice text as notices (string), or null if none are present.
 - CONFIDENCE: After extracting all fields, return an overall confidence score
   as a single top-level "confidence" field, a float between 0.0 and 1.0 with
   two decimals. Reflect your own certainty that the extracted values are
@@ -208,6 +220,10 @@ Rules:
   should be human-reviewed before downstream use. Do NOT inflate;
   conservative scoring is preferred. If the document was unreadable or no
   ACORD form was present, return 0.0.
+  When confidence is below 0.95, also return confidence_notes: a 1-2 sentence
+  plain-English explanation of what drove the score down (e.g. "Policy number in
+  row 3 was partially obscured. WC effective date was ambiguous."). Return null
+  for confidence_notes when confidence is 0.95 or above.
 
 Return this exact JSON structure:
 {
@@ -217,7 +233,9 @@ Return this exact JSON structure:
   "certificate_date": "<string or null>",
   "contact_emails": ["<email>"],
   "description_of_operations": "<string or null>",
+  "notices": "<string or null>",
   "confidence": <float between 0.0 and 1.0>,
+  "confidence_notes": "<string or null>",
   "additional_insured_statement": {"present": false, "quote": null, "policies_named": null},
   "waiver_of_subrogation_statement": {"present": false, "quote": null, "policies_named": null},
   "policies": [

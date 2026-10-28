@@ -186,6 +186,7 @@
         </td>
         <td>{{ row.policies_count }}</td>
         <td class="cell-flags">
+          {% if row.flags.surplus_lines %}<span class="flag flag-alert">⚠ Not licensed / surplus-lines</span>{% endif %}
           {% if row.flags.ai_disagreed %}<span class="flag flag-warn">The two AI reads disagree</span>{% endif %}
           {% if row.flags.missing_fields %}<span class="flag flag-alert">Missing a policy number</span>{% endif %}
           {% if row.flags.low_confidence %}<span class="flag flag-muted">Low confidence</span>{% endif %}

@@ -469,8 +469,8 @@ img { max-width: 100%; }
   -webkit-user-select: none;
   touch-action: none;
   background: var(--offwhite);
-  max-height: 700px;
-  min-height: 200px;
+  max-height: calc(100vh - 180px);
+  min-height: 300px;
 }
 .zoom-outer.grabbing { cursor: grabbing; }
 .zoom-canvas {
@@ -1343,3 +1343,20 @@ select.policy-input {
 .on-file-active { }
 .on-file-expiring td { color: #b45309; }
 .on-file-expiring .on-file-type { color: #b45309; }
+
+/* ── Confidence notes badge ──────────────────────────────────────── */
+.conf-notes-badge {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--offwhite);
+  border: 1px solid var(--border);
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--secondary);
+  cursor: help;
+  vertical-align: middle;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}

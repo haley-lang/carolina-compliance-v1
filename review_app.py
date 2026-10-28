@@ -519,6 +519,15 @@ def compute_flags(airtable_fields: dict, raw_data: dict, required_policy_types=N
     ni = raw_data.get("named_insured") or ""
     flags["multi_company"] = bool(_MULTI_COMPANY_RE.search(ni))
 
+    # 7. Non-admitted / surplus-lines carrier notice
+    _notices = (raw_data.get("notices") or "").lower()
+    flags["surplus_lines"] = bool(_notices and any(
+        kw in _notices for kw in (
+            "surplus", "not licensed", "non-admitted", "nonadmitted",
+            "non admitted", "not authorized", "unlicensed", "guaranty fund",
+        )
+    ))
+
     # changed_vs_prior is an informational note, not an action trigger
     flags["needs_look"] = any(
         v for k, v in flags.items()
@@ -818,6 +827,23 @@ def compute_issues(raw_data: dict, second_data, flags: dict, duplicate_match: st
             "description": (
                 f"Policy {duplicate_match} appears in another pending cert "
                 "for the same vendor. Use Reject if this is superseded."
+            ),
+            "control": "none",
+            "field": None,
+        })
+
+    # 6. Surplus-lines / not-licensed carrier notice
+    if flags.get("surplus_lines"):
+        _notice_text = (raw_data.get("notices") or "").strip()
+        issues.append({
+            "id": "surplus_lines_notice",
+            "type": "surplus_lines",
+            "title": "Non-admitted / surplus-lines carrier",
+            "description": (
+                (_notice_text + " — " if _notice_text else "")
+                + "This certificate contains a notice that a carrier may not be licensed "
+                "in this state or is writing on a surplus-lines basis. Verify the carrier "
+                "is acceptable before approving."
             ),
             "control": "none",
             "field": None,
@@ -1546,20 +1572,46 @@ def _classify_note(why_note: str) -> str:
     """Classify a reviewer note using Claude Haiku. Returns one of the Note Type select values."""
     if not why_note or len(why_note.strip()) < 8:
         return "One-off"
+
+    _BEHAVIOR_KEYWORDS = (
+        "should", "always", "never", "need to", "needs to", "must", "every time",
+        "every cert", "all certs", "in general", "going forward", "add ", "show ",
+        "display ", "flag ", "surface ", "track ", "save ", "store ", "record ",
+        "feature", "important to notice", "red flag", "why is", "how do we",
+        "change the", "update the", "fix the", "system should", "we should",
+        "make sure", "want to see", "want to know", "i want", "we want",
+        "need this", "would be helpful", "it would help",
+    )
+    _note_lower = why_note.strip().lower()
+    _keyword_vote = any(kw in _note_lower for kw in _BEHAVIOR_KEYWORDS)
+
     try:
         import anthropic as _anthropic
         client = _anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
         resp = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=12,
+            max_tokens=16,
             messages=[{
                 "role": "user",
                 "content": (
-                    "Classify this note a human reviewer left while approving an insurance certificate.\n"
-                    "Reply with ONLY one of these three labels — nothing else:\n"
-                    "  Reading Correction — the AI misread or mis-extracted something from the certificate image\n"
-                    "  Behavior Rule      — the system should change how it processes or displays something in general\n"
-                    "  One-off            — context specific to this certificate only, does not generalize\n\n"
+                    "Classify this reviewer note. Reply with ONLY one label — nothing else.\n\n"
+                    "Labels:\n"
+                    "  Reading Correction — the AI misread or mis-extracted a specific value from this certificate "
+                    "(wrong date, wrong number, wrong name). The fix is correcting the AI's reading of this document.\n"
+                    "  Behavior Rule — the reviewer describes something the SYSTEM should always do differently: "
+                    "show more info, flag something, track a field, change how data is displayed or processed. "
+                    "Even if phrased as a question ('why doesn't it show X?'), if it implies the system should "
+                    "behave differently in general, it is a Behavior Rule.\n"
+                    "  One-off — purely specific to this one certificate with no broader implication "
+                    "(e.g. 'this vendor called me', 'approved verbally', 'exception granted this time').\n\n"
+                    "When in doubt between Behavior Rule and One-off, prefer Behavior Rule.\n\n"
+                    "Examples:\n"
+                    "  'The AI read the expiration as 2024 but it should be 2025' → Reading Correction\n"
+                    "  'We should always show confidence scores so I know why it flagged something' → Behavior Rule\n"
+                    "  'The image is cut off, we need to be able to scroll to see the cert holder box' → Behavior Rule\n"
+                    "  'Contact emails showing are not on the cert, should not be used for vendor requests' → Behavior Rule\n"
+                    "  'Warning text like not licensed should be a red flag on the review screen' → Behavior Rule\n"
+                    "  'Billy called and said this vendor is approved for this job only' → One-off\n\n"
                     f"Note: {why_note.strip()}"
                 ),
             }],
@@ -1569,10 +1621,13 @@ def _classify_note(why_note: str) -> str:
             return "Reading Correction"
         if "Behavior" in result:
             return "Behavior Rule"
+        # Model said One-off — override if keyword vote says Behavior Rule
+        if _keyword_vote:
+            return "Behavior Rule"
         return "One-off"
     except Exception as exc:
-        app.logger.debug("Note classifier failed (%s) — defaulting to One-off", exc)
-        return "One-off"
+        app.logger.debug("Note classifier failed (%s) — keyword fallback", exc)
+        return "Behavior Rule" if _keyword_vote else "One-off"
 
 
 def _write_note_record(source_filename, record_id, why_note, corrected_at, corrections=None):

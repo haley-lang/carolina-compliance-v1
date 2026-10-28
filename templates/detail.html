@@ -68,6 +68,7 @@
   {% if flags.values() | list | select | list %}
   <div class="mb-16 d-flex gap-8 flex-wrap align-center">
     <span class="small text-secondary fw-600">Flags:</span>
+    {% if flags.surplus_lines %}<span class="flag flag-alert">⚠ Not licensed / surplus-lines</span>{% endif %}
     {% if flags.ai_disagreed %}<span class="flag flag-warn">The two AI reads disagree</span>{% endif %}
     {% if flags.missing_fields %}<span class="flag flag-alert">Missing a policy number</span>{% endif %}
     {% if flags.low_confidence %}<span class="flag flag-muted">Low confidence</span>{% endif %}
@@ -112,6 +113,10 @@
                 <strong class="{% if f['Confidence Score'] < 0.85 %}conf-low{% elif f['Confidence Score'] < 0.95 %}conf-warn{% else %}conf-high{% endif %}">
                   {{ "%.0f"|format(f['Confidence Score'] * 100) }}%
                 </strong>
+                {% set _cn = raw_data.get('confidence_notes') %}
+                {% if _cn %}
+                  <span class="conf-notes-badge" title="{{ _cn }}">why?</span>
+                {% endif %}
               {% endif %}
             </span>
             {% if source_page_full_url %}
@@ -800,7 +805,7 @@
   if (!outer || !canvas) return;
 
   var scale = 1, posX = 0, posY = 0;
-  var MIN = 1, MAX = 4;
+  var FIT_SCALE = 1, MIN = 0.25, MAX = 4;
 
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
@@ -842,9 +847,9 @@
 
   outer.addEventListener('dblclick', function (e) {
     var rect = outer.getBoundingClientRect();
-    var target = scale > 1.2 ? 1 : 2.5;
+    var target = scale > FIT_SCALE * 1.2 ? FIT_SCALE : 2.5;
     zoomTo(target, e.clientX - rect.left, e.clientY - rect.top);
-    if (target === 1) { posX = 0; posY = 0; applyTransform(); syncButtons(); }
+    if (target === FIT_SCALE) { posX = 0; posY = 0; applyTransform(); syncButtons(); }
   });
 
   document.getElementById('zoom-in').addEventListener('click', function () {
@@ -854,7 +859,7 @@
     zoomTo(clamp(scale / 1.3, MIN, MAX), outer.clientWidth / 2, outer.clientHeight / 2);
   });
   document.getElementById('zoom-reset').addEventListener('click', function () {
-    scale = 1; posX = 0; posY = 0; applyTransform(); syncButtons();
+    scale = FIT_SCALE; posX = 0; posY = 0; applyTransform(); syncButtons();
   });
 
   var fsBtn = document.getElementById('zoom-fs');
@@ -887,7 +892,26 @@
   outer.addEventListener('pointerup', endDrag);
   outer.addEventListener('pointercancel', endDrag);
 
-  syncButtons();
+  // Fit to panel height on load so the full cert (including cert holder) is visible
+  var _fitImg = canvas.querySelector('img');
+  function initFitScale() {
+    var ch = canvas.offsetHeight;
+    var oh = outer.clientHeight;
+    if (ch > 0 && oh > 0 && ch > oh) {
+      FIT_SCALE = oh / ch;
+      MIN = FIT_SCALE;
+      scale = FIT_SCALE;
+      posX = 0; posY = 0;
+      applyTransform();
+    }
+    syncButtons();
+  }
+  if (_fitImg) {
+    _fitImg.addEventListener('load', initFitScale);
+    if (_fitImg.complete && _fitImg.naturalHeight) initFitScale();
+  } else {
+    syncButtons();
+  }
 }());
 
 /* ── Keyboard shortcuts ── */
