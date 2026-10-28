@@ -33,7 +33,7 @@ TABLE_INSURANCE_POLICIES = "Insurance Policies"
 
 # Compliance status values
 STATUS_COMPLIANT = "Matches Requirements"
-STATUS_MISSING_COVERAGE = "Missing Coverage"
+STATUS_MISSING_COVERAGE = "Not on file"
 STATUS_EXPIRED = "Expired"
 STATUS_NEEDS_REVIEW = "Needs Review"
 
@@ -213,7 +213,7 @@ def _translate_policy_status_for_display(raw_status: str) -> str:
     """Convert internal Policy/Expiration values to customer-facing TOS vocabulary.
 
     Per TOS Section 2A, customer-facing status fields show one of:
-    Current, Expiring Soon, Expired, Missing Coverage, Needs Review.
+    Current, Expiring Soon, Expired, Not on file, Needs Review.
 
     Inputs come from two sources on the policy record:
       - Policy.Expiration Status (module_8's per-policy state machine):
@@ -233,7 +233,7 @@ def _translate_policy_status_for_display(raw_status: str) -> str:
     if not raw_status or raw_status == "Unknown":
         return "Needs Review"
     if raw_status == "Missing":
-        return "Missing Coverage"
+        return "Not on file"
     if raw_status in ("Active", "Pending Active", "Current"):
         return "Current"
     if raw_status == "Expired":
@@ -299,7 +299,7 @@ def update_vendor_policy_detail(vendors_table, vendor_id, vendor_name, vendor_po
     for type_name, (status_fld, exp_fld) in _POLICY_TYPE_VENDOR_FIELDS.items():
         policies_of_type = by_type.get(type_name, [])
         if not policies_of_type:
-            fields[status_fld] = "Missing Coverage"
+            fields[status_fld] = "Not on file"
             fields[exp_fld] = None
             continue
         policies_of_type.sort(
@@ -784,7 +784,7 @@ COMPLIANCE_LOG_TABLE_ID = "tblxdt7DT6V3JCQcW"
 INSURANCE_CERTS_TABLE_ID = "tbl0IH6zQQsXBff3l"
 VENDORS_TABLE_ID_FOR_LADDER = "tblsOphSd5DKSZEro"
 
-NONCOMPLIANT_DECISIONS = {"Has Open Items", "Needs Review", "Missing Coverage"}
+NONCOMPLIANT_DECISIONS = {"Has Open Items", "Needs Review", "Not on file"}
 
 
 def _find_most_recent_cert_id_for_vendor(certs_table, vendor_id: str, client_id: str):

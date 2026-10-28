@@ -907,20 +907,31 @@ def get_existing_policy_by_number(policies_table, policy_number: str) -> Optiona
     return policies_table.first(formula=formula)
 
 
-def get_existing_policy_for_term(policies_table, policy_number: str, effective_raw: str) -> Optional[dict]:
+def get_existing_policy_for_term(
+    policies_table,
+    policy_number: str,
+    effective_raw: str,
+    policy_type: str = "",
+) -> Optional[dict]:
     """Return the existing policy record for this exact policy TERM, or None.
 
-    A term is identified by policy number plus effective date, so a renewal that
-    keeps the same policy number is a new term and never overwrites the earlier
-    one (audits need a certificate for every term).
+    A term is identified by (policy number, policy type, effective date).
+    Including policy type means the same policy number legitimately appearing
+    on multiple coverage lines of one certificate (e.g. a Commercial Package
+    that covers GL, Auto, and WC under one number) produces separate records
+    rather than collapsing to a single record and duplicating IDs in touched_ids.
 
-    - Incoming effective date missing/unparseable: fall back to number-only
-      matching (previous behavior).
-    - Record on file has no effective date: treated as the same term, because
-      its term cannot be told apart.
+    - policy_type blank: falls back to number-only matching (legacy behaviour).
+    - Incoming effective date missing/unparseable: falls back to number+type
+      matching only.
+    - Record on file has no effective date: treated as the same term.
     """
     safe_num = policy_number.replace("'", "\\'")
-    formula = f"{{Policy Number}} = '{safe_num}'"
+    if policy_type:
+        safe_type = policy_type.replace("'", "\\'")
+        formula = f"AND({{Policy Number}} = '{safe_num}', {{Policy Type}} = '{safe_type}')"
+    else:
+        formula = f"{{Policy Number}} = '{safe_num}'"
     new_effective = _parse_date_safe(effective_raw)
     if new_effective is None:
         return policies_table.first(formula=formula)
@@ -1433,7 +1444,9 @@ def process_policies(
         effective_raw = (policy.get("effective_date") or "").strip()
         existing_policy = None
         if policy_number:
-            existing_policy = get_existing_policy_for_term(policies_table, policy_number, effective_raw)
+            existing_policy = get_existing_policy_for_term(
+                policies_table, policy_number, effective_raw, policy_type
+            )
         if existing_policy:
             refreshed_fields = {
                 "Status": computed_status,
@@ -1653,7 +1666,10 @@ def process_policies(
         except Exception as exc:
             logger.warning("Failed to stamp extraction as Duplicate: %s", exc)
 
-    return touched_ids
+    # Deduplicate: the same existing policy can be found by multiple coverage
+    # lines (e.g. number-only fallback). Airtable rejects a linked-record list
+    # with repeated IDs, so strip them here while preserving first-seen order.
+    return list(dict.fromkeys(touched_ids))
 
 
 def upload_pdf_attachment(pdf_path: Path, record_id: str, certs_table) -> bool:

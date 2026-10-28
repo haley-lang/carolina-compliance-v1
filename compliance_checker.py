@@ -27,7 +27,7 @@ TABLE_VENDORS = "Vendors"
 TABLE_POLICIES = "Insurance Policies"
 EXPIRY_WARNING_DAYS = 30
 
-STATUS_MISSING = "Missing Coverage"
+STATUS_MISSING = "Not on file"
 STATUS_EXPIRED = "Expired"
 STATUS_EXPIRING_SOON = "Expiring Soon"
 STATUS_COMPLIANT = "Matches Requirements"

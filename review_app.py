@@ -46,8 +46,9 @@ from review_gate import (
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-CORRECTIONS_TABLE_ID = "tblh6NTQikjzl8FFu"
-EXTRACTIONS_TABLE_ID = "tblT88Ty6d6M766oY"  # Incoming Extractions — for Airtable deep-links
+CORRECTIONS_TABLE_ID   = "tblh6NTQikjzl8FFu"
+TRAINING_LOG_TABLE_ID  = "tblBW6HkbSVYkN2PN"  # Extraction Training Log (test set)
+EXTRACTIONS_TABLE_ID   = "tblT88Ty6d6M766oY"  # Incoming Extractions — for Airtable deep-links
 
 _BILLY_RTR_PREFIXES = ("COI_forms_", "RTR_COI_", "N9WC", "coi.json")
 
@@ -77,6 +78,23 @@ RTR_REQUIRED_POLICY_TYPES = [
     (_GL_KEYWORDS, "General Liability"),
     (_WC_KEYWORDS, "Workers' Comp"),
 ]
+
+# AI disagreement field keywords that are annotation facts, not substantive required-field values.
+# A disagreement line containing ONLY these words is not a "needs decision" trigger.
+_ANNOTATION_DISAGREE_KEYWORDS = (
+    "wos", "waiver_of_subrogation", "additional_insured", "pnc",
+    "primary_noncontributory", "statement",
+)
+
+
+def _required_field_ai_disagreed(ai_raw: str) -> bool:
+    """True if any AI disagreement line involves a substantive field (not AI/WoS/PNC)."""
+    lines = [ln.strip() for ln in str(ai_raw or "").split("\n") if ln.strip()]
+    for line in lines:
+        ll = line.lower()
+        if not any(k in ll for k in _ANNOTATION_DISAGREE_KEYWORDS):
+            return True
+    return False
 
 def _find_key_policy(policies: list, keywords: tuple) -> tuple:
     """Return (index, policy_dict) for the first policy whose type matches any keyword."""
@@ -193,6 +211,20 @@ def _norm_tristate(v) -> str:
     return "not_checked"
 
 app.jinja_env.globals["norm_tristate"] = _norm_tristate
+
+
+def _fmt_date(val):
+    """Convert YYYY-MM-DD to MM/DD/YYYY for display. Passes anything else through unchanged."""
+    if not val:
+        return val
+    s = str(val).strip()
+    try:
+        from datetime import datetime as _dt
+        return _dt.strptime(s, "%Y-%m-%d").strftime("%m/%d/%Y")
+    except ValueError:
+        return s
+
+app.jinja_env.filters["fmt_date"] = _fmt_date
 
 
 def csrf_protect(f):
@@ -322,6 +354,10 @@ def _corrections_table():
     return _api().table(clean_base_id(config.AIRTABLE_BASE_ID), CORRECTIONS_TABLE_ID)
 
 
+def _training_log_table():
+    return _api().table(clean_base_id(config.AIRTABLE_BASE_ID), TRAINING_LOG_TABLE_ID)
+
+
 # ── Flag computation ─────────────────────────────────────────────────────────
 
 _MC_ENTITY = r"(?:LLC|L\.L\.C\.|Inc\.?|Corp\.?|Co\.?|Ltd\.?|PLLC|P\.C\.|LLP|LP)"
@@ -416,6 +452,20 @@ def compute_flags(airtable_fields: dict, raw_data: dict, required_policy_types=N
         v for k, v in flags.items()
         if k not in ("needs_look", "changed_vs_prior")
     )
+
+    # needs_decision: routing trigger for "Needs your decision" chip.
+    # For RTR certs: fires only on required-field problems (not low_confidence or multi_company).
+    # For non-RTR certs: same as needs_look (keeps existing behaviour).
+    # Note: possible_duplicate is added by the queue route after cross-record comparison.
+    if required_policy_types is not None:
+        flags["needs_decision"] = (
+            flags["missing_fields"]
+            or _required_field_ai_disagreed(ai_raw)
+            or flags["non_coi"]
+        )
+    else:
+        flags["needs_decision"] = flags["needs_look"]
+
     return flags
 
 
@@ -709,7 +759,7 @@ def index():
 @app.route("/queue")
 @login_required
 def queue():
-    chip = request.args.get("filter", "pending")
+    chip = request.args.get("filter", "needs_decision")
     table = _ie_table()
     all_records = table.all()
 
@@ -781,6 +831,7 @@ def queue():
                     r = group[r_idx]
                     r["flags"]["possible_duplicate"] = True
                     r["flags"]["needs_look"] = True
+                    r["flags"]["needs_decision"] = True
                     if not r["duplicate_match"]:
                         r["duplicate_match"] = match_text
 
@@ -791,10 +842,10 @@ def queue():
     else:
         batch_rows = [r for r in rows if not _is_billy_rtr(r["source_filename"])]
 
-    if chip == "ai_disagreed":
-        filtered = [r for r in batch_rows if r["flags"]["ai_disagreed"] and r["review_status"] in PENDING_SET]
-    elif chip == "needs_look":
-        filtered = [r for r in batch_rows if r["flags"]["needs_look"] and r["review_status"] in PENDING_SET]
+    if chip == "needs_decision":
+        filtered = [r for r in batch_rows if r["flags"]["needs_decision"] and r["review_status"] in PENDING_SET]
+    elif chip == "just_confirm":
+        filtered = [r for r in batch_rows if not r["flags"]["needs_decision"] and r["review_status"] in PENDING_SET]
     elif chip == "approved":
         filtered = [r for r in batch_rows if r["review_status"] in APPROVED_SET]
     elif chip == "rejected":
@@ -831,7 +882,9 @@ def queue():
         if r.get("duplicate_match")
     }
 
-    return render_template("queue.html", rows=filtered, chip=chip, counts=counts, batch=batch)
+    weekly_learnings = _get_weekly_learnings()
+    return render_template("queue.html", rows=filtered, chip=chip, counts=counts, batch=batch,
+                           weekly_learnings=weekly_learnings)
 
 
 # ── Detail ────────────────────────────────────────────────────────────────────
@@ -1236,6 +1289,9 @@ def _handle_approve(table, record_id, source_filename, original_data, why_note, 
     _write_correction(source_filename, record_id, "reviewed_fields_audit",
                       "", audit_val, why_note, now_iso)
 
+    if why_note:
+        _write_note_record(source_filename, record_id, why_note, now_iso, corrections)
+
     return len(corrections)
 
 
@@ -1332,6 +1388,246 @@ def _write_correction(source_filename, record_id, field_path, old_val, new_val, 
         })
     except Exception as exc:
         app.logger.warning("Failed to write Correction row for %s: %s", field_path, exc)
+
+
+def _draft_prompt_rule(why_note: str, corrections: list) -> str:
+    """Ask Claude Haiku for a concise extraction-prompt rule based on a Reading Correction."""
+    field_lines = "\n".join(
+        f"  Field: {fp}\n  Was: {old!r}\n  Should be: {new!r}"
+        for fp, old, new in corrections
+    ) or "  (note only, no specific field changes)"
+    try:
+        import anthropic as _anthropic
+        client = _anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            messages=[{"role": "user", "content": (
+                "A human reviewer corrected an AI extraction of an insurance certificate. "
+                "Write a short, precise instruction (1-3 sentences) to add to the extraction "
+                "AI prompt to prevent this type of error in future certificates. "
+                "Be specific about what to look for on the document.\n\n"
+                f"Reviewer note: {why_note.strip()}\n\n"
+                f"Field corrections:\n{field_lines}\n\n"
+                "Proposed prompt rule (start directly with the instruction, no preamble):"
+            )}],
+        )
+        return (resp.content[0].text or "").strip()
+    except Exception as exc:
+        app.logger.debug("Rule drafter failed (%s)", exc)
+        return ""
+
+
+def _draft_code_proposal(why_note: str) -> str:
+    """Ask Claude Haiku to describe what code change would implement a Behavior Rule note."""
+    try:
+        import anthropic as _anthropic
+        client = _anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            messages=[{"role": "user", "content": (
+                "A reviewer left this note while reviewing an insurance certificate in a compliance "
+                "system. The note is classified as a 'Behavior Rule' — the system should change how "
+                "it processes or displays something in general.\n\n"
+                f"Note: {why_note.strip()}\n\n"
+                "Describe in 2-4 sentences exactly what code change would implement this rule. "
+                "Name the relevant file (review_app.py, processor.py, extractor.py, "
+                "module_7b_requirement_validator.py, etc.) and the specific behavior to change. "
+                "Be concrete.\n\n"
+                "Proposed code change (start directly, no preamble):"
+            )}],
+        )
+        return (resp.content[0].text or "").strip()
+    except Exception as exc:
+        app.logger.debug("Code proposal drafter failed (%s)", exc)
+        return ""
+
+
+def _classify_note(why_note: str) -> str:
+    """Classify a reviewer note using Claude Haiku. Returns one of the Note Type select values."""
+    if not why_note or len(why_note.strip()) < 8:
+        return "One-off"
+    try:
+        import anthropic as _anthropic
+        client = _anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=12,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "Classify this note a human reviewer left while approving an insurance certificate.\n"
+                    "Reply with ONLY one of these three labels — nothing else:\n"
+                    "  Reading Correction — the AI misread or mis-extracted something from the certificate image\n"
+                    "  Behavior Rule      — the system should change how it processes or displays something in general\n"
+                    "  One-off            — context specific to this certificate only, does not generalize\n\n"
+                    f"Note: {why_note.strip()}"
+                ),
+            }],
+        )
+        result = (resp.content[0].text or "").strip()
+        if "Reading" in result:
+            return "Reading Correction"
+        if "Behavior" in result:
+            return "Behavior Rule"
+        return "One-off"
+    except Exception as exc:
+        app.logger.debug("Note classifier failed (%s) — defaulting to One-off", exc)
+        return "One-off"
+
+
+def _write_note_record(source_filename, record_id, why_note, corrected_at, corrections=None):
+    """Classify the note, add reading corrections to the test set, draft a rule, and log everything."""
+    note_type = _classify_note(why_note)
+    field_corrections = [
+        (fp, old, new)
+        for fp, old, new in (corrections or [])
+        if fp not in ("reviewed_fields_audit",)
+    ]
+    proposed = ""
+    learning_status = "New"
+
+    if note_type == "Reading Correction":
+        # Add each field correction to the Extraction Training Log (test set)
+        try:
+            tlog = _training_log_table()
+            if field_corrections:
+                for fp, old_val, new_val in field_corrections:
+                    tlog.create({
+                        "Certificate ID": source_filename,
+                        "Field Name": fp,
+                        "Pipeline Value": str(old_val),
+                        "Correct Value": str(new_val),
+                        "Notes": why_note,
+                        "Reviewer": "Haley",
+                    })
+            else:
+                tlog.create({
+                    "Certificate ID": source_filename,
+                    "Field Name": "unspecified",
+                    "Pipeline Value": "",
+                    "Correct Value": "",
+                    "Notes": why_note,
+                    "Reviewer": "Haley",
+                })
+            app.logger.info("Added %d training-log entry(s) for %s",
+                            max(1, len(field_corrections)), source_filename)
+        except Exception as exc:
+            app.logger.warning("Failed to add training log entry for %s: %s", source_filename, exc)
+
+        # Draft a proposed prompt rule
+        proposed = _draft_prompt_rule(why_note, field_corrections)
+        if proposed:
+            learning_status = "Proposed prompt rule"
+            app.logger.info("Proposed prompt rule drafted for %s", source_filename)
+
+    elif note_type == "Behavior Rule":
+        proposed = _draft_code_proposal(why_note)
+        app.logger.info("Code change proposal drafted for %s", source_filename)
+
+    try:
+        _corrections_table().create({
+            "Summary": f"Note: {why_note[:80]}",
+            "Source Filename": source_filename,
+            "Incoming Extraction Record ID": record_id,
+            "Field": "Note",
+            "Old Value": proposed,
+            "New Value": why_note,
+            "Why (Haley's note)": why_note,
+            "Model": EXTRACTION_MODEL,
+            "Corrected At": corrected_at,
+            "Learning Status": learning_status,
+            "Note Type": note_type,
+        })
+        app.logger.info("Note classified as '%s' for %s", note_type, source_filename)
+    except Exception as exc:
+        app.logger.warning("Failed to write Note record for %s: %s", source_filename, exc)
+
+
+def _get_weekly_learnings():
+    """Return {note_type: [{note, src, record_id, proposed, learning_status}]} for Note records from last 7 days."""
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    try:
+        safe_cutoff = cutoff.replace("'", "\\'")
+        recs = _corrections_table().all(
+            formula=f"AND({{Field}} = 'Note', IS_AFTER({{Corrected At}}, '{safe_cutoff}'))"
+        )
+        by_type = {"Reading Correction": [], "Behavior Rule": [], "One-off": []}
+        for r in recs:
+            f = r["fields"]
+            nt = f.get("Note Type") or "One-off"
+            note = f.get("New Value") or ""
+            src = f.get("Source Filename") or ""
+            proposed = f.get("Old Value") or ""
+            ls = f.get("Learning Status") or "New"
+            if note and nt in by_type:
+                by_type[nt].append({
+                    "note": note,
+                    "src": src,
+                    "record_id": r["id"],
+                    "proposed": proposed,
+                    "learning_status": ls,
+                })
+        return {k: v for k, v in by_type.items() if v}
+    except Exception as exc:
+        app.logger.warning("Failed to fetch weekly learnings: %s", exc)
+        return {}
+
+
+@app.route("/apply-reading-rule/<record_id>", methods=["POST"])
+def apply_reading_rule(record_id):
+    """Run the test suite; if tests pass, append the proposed rule to extractor.py CHECKBOX_RULES."""
+    from flask import jsonify
+    from pathlib import Path
+    import subprocess, sys
+
+    try:
+        rec = _corrections_table().get(record_id)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Could not fetch record: {exc}"}), 404
+
+    fields = rec.get("fields", {})
+    proposed_rule = (fields.get("Old Value") or "").strip()
+    learning_status = (fields.get("Learning Status") or "")
+    if not proposed_rule or learning_status not in ("Proposed prompt rule", "New"):
+        return jsonify({"ok": False, "error": "No pending proposed rule found on this record."}), 400
+
+    # Gate: run the test suite
+    test_result = subprocess.run(
+        [sys.executable, "-m", "pytest", "tests/", "-q", "--tb=short"],
+        capture_output=True, text=True,
+        cwd=str(Path(__file__).parent),
+        timeout=120,
+    )
+    if test_result.returncode != 0:
+        output = (test_result.stdout + test_result.stderr)[-3000:]
+        return jsonify({
+            "ok": False,
+            "error": "Test suite failed — rule NOT applied. Fix the failures first.",
+            "test_output": output,
+        })
+
+    # Append rule to extractor.py CHECKBOX_RULES
+    extractor_path = Path(__file__).parent / "extractor.py"
+    marker = '"""\n\n_SYSTEM_PROMPT_TEMPLATE'
+    try:
+        src = extractor_path.read_text()
+        if marker not in src:
+            return jsonify({"ok": False, "error": "Could not find CHECKBOX_RULES end marker in extractor.py."}), 500
+        new_src = src.replace(marker, f"- {proposed_rule}\n\"\"\"\n\n_SYSTEM_PROMPT_TEMPLATE", 1)
+        extractor_path.write_text(new_src)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Failed to write extractor.py: {exc}"}), 500
+
+    # Mark as applied
+    try:
+        _corrections_table().update(record_id, {"Learning Status": "Rule approved"})
+    except Exception:
+        pass
+
+    return jsonify({"ok": True, "message": "Tests passed. Rule appended to extractor.py CHECKBOX_RULES."})
 
 
 if __name__ == "__main__":

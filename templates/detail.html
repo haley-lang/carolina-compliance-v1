@@ -230,7 +230,7 @@
                 {% if gl_policy %}
                   <span class="summary-val">
                     <span class="pol-num">{{ gl_policy.get('policy_number') or '—' }}</span>
-                    <span class="pol-dates">{{ gl_policy.get('effective_date') or '?' }} – {{ gl_policy.get('expiration_date') or '?' }}</span>
+                    <span class="pol-dates">{{ gl_policy.get('effective_date') | fmt_date or '?' }} – {{ gl_policy.get('expiration_date') | fmt_date or '?' }}</span>
                   </span>
                 {% else %}
                   <span class="summary-val not-on-file">not on file</span>
@@ -242,7 +242,7 @@
                 {% if wc_policy %}
                   <span class="summary-val">
                     <span class="pol-num">{{ wc_policy.get('policy_number') or '—' }}</span>
-                    <span class="pol-dates">{{ wc_policy.get('effective_date') or '?' }} – {{ wc_policy.get('expiration_date') or '?' }}</span>
+                    <span class="pol-dates">{{ wc_policy.get('effective_date') | fmt_date or '?' }} – {{ wc_policy.get('expiration_date') | fmt_date or '?' }}</span>
                   </span>
                 {% else %}
                   <span class="summary-val not-on-file">not on file</span>
@@ -260,7 +260,7 @@
                       <div class="other-pol-row">
                         <span class="other-pol-type">{{ p.get('policy_type') or '—' }}</span>
                         <span class="pol-num">{{ p.get('policy_number') or '—' }}</span>
-                        <span class="pol-dates">{{ p.get('effective_date') or '?' }} – {{ p.get('expiration_date') or '?' }}</span>
+                        <span class="pol-dates">{{ p.get('effective_date') | fmt_date or '?' }} – {{ p.get('expiration_date') | fmt_date or '?' }}</span>
                       </div>
                       {% endif %}
                     {% endfor %}
@@ -651,8 +651,8 @@
                   <tr>
                     <td>{{ p.get('policy_type') or '—' }}</td>
                     <td>{{ p.get('policy_number') or '—' }}</td>
-                    <td>{{ p.get('effective_date') or '—' }}</td>
-                    <td>{{ p.get('expiration_date') or '—' }}</td>
+                    <td>{{ p.get('effective_date') | fmt_date or '—' }}</td>
+                    <td>{{ p.get('expiration_date') | fmt_date or '—' }}</td>
                     <td>{{ {'checked': 'Y', 'not_checked': 'N', 'not_applicable': 'N/A'}[norm_tristate(p.get('additional_insured_checked'))] }}</td>
                     <td>{{ {'checked': 'Y', 'not_checked': 'N', 'not_applicable': 'N/A'}[norm_tristate(p.get('waiver_of_subrogation_checked'))] }}</td>
                   </tr>

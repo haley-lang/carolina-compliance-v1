@@ -60,6 +60,73 @@
     </div>
   </div>
 
+  <!-- Weekly learnings card -->
+  {% if weekly_learnings %}
+  <div class="card learnings-card mb-24">
+    <h3 class="learnings-heading">What I learned from your notes this week</h3>
+    {% for note_type, items in weekly_learnings.items() %}
+    <div class="learnings-group">
+      <span class="learnings-type-label">{{ note_type }}</span>
+      <ul class="learnings-list">
+        {% for item in items %}
+        <li class="learnings-item learnings-item--{{ note_type | lower | replace(' ', '-') }}">
+          <div class="learnings-main">
+            <span class="learnings-note">{{ item.note }}</span>
+            <span class="learnings-src">{{ item.src }}</span>
+          </div>
+          {% if item.proposed %}
+          <div class="learnings-proposal">
+            {% if note_type == 'Reading Correction' %}
+            <span class="proposal-label">Proposed prompt rule</span>
+            <span class="proposal-text">{{ item.proposed }}</span>
+            {% if item.learning_status == 'Proposed prompt rule' %}
+            <button class="btn btn-sm btn-apply-rule"
+                    data-record-id="{{ item.record_id }}"
+                    data-csrf="{{ csrf_token() }}"
+                    onclick="applyRule(this)">Apply rule</button>
+            {% elif item.learning_status == 'Rule approved' %}
+            <span class="proposal-applied">Applied</span>
+            {% endif %}
+            {% elif note_type == 'Behavior Rule' %}
+            <span class="proposal-label">Proposed code change</span>
+            <span class="proposal-text">{{ item.proposed }}</span>
+            <span class="proposal-manual-note">Requires manual code edit — never applied automatically.</span>
+            {% endif %}
+          </div>
+          {% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endfor %}
+  </div>
+  <script>
+  function applyRule(btn) {
+    const recId = btn.dataset.recordId;
+    const csrf  = btn.dataset.csrf;
+    btn.disabled = true;
+    btn.textContent = 'Running tests…';
+    fetch(`/apply-reading-rule/${recId}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: `csrf_token=${encodeURIComponent(csrf)}`,
+    })
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) {
+        btn.textContent = 'Applied';
+        btn.classList.add('btn-applied');
+      } else {
+        btn.textContent = 'Failed';
+        btn.title = d.error + (d.test_output ? '\n\n' + d.test_output : '');
+        btn.disabled = false;
+      }
+    })
+    .catch(() => { btn.textContent = 'Error'; btn.disabled = false; });
+  }
+  </script>
+  {% endif %}
+
   <!-- Filter chips -->
   <div class="filter-chips" role="navigation" aria-label="Filter queue">
     {% for chip_id, label in [

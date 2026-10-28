@@ -430,7 +430,7 @@ img { max-width: 100%; }
 /* ── Detail layout ───────────────────────────────────────────────── */
 .detail-grid {
   display: grid;
-  grid-template-columns: 44% 1fr;
+  grid-template-columns: 60% 40%;
   gap: 24px;
   align-items: start;
 }
@@ -1196,4 +1196,117 @@ select.policy-input {
   font-size: 0.75rem;
   font-weight: 600;
   color: var(--navy);
+}
+
+/* ── Weekly learnings card ───────────────────────────────────────── */
+.learnings-card {
+  padding: 18px 22px;
+}
+.learnings-heading {
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--secondary);
+  margin: 0 0 14px;
+}
+.learnings-group {
+  margin-bottom: 14px;
+}
+.learnings-group:last-child { margin-bottom: 0; }
+.learnings-type-label {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--offwhite);
+  border: 1px solid var(--border);
+  color: var(--navy);
+  margin-bottom: 8px;
+}
+.learnings-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.learnings-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.84rem;
+}
+.learnings-item:last-child { border-bottom: none; }
+.learnings-note { color: var(--navy); flex: 1; }
+.learnings-src {
+  font-size: 0.75rem;
+  color: var(--secondary);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* ── Learnings card — proposals ──────────────────────────────────────── */
+.learnings-item { flex-direction: column; align-items: stretch; }
+.learnings-main {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+}
+.learnings-proposal {
+  margin-top: 6px;
+  padding: 8px 10px;
+  background: var(--offwhite);
+  border-left: 3px solid var(--border);
+  border-radius: 0 4px 4px 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px;
+}
+.learnings-item--behavior-rule .learnings-proposal { border-left-color: #f59e0b; }
+.learnings-item--reading-correction .learnings-proposal { border-left-color: #3b82f6; }
+.proposal-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--secondary);
+  flex: 0 0 100%;
+}
+.proposal-text {
+  font-size: 0.82rem;
+  color: var(--navy);
+  flex: 1;
+  line-height: 1.45;
+}
+.proposal-manual-note {
+  font-size: 0.72rem;
+  color: var(--secondary);
+  font-style: italic;
+  flex: 0 0 100%;
+}
+.btn-apply-rule {
+  background: var(--navy);
+  color: #fff;
+  border: none;
+  padding: 3px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.btn-apply-rule:hover { opacity: 0.85; }
+.btn-apply-rule.btn-applied { background: #16a34a; cursor: default; }
+.proposal-applied {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #16a34a;
+  flex-shrink: 0;
 }
