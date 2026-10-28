@@ -273,6 +273,37 @@
           </div>
         </div>
 
+        <!-- "On file for this vendor" panel -->
+        {% if vendor_policies %}
+        <span class="section-label">ON FILE FOR THIS VENDOR</span>
+        <div class="card mb-16">
+          <div class="card-body" style="padding:0">
+            <table class="on-file-table">
+              <thead>
+                <tr>
+                  <th>Type</th>
+                  <th>Carrier</th>
+                  <th>Policy #</th>
+                  <th>Effective</th>
+                  <th>Expires</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for p in vendor_policies %}
+                <tr class="on-file-row {% if p.status in ('Active', 'Compliant') %}on-file-active{% elif p.status in ('Expiring Soon', 'Expired') %}on-file-expiring{% else %}on-file-other{% endif %}">
+                  <td class="on-file-type">{{ p.policy_type or '—' }}</td>
+                  <td class="on-file-carrier">{{ p.carrier or '—' }}</td>
+                  <td class="on-file-polnum">{{ p.policy_number or '—' }}</td>
+                  <td class="on-file-date">{{ p.effective_date | fmt_date or '—' }}</td>
+                  <td class="on-file-date">{{ p.expiration_date | fmt_date or '—' }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        {% endif %}
+
         <!-- All extracted data — collapsed by default; corrections work inside here -->
         <details class="all-data-section mb-16">
           <summary class="all-data-toggle">ALL EXTRACTED DATA — show all fields &amp; corrections</summary>

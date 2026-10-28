@@ -46,9 +46,10 @@ from review_gate import (
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-CORRECTIONS_TABLE_ID   = "tblh6NTQikjzl8FFu"
-TRAINING_LOG_TABLE_ID  = "tblBW6HkbSVYkN2PN"  # Extraction Training Log (test set)
-EXTRACTIONS_TABLE_ID   = "tblT88Ty6d6M766oY"  # Incoming Extractions — for Airtable deep-links
+CORRECTIONS_TABLE_ID       = "tblh6NTQikjzl8FFu"
+TRAINING_LOG_TABLE_ID      = "tblBW6HkbSVYkN2PN"  # Extraction Training Log (test set)
+EXTRACTIONS_TABLE_ID       = "tblT88Ty6d6M766oY"  # Incoming Extractions — for Airtable deep-links
+INSURANCE_POLICIES_TABLE_ID = "tblpPcmm5ANE0bMNB"  # Insurance Policies
 
 _BILLY_RTR_PREFIXES = ("COI_forms_", "RTR_COI_", "N9WC", "coi.json")
 
@@ -358,6 +359,30 @@ def _training_log_table():
     return _api().table(clean_base_id(config.AIRTABLE_BASE_ID), TRAINING_LOG_TABLE_ID)
 
 
+def _get_vendor_policies(vendor_record_id: str) -> list:
+    """Return all Insurance Policy records linked to a vendor, sorted by type then expiry."""
+    base_id = clean_base_id(config.AIRTABLE_BASE_ID)
+    tbl = _api().table(base_id, INSURANCE_POLICIES_TABLE_ID)
+    formula = f"FIND('{vendor_record_id}', ARRAYJOIN({{Vendor Link}}, ','))"
+    records = tbl.all(
+        formula=formula,
+        fields=["Policy Type", "Carrier", "Policy Number", "Effective Date", "Expiration Date", "Status"],
+    )
+    result = []
+    for rec in records:
+        pf = rec["fields"]
+        result.append({
+            "policy_type":     pf.get("Policy Type") or "",
+            "carrier":         pf.get("Carrier") or "",
+            "policy_number":   pf.get("Policy Number") or "",
+            "effective_date":  pf.get("Effective Date") or "",
+            "expiration_date": pf.get("Expiration Date") or "",
+            "status":          pf.get("Status") or "",
+        })
+    result.sort(key=lambda p: (p["policy_type"], p["expiration_date"] or ""))
+    return result
+
+
 # ── Flag computation ─────────────────────────────────────────────────────────
 
 _MC_ENTITY = r"(?:LLC|L\.L\.C\.|Inc\.?|Corp\.?|Co\.?|Ltd\.?|PLLC|P\.C\.|LLP|LP)"
@@ -516,7 +541,7 @@ def _highlight_cells(raw_data: dict, second_data: dict) -> set:
 _TRISTATE_LABELS = {"checked": "Checked", "not_checked": "Not checked", "not_applicable": "N/A"}
 
 
-def compute_issues(raw_data: dict, second_data, flags: dict, duplicate_match: str = "", required_policy_types=None) -> list:
+def compute_issues(raw_data: dict, second_data, flags: dict, duplicate_match: str = "", required_policy_types=None, on_file_types: set = None) -> list:
     """Return ordered list of issue dicts for the 'Why this needs you' panel.
 
     Each issue has:
@@ -673,6 +698,12 @@ def compute_issues(raw_data: dict, second_data, flags: dict, duplicate_match: st
         for keywords, label in required_policy_types:
             idx, _ = _find_key_policy(policies, keywords)
             if idx is None:
+                # Suppress if this coverage type is on file from another cert for this vendor
+                if on_file_types and any(
+                    any(k in pt for k in keywords)
+                    for pt in on_file_types
+                ):
+                    continue
                 safe_id = label.lower().replace(" ", "_").replace("'", "").replace("/", "")
                 issues.append({
                     "id": f"missing_required_{safe_id}",
@@ -948,8 +979,23 @@ def detail(record_id):
     required_policy_types = RTR_REQUIRED_POLICY_TYPES if _is_billy_rtr(source_filename) else None
     flags = compute_flags(f, raw_data, required_policy_types)
 
+    # Look up all Insurance Policies on file for this vendor across all their certificates
+    vendor_policies = []
+    _mv = f.get("Matched Vendor")
+    _vendor_id = None
+    if isinstance(_mv, list) and _mv:
+        _vendor_id = _mv[0] if isinstance(_mv[0], str) else None
+    elif isinstance(_mv, str) and _mv.strip():
+        _vendor_id = _mv.strip()
+    if _vendor_id:
+        try:
+            vendor_policies = _get_vendor_policies(_vendor_id)
+        except Exception:
+            vendor_policies = []
+    on_file_types = {p["policy_type"].lower() for p in vendor_policies if p.get("policy_type")}
+
     duplicate_match = (session.get("queue_duplicate_matches") or {}).get(record_id, "")
-    issues = compute_issues(raw_data, second_data, flags, duplicate_match, required_policy_types)
+    issues = compute_issues(raw_data, second_data, flags, duplicate_match, required_policy_types, on_file_types)
 
     _policies = raw_data.get("policies") or []
     gl_idx, gl_policy = _find_key_policy(_policies, _GL_KEYWORDS)
@@ -1015,6 +1061,7 @@ def detail(record_id):
         queue_total=queue_total,
         approve_button_label="Required fields are correct" if required_policy_types else "Data is correct",
         required_policy_types=required_policy_types,
+        vendor_policies=vendor_policies,
     )
 
 

@@ -1310,3 +1310,36 @@ select.policy-input {
   color: #16a34a;
   flex-shrink: 0;
 }
+
+/* ── On file for this vendor panel ──────────────────────────────────── */
+.on-file-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+.on-file-table thead tr {
+  background: var(--offwhite);
+  border-bottom: 1px solid var(--border);
+}
+.on-file-table th {
+  padding: 7px 12px;
+  text-align: left;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--secondary);
+}
+.on-file-table td {
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.on-file-table tbody tr:last-child td { border-bottom: none; }
+.on-file-type { font-weight: 600; color: var(--navy); }
+.on-file-carrier { color: var(--secondary); }
+.on-file-polnum { font-family: monospace; font-size: 0.78rem; }
+.on-file-date { color: var(--secondary); white-space: nowrap; }
+.on-file-active { }
+.on-file-expiring td { color: #b45309; }
+.on-file-expiring .on-file-type { color: #b45309; }
