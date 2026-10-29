@@ -2503,6 +2503,11 @@ def gaps():
     base_id = clean_base_id(config.AIRTABLE_BASE_ID)
     api = _api()
     today = date.today()
+    window_start_str = request.args.get("window_start", "").strip()
+    window_end_str   = request.args.get("window_end", "").strip()
+    window_start = _parse_date(window_start_str)
+    window_end   = _parse_date(window_end_str)
+    has_window   = bool(window_start and window_end and window_start <= window_end)
 
     # Load all clients for the dropdown
     clients_tbl = api.table(base_id, CLIENTS_TABLE_ID)
@@ -2592,6 +2597,26 @@ def gaps():
 
         vendor_gaps = []
         expiring_soon = []
+        window_statuses = {}
+
+        if has_window:
+            for kws, label in RTR_REQUIRED_POLICY_TYPES:
+                w_terms = []
+                w_has_any = False
+                for prec in pol_records:
+                    pf = prec["fields"]
+                    pt = (pf.get("Policy Type") or "").lower()
+                    if not _pol_matches_audit_type(pt, kws):
+                        continue
+                    w_has_any = True
+                    eff = _parse_date(pf.get("Effective Date"))
+                    exp = _parse_date(pf.get("Expiration Date"))
+                    if eff and exp and eff <= window_end and exp >= window_start:
+                        w_terms.append({"effective": eff.isoformat(), "expiration": exp.isoformat()})
+                w_terms.sort(key=lambda t: t["effective"])
+                wstatus, wdays, _ = _compute_vendor_audit_status(
+                    w_terms, window_start, window_end, w_has_any)
+                window_statuses[label] = {"status": wstatus, "days_not_on_file": wdays}
 
         for _, label in RTR_REQUIRED_POLICY_TYPES:
             pols = policies_by_type.get(label) or []
@@ -2629,7 +2654,10 @@ def gaps():
                     })
                     stat_date_gaps += 1
 
-        if vendor_gaps or expiring_soon:
+        has_window_issue = has_window and any(
+            ws["status"] != "full" for ws in window_statuses.values()
+        )
+        if vendor_gaps or expiring_soon or has_window_issue:
             vendors_out.append({
                 "vendor_id": vendor_id,
                 "vendor_name": vendor_name,
@@ -2638,6 +2666,7 @@ def gaps():
                 "expiring_soon": expiring_soon,
                 "policies_by_type": {k: v for k, v in policies_by_type.items()},
                 "existing_requests": existing_requests_by_vendor.get(vendor_id) or [],
+                "window_statuses": window_statuses,
             })
 
     vendors_out.sort(key=lambda v: v["vendor_name"].lower())
@@ -2654,6 +2683,9 @@ def gaps():
         stat_missing=stat_missing,
         stat_date_gaps=stat_date_gaps,
         stat_expiring=stat_expiring,
+        has_window=has_window,
+        window_start=window_start_str,
+        window_end=window_end_str,
     )
 
 
@@ -2754,15 +2786,20 @@ def _pol_type_abbrev(pol_type: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "", pol_type)[:4].upper() or "POL"
 
 
-def _terms_for_vendor_audit(vendor_id: str, audit_type: str, start_date: date, end_date: date) -> list:
-    """Return policy terms that overlap the audit window for the given coverage type."""
+def _terms_for_vendor_audit(vendor_id: str, audit_type: str, start_date: date, end_date: date):
+    """Return (terms, has_any_of_type).
+
+    terms            — policy dicts that overlap the audit window for this coverage type.
+    has_any_of_type  — True if the vendor has ANY policy of this type (even outside the window).
+                       Used to distinguish 'none_in_window' from 'no_policy' in status.
+    """
     kws = _audit_coverage_keywords(audit_type)
     base_id = clean_base_id(config.AIRTABLE_BASE_ID)
     api = _api()
     pol_tbl = api.table(base_id, INSURANCE_POLICIES_TABLE_ID)
     policy_ids = _get_vendor_policy_ids(vendor_id)
     if not policy_ids:
-        return []
+        return [], False
     pol_formula = "OR(" + ", ".join(f"RECORD_ID()='{p}'" for p in policy_ids) + ")"
     records = pol_tbl.all(
         formula=pol_formula,
@@ -2770,11 +2807,13 @@ def _terms_for_vendor_audit(vendor_id: str, audit_type: str, start_date: date, e
                 "Last Updated From Extraction"],
     )
     terms = []
+    has_any_of_type = False
     for rec in records:
         pf = rec["fields"]
         pt = (pf.get("Policy Type") or "").lower()
         if not _pol_matches_audit_type(pt, kws):
             continue
+        has_any_of_type = True
         eff = _parse_date(pf.get("Effective Date"))
         exp = _parse_date(pf.get("Expiration Date"))
         if not eff or not exp:
@@ -2790,16 +2829,24 @@ def _terms_for_vendor_audit(vendor_id: str, audit_type: str, start_date: date, e
                 "extraction_ids": pf.get("Last Updated From Extraction") or [],
             })
     terms.sort(key=lambda t: t["effective"])
-    return terms
+    return terms, has_any_of_type
 
 
-def _compute_vendor_audit_status(terms: list, start_date: date, end_date: date) -> tuple:
+def _compute_vendor_audit_status(terms: list, start_date: date, end_date: date,
+                                  has_any: bool = True) -> tuple:
     """Return (status_str, days_not_on_file, gap_days_list).
-    status: 'full' | 'short_gap' | 'gap' | 'none'
+
+    status values:
+      'full'           — 100% covered
+      'short_gap'      — gap ≤ 30 days
+      'gap'            — gap > 30 days
+      'none_in_window' — has policies of this type, but none overlap the window
+      'no_policy'      — no policies of this type at all in the system
     """
     if not terms:
         total_days = (end_date - start_date).days + 1
-        return "none", total_days, []
+        status = "none_in_window" if has_any else "no_policy"
+        return status, total_days, []
 
     # Compute coverage union within [start_date, end_date]
     covered = set()
@@ -2908,7 +2955,7 @@ def audit_preview():
 
     vendors_tbl = api.table(base_id, VENDORS_TABLE_ID)
 
-    counts = {"full": 0, "short_gap": 0, "gap": 0, "none": 0}
+    counts = {"full": 0, "short_gap": 0, "gap": 0, "none_in_window": 0, "no_policy": 0}
     vendors_out = []
 
     for vendor_id in vendor_ids:
@@ -2921,10 +2968,11 @@ def audit_preview():
         if _is_test_vendor(vendor_name):
             continue
 
-        terms = _terms_for_vendor_audit(vendor_id, audit_type, start_date, end_date)
-        status, days_not_on_file, gap_runs = _compute_vendor_audit_status(terms, start_date, end_date)
+        terms, has_any = _terms_for_vendor_audit(vendor_id, audit_type, start_date, end_date)
+        status, days_not_on_file, gap_runs = _compute_vendor_audit_status(
+            terms, start_date, end_date, has_any)
 
-        counts[status] += 1
+        counts[status] = counts.get(status, 0) + 1
 
         terms_out = []
         for t in terms:
@@ -2951,13 +2999,41 @@ def audit_preview():
             "name": vendor_name,
             "vendor_id": vendor_id,
             "status": status,
+            "has_any_of_type": has_any,
             "days_not_on_file": days_not_on_file,
             "terms": terms_out,
             "gap_segments": gap_segments,
         })
 
     vendors_out.sort(key=lambda v: v["name"].lower())
-    return jsonify({"vendors": vendors_out, "counts": counts})
+
+    # A5.1 — Unlinked pending extractions (RTR batch only)
+    unlinked_pending = []
+    if client_id == RTR_CLIENT_ID:
+        try:
+            ie_tbl = api.table(base_id, INCOMING_EXTRACTIONS_TABLE)
+            pending_recs = ie_tbl.all(
+                formula=(
+                    "AND({Review Status}='Pending Review', IS_BLANK({Matched Vendor}),"
+                    "OR(FIND('COI_forms_',{Source Filename}),FIND('RTR_COI_',{Source Filename}),"
+                    "FIND('N9WC',{Source Filename}),FIND('resend',LOWER({Source Filename}))))"
+                ),
+                fields=["Source Filename", "Named Insured", "Extraction Processed At"],
+                max_records=50,
+            )
+            for rec in pending_recs:
+                rf = rec["fields"]
+                unlinked_pending.append({
+                    "id": rec["id"],
+                    "source_filename": rf.get("Source Filename") or "",
+                    "named_insured": rf.get("Named Insured") or "",
+                    "processed_at": rf.get("Extraction Processed At") or "",
+                })
+        except Exception:
+            pass
+
+    return jsonify({"vendors": vendors_out, "counts": counts,
+                    "unlinked_pending": unlinked_pending})
 
 
 @app.route("/audit/build", methods=["POST"])
@@ -3010,7 +3086,7 @@ def audit_build():
 
     # Build vendor data
     audit_vendors = []
-    counts = {"full": 0, "short_gap": 0, "gap": 0, "none": 0}
+    counts = {"full": 0, "short_gap": 0, "gap": 0, "none_in_window": 0, "no_policy": 0}
 
     for vendor_id in vendor_ids:
         try:
@@ -3022,9 +3098,10 @@ def audit_build():
         if _is_test_vendor(vendor_name):
             continue
 
-        terms = _terms_for_vendor_audit(vendor_id, audit_type, start_date, end_date)
-        status, days_not_on_file, _ = _compute_vendor_audit_status(terms, start_date, end_date)
-        counts[status] += 1
+        terms, has_any = _terms_for_vendor_audit(vendor_id, audit_type, start_date, end_date)
+        status, days_not_on_file, _ = _compute_vendor_audit_status(
+            terms, start_date, end_date, has_any)
+        counts[status] = counts.get(status, 0) + 1
 
         kws = _audit_coverage_keywords(audit_type)
         pol_type_abbrev = _audit_type_abbrev(audit_type)
@@ -3107,6 +3184,7 @@ def audit_build():
             "vendor_id": vendor_id,
             "vendor_name": vendor_name,
             "status": status,
+            "has_any_of_type": has_any,
             "days_not_on_file": days_not_on_file,
             "terms": terms,
             "pdfs": term_pdfs,
@@ -3124,10 +3202,11 @@ def audit_build():
 
     # Status row colors for Grid sheet
     _STATUS_FILLS = {
-        "full":      "C6EFCE",  # green
-        "short_gap": "FFEB9C",  # yellow
-        "gap":       "FFCC99",  # orange
-        "none":      "FFC7CE",  # red
+        "full":           "C6EFCE",  # green
+        "short_gap":      "FFEB9C",  # yellow
+        "gap":            "FFCC99",  # orange
+        "none_in_window": "FFC7CE",  # red
+        "no_policy":      "FFC7CE",  # red
     }
 
     def _xlsx_date(s: str) -> str:
@@ -3216,12 +3295,13 @@ def audit_build():
             ws_flags.append(["Sub Name", "Issue"])
             _apply_header(ws_flags, row_num=1)
             for v in audit_vendors:
-                if v["status"] in ("gap", "none"):
-                    issue = (
-                        "No policies on file in audit window"
-                        if v["status"] == "none"
-                        else f"{v['days_not_on_file']} day(s) not on file"
-                    )
+                if v["status"] in ("gap", "none_in_window", "no_policy"):
+                    if v["status"] == "no_policy":
+                        issue = f"No {audit_type} policy on file at all"
+                    elif v["status"] == "none_in_window":
+                        issue = f"No {audit_type} policy overlaps audit window"
+                    else:
+                        issue = f"{v['days_not_on_file']} day(s) not on file"
                     ws_flags.append([v["vendor_name"], issue])
                     for cell in ws_flags[ws_flags.max_row]:
                         cell.font = arial
@@ -3234,8 +3314,11 @@ def audit_build():
         for v in audit_vendors:
             folder = re.sub(r'[\\/:*?"<>|]', "_", v["vendor_name"])
             if not v["terms"]:
-                zf.writestr(f"{folder}/Not on file.txt",
-                            f"{v['vendor_name']} — no {audit_type} policies on file for this period.\n")
+                if v.get("has_any_of_type"):
+                    note = f"{v['vendor_name']} — {audit_type} policy on file but does not overlap this audit window.\n"
+                else:
+                    note = f"{v['vendor_name']} — no {audit_type} policies on file.\n"
+                zf.writestr(f"{folder}/Not on file.txt", note)
                 continue
 
             if not v["pdfs"]:

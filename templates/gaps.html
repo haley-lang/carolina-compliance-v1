@@ -53,6 +53,18 @@
     .page-title { font-family:var(--font-serif); font-size:1.7rem; margin-bottom:24px; color:var(--navy); }
     .nav-link.active { color:#fff !important; font-weight:700; }
     .no-gap-note { font-size:0.85rem; color:var(--secondary); padding:8px 0; }
+    .window-form { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:24px; }
+    .window-form label { font-size:0.82rem; font-weight:600; color:var(--secondary); }
+    .window-form input[type=date] { padding:7px 10px; border:1.5px solid var(--border); border-radius:7px;
+                                    font-size:0.88rem; font-family:var(--font-sans); }
+    .window-badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:0.75rem;
+                    font-weight:700; margin-left:4px; }
+    .wb-full           { background:#c6efce; color:#375623; }
+    .wb-short_gap      { background:#ffeb9c; color:#7d6008; }
+    .wb-gap            { background:#ffcc99; color:#7d3c00; }
+    .wb-none_in_window { background:#ffc7ce; color:#9c0006; }
+    .wb-no_policy      { background:#ffc7ce; color:#9c0006; }
+    .window-status-row { display:flex; gap:6px; flex-wrap:wrap; margin-top:6px; }
   </style>
 </head>
 <body>
@@ -88,13 +100,35 @@
   <div class="client-selector">
     <span class="section-label">CLIENT</span>
     <div class="mt-8">
-      <select onchange="window.location='/gaps?client_id='+this.value">
+      <select id="client-select" onchange="applyFilters()">
         {% for c in clients %}
         <option value="{{ c.id }}" {% if c.id == client_id %}selected{% endif %}>{{ c.name }}</option>
         {% endfor %}
       </select>
     </div>
   </div>
+
+  <!-- Audit window selector (A6) -->
+  <form class="window-form" id="window-form" onsubmit="event.preventDefault(); applyFilters()">
+    <span class="section-label" style="align-self:center">AUDIT WINDOW</span>
+    <label>From <input type="date" id="window-start" name="window_start" value="{{ window_start }}"></label>
+    <label>To <input type="date" id="window-end" name="window_end" value="{{ window_end }}"></label>
+    <button type="submit" class="btn btn-sm btn-primary">Apply</button>
+    {% if has_window %}
+    <a href="/gaps?client_id={{ client_id }}" class="btn btn-sm btn-secondary">Clear window</a>
+    {% endif %}
+  </form>
+  <script>
+  function applyFilters() {
+    var client = document.getElementById('client-select').value;
+    var ws = document.getElementById('window-start').value;
+    var we = document.getElementById('window-end').value;
+    var url = '/gaps?client_id=' + encodeURIComponent(client);
+    if (ws) url += '&window_start=' + encodeURIComponent(ws);
+    if (we) url += '&window_end=' + encodeURIComponent(we);
+    window.location = url;
+  }
+  </script>
 
   <!-- Stats band -->
   <div class="stats-band" role="region" aria-label="Gap summary">
@@ -132,7 +166,18 @@
   <div class="card vendor-card mb-16"
        data-vendor-kinds="{{ v.gaps | map(attribute='kind') | list | join(',') }},{{ 'expiring' if v.expiring_soon else '' }}">
     <div class="card-header">
-      <span>{{ v.vendor_name }}</span>
+      <div>
+        <span>{{ v.vendor_name }}</span>
+        {% if has_window and v.window_statuses %}
+        <div class="window-status-row">
+          {% for wlabel, ws in v.window_statuses.items() %}
+          <span class="window-badge wb-{{ ws.status }}">
+            {{ wlabel }}: {% if ws.status == 'full' %}Full{% elif ws.status == 'short_gap' %}Short gap ({{ ws.days_not_on_file }}d){% elif ws.status == 'gap' %}Gap ({{ ws.days_not_on_file }}d){% elif ws.status == 'none_in_window' %}Outside window{% elif ws.status == 'no_policy' %}No policy{% endif %}
+          </span>
+          {% endfor %}
+        </div>
+        {% endif %}
+      </div>
       {% if v.contact_email %}
       <span>
         <span class="contact-label">Email:</span>
