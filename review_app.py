@@ -88,6 +88,22 @@ def _norm_polnum(v: str) -> str:
 _GL_KEYWORDS = ("general", "liability", "cgl", "commercial general")
 _WC_KEYWORDS = ("workers", "work comp", "w/c", "wc", "workers'", "employers liability")
 
+
+def _pol_matches_audit_type(pol_type: str, kws: tuple) -> bool:
+    """True if pol_type matches the keywords.
+
+    For GL matching, explicitly excludes 'auto' and 'employers' so that
+    'Auto Liability', 'Commercial Auto Liability', and 'Employers Liability'
+    are not incorrectly classified as General Liability.
+    """
+    pt = pol_type.lower()
+    if not any(k in pt for k in kws):
+        return False
+    if kws is _GL_KEYWORDS and ("auto" in pt or "employers" in pt):
+        return False
+    return True
+
+
 # Required policy types for RTR Construction (no Airtable requirement rows → default to GL + WC)
 RTR_REQUIRED_POLICY_TYPES = [
     (_GL_KEYWORDS, "General Liability"),
@@ -2431,7 +2447,7 @@ def gaps():
                 "expiration_date": pf.get("Expiration Date") or "",
                 "carrier": pf.get("Carrier") or "",
             }
-            if any(k in pt for k in _GL_KEYWORDS):
+            if _pol_matches_audit_type(pt, _GL_KEYWORDS):
                 policies_by_type["General Liability"].append(entry)
             elif any(k in pt for k in _WC_KEYWORDS):
                 policies_by_type["Workers' Comp"].append(entry)
@@ -2590,10 +2606,11 @@ def _pol_type_abbrev(pol_type: str) -> str:
     pt = pol_type.lower()
     if any(k in pt for k in _WC_KEYWORDS):
         return "WC"
-    if any(k in pt for k in _GL_KEYWORDS):
-        return "GL"
+    # Auto check BEFORE GL: "Commercial Auto Liability" must not match GL
     if "auto" in pt:
         return "Auto"
+    if _pol_matches_audit_type(pt, _GL_KEYWORDS):
+        return "GL"
     if "umbrella" in pt or "excess" in pt:
         return "Umb"
     return re.sub(r"[^A-Za-z0-9]", "", pol_type)[:4].upper() or "POL"
@@ -2618,7 +2635,7 @@ def _terms_for_vendor_audit(vendor_id: str, audit_type: str, start_date: date, e
     for rec in records:
         pf = rec["fields"]
         pt = (pf.get("Policy Type") or "").lower()
-        if not any(k in pt for k in kws):
+        if not _pol_matches_audit_type(pt, kws):
             continue
         eff = _parse_date(pf.get("Effective Date"))
         exp = _parse_date(pf.get("Expiration Date"))
@@ -2767,7 +2784,7 @@ def audit_preview():
             continue
 
         terms = _terms_for_vendor_audit(vendor_id, audit_type, start_date, end_date)
-        status, days_not_on_file, _ = _compute_vendor_audit_status(terms, start_date, end_date)
+        status, days_not_on_file, gap_runs = _compute_vendor_audit_status(terms, start_date, end_date)
 
         counts[status] += 1
 
@@ -2783,12 +2800,22 @@ def audit_preview():
                 "days_before": max(0, days_before),
             })
 
+        # Build gap_segments for display (e.g. "Sept 30 – Oct 22")
+        gap_segments = []
+        for gs, ge in gap_runs:
+            gap_segments.append({
+                "start": gs.isoformat(),
+                "end": ge.isoformat(),
+                "days": (ge - gs).days + 1,
+            })
+
         vendors_out.append({
             "name": vendor_name,
             "vendor_id": vendor_id,
             "status": status,
             "days_not_on_file": days_not_on_file,
             "terms": terms_out,
+            "gap_segments": gap_segments,
         })
 
     vendors_out.sort(key=lambda v: v["name"].lower())
@@ -2861,31 +2888,82 @@ def audit_build():
         status, days_not_on_file, _ = _compute_vendor_audit_status(terms, start_date, end_date)
         counts[status] += 1
 
-        # Gather PDF attachment URLs for each term via extraction links
-        term_pdfs = []  # list of {term_idx, url, filename}
-        seen_urls = set()
-        for t in terms:
-            pol_type_abbrev = _audit_type_abbrev(audit_type)
-            for ext_id in (t.get("extraction_ids") or []):
+        kws = _audit_coverage_keywords(audit_type)
+        pol_type_abbrev = _audit_type_abbrev(audit_type)
+
+        # Gather PDFs via vendor's linked Incoming Extractions (approved only).
+        # This replaces the old "Last Updated From Extraction" approach which
+        # was rarely populated, resulting in nearly empty ZIPs.
+        term_pdfs = []
+        seen_urls: set = set()
+        seen_extraction_ids: set = set()
+
+        try:
+            ext_ids = vrec["fields"].get("Incoming Extractions") or []
+        except Exception:
+            ext_ids = []
+
+        for ext_id in ext_ids:
+            if ext_id in seen_extraction_ids:
+                continue
+            try:
+                ext_rec = ie_tbl.get(ext_id)
+                ef = ext_rec["fields"]
+                status_ext = (ef.get("Review Status") or "").strip()
+                if status_ext not in ("Approved", "Approved + Edited", "Auto-Approved"):
+                    continue
+                # Check whether this extraction has a policy touching the audit window
                 try:
-                    ext_rec = ie_tbl.get(ext_id)
-                    attachments = ext_rec["fields"].get("Source Page") or []
-                    if not isinstance(attachments, list):
-                        attachments = []
-                    for att in attachments:
-                        url = att.get("url") or ""
-                        if url and url not in seen_urls:
-                            seen_urls.add(url)
-                            term_pdfs.append({
-                                "url": url,
-                                "carrier": t["carrier"],
-                                "policy_number": t["policy_number"],
-                                "effective": t["effective"],
-                                "expiration": t["expiration"],
-                                "type_abbrev": pol_type_abbrev,
-                            })
+                    raw_json = json.loads(ef.get("Raw JSON") or "{}")
                 except Exception:
-                    pass
+                    raw_json = {}
+                ext_pols = raw_json.get("policies") or []
+                has_matching_pol = False
+                best_carrier = ""
+                best_pol_num = ""
+                best_eff = ""
+                best_exp = ""
+                for ep in ext_pols:
+                    ep_pt = (ep.get("policy_type") or "").lower()
+                    if not _pol_matches_audit_type(ep_pt, kws):
+                        continue
+                    eff = _parse_date(ep.get("effective_date") or "")
+                    exp = _parse_date(ep.get("expiration_date") or "")
+                    if eff and exp and eff <= end_date and exp >= start_date:
+                        has_matching_pol = True
+                        best_carrier = ep.get("carrier") or ""
+                        best_pol_num = ep.get("policy_number") or ""
+                        best_eff = ep.get("effective_date") or ""
+                        best_exp = ep.get("expiration_date") or ""
+                        break
+                if not has_matching_pol:
+                    seen_extraction_ids.add(ext_id)
+                    continue
+                # Prefer carrier/policy info from matching Insurance Policy term
+                if terms:
+                    best_carrier = best_carrier or terms[0]["carrier"]
+                    best_pol_num = best_pol_num or terms[0]["policy_number"]
+                    best_eff = best_eff or terms[0]["effective"]
+                    best_exp = best_exp or terms[0]["expiration"]
+                # Get Source Page attachments
+                att_field = ef.get(SOURCE_PAGE_FIELD) or []
+                if not isinstance(att_field, list):
+                    att_field = []
+                for att in att_field:
+                    url = att.get("url") or ""
+                    if url and url not in seen_urls:
+                        seen_urls.add(url)
+                        term_pdfs.append({
+                            "url": url,
+                            "carrier": best_carrier,
+                            "policy_number": best_pol_num,
+                            "effective": best_eff,
+                            "expiration": best_exp,
+                            "type_abbrev": pol_type_abbrev,
+                        })
+                seen_extraction_ids.add(ext_id)
+            except Exception:
+                pass
 
         audit_vendors.append({
             "vendor_id": vendor_id,
@@ -2906,34 +2984,83 @@ def audit_build():
     except ImportError:
         HAS_OPENPYXL = False
 
+    # Status row colors for Grid sheet
+    _STATUS_FILLS = {
+        "full":      "C6EFCE",  # green
+        "short_gap": "FFEB9C",  # yellow
+        "gap":       "FFCC99",  # orange
+        "none":      "FFC7CE",  # red
+    }
+
+    def _xlsx_date(s: str) -> str:
+        """Format YYYY-MM-DD as M/D/YYYY for Excel display."""
+        d = _parse_date(s)
+        if d:
+            return f"{d.month}/{d.day}/{d.year}"
+        return s or ""
+
     zip_buf = io.BytesIO()
+    missing_files_lines: list = []
+
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
         if HAS_OPENPYXL:
             wb = openpyxl.Workbook()
 
+            hdr_font = Font(name="Arial", bold=True, color="FFFFFF")
+            hdr_fill = PatternFill("solid", fgColor="1F3864")  # dark navy
+            arial_bold = Font(name="Arial", bold=True)
+            arial = Font(name="Arial")
+
+            def _apply_header(ws, row_num=1):
+                for cell in ws[row_num]:
+                    cell.font = hdr_font
+                    cell.fill = hdr_fill
+                    cell.alignment = Alignment(horizontal="center")
+
             # ── Summary sheet ──
             ws_sum = wb.active
             ws_sum.title = "Summary"
-            ws_sum.append(["Audit Pack"])
+            ws_sum.append(["Audit Pack Summary"])
             ws_sum.append(["Client", client_name])
             ws_sum.append(["Audit Type", audit_type])
-            ws_sum.append(["Period", f"{start_str} to {end_str}"])
-            ws_sum.append(["Generated", datetime.now().strftime("%Y-%m-%d %H:%M")])
+            ws_sum.append(["Period", f"{_xlsx_date(start_str)} to {_xlsx_date(end_str)}"])
+            ws_sum.append(["Generated", datetime.now().strftime("%m/%d/%Y %H:%M")])
+            ws_sum.append([])
+            ws_sum.append(["30-day short-gap threshold: gaps ≤ 30 days are shown as 'Short Gap'"])
             ws_sum.append([])
             ws_sum.append(["Status", "Count"])
+            _apply_header(ws_sum, row_num=9)
             for k, v in counts.items():
                 ws_sum.append([k.replace("_", " ").title(), v])
+            for row in ws_sum.iter_rows():
+                for cell in row:
+                    if cell.font == hdr_font:
+                        continue
+                    cell.font = arial
 
             # ── Grid sheet ──
             ws_grid = wb.create_sheet("Grid")
             ws_grid.append(["Sub Name", "Status", "Days Not On File"])
+            _apply_header(ws_grid, row_num=1)
             for v in audit_vendors:
-                ws_grid.append([v["vendor_name"], v["status"], v["days_not_on_file"]])
+                row_idx = ws_grid.max_row + 1
+                ws_grid.append([v["vendor_name"], v["status"].replace("_", " ").title(),
+                                 v["days_not_on_file"]])
+                fill_color = _STATUS_FILLS.get(v["status"])
+                if fill_color:
+                    row_fill = PatternFill("solid", fgColor=fill_color)
+                    for cell in ws_grid[row_idx]:
+                        cell.fill = row_fill
+                        cell.font = arial
+            for cell in ws_grid[1]:
+                cell.font = hdr_font
+                cell.fill = hdr_fill
 
             # ── Terms sheet ──
             ws_terms = wb.create_sheet("Terms")
             ws_terms.append(["Sub Name", "Coverage Type", "Policy Number", "Carrier",
                               "Effective", "Expiration", "Days Before Term"])
+            _apply_header(ws_terms, row_num=1)
             for v in audit_vendors:
                 for t in v["terms"]:
                     eff = _parse_date(t["effective"])
@@ -2941,20 +3068,25 @@ def audit_build():
                     ws_terms.append([
                         v["vendor_name"], audit_type,
                         t["policy_number"], t["carrier"],
-                        t["effective"], t["expiration"], days_before,
+                        _xlsx_date(t["effective"]), _xlsx_date(t["expiration"]), days_before,
                     ])
+                    for cell in ws_terms[ws_terms.max_row]:
+                        cell.font = arial
 
             # ── Flags sheet ──
             ws_flags = wb.create_sheet("Flags")
             ws_flags.append(["Sub Name", "Issue"])
+            _apply_header(ws_flags, row_num=1)
             for v in audit_vendors:
                 if v["status"] in ("gap", "none"):
                     issue = (
-                        f"No policies on file in audit window"
+                        "No policies on file in audit window"
                         if v["status"] == "none"
                         else f"{v['days_not_on_file']} day(s) not on file"
                     )
                     ws_flags.append([v["vendor_name"], issue])
+                    for cell in ws_flags[ws_flags.max_row]:
+                        cell.font = arial
 
             idx_buf = io.BytesIO()
             wb.save(idx_buf)
@@ -2962,10 +3094,28 @@ def audit_build():
 
         # ── Per-vendor folders ──
         for v in audit_vendors:
-            folder = v["vendor_name"]
+            folder = re.sub(r'[\\/:*?"<>|]', "_", v["vendor_name"])
             if not v["terms"]:
                 zf.writestr(f"{folder}/Not on file.txt",
                             f"{v['vendor_name']} — no {audit_type} policies on file for this period.\n")
+                continue
+
+            if not v["pdfs"]:
+                # Has terms but no PDFs (e.g. extraction not found or not approved)
+                zf.writestr(
+                    f"{folder}/No certificate PDFs found.txt",
+                    (
+                        f"{v['vendor_name']} — {audit_type} policy found in system "
+                        f"but no approved certificate PDF located.\n"
+                        f"Terms on file:\n"
+                        + "\n".join(
+                            f"  {t['policy_number']} ({t['carrier']}) "
+                            f"{t['effective']} to {t['expiration']}"
+                            for t in v["terms"]
+                        )
+                        + "\n"
+                    ),
+                )
                 continue
 
             for seq, pdf_info in enumerate(v["pdfs"], start=1):
@@ -2984,13 +3134,28 @@ def audit_build():
                     zf.writestr(f"{folder}/{safe_name}", pdf_data)
                 except Exception as exc:
                     app.logger.warning("Could not download %s: %s", url, exc)
-                    zf.writestr(f"{folder}/{safe_name}.error.txt",
-                                f"Could not download: {url}\nError: {exc}\n")
+                    err_msg = f"{v['vendor_name']}: {url} — {exc}"
+                    missing_files_lines.append(err_msg)
+
+        if missing_files_lines:
+            zf.writestr(
+                "MISSING FILES.txt",
+                "The following certificate PDFs could not be downloaded:\n\n"
+                + "\n".join(missing_files_lines)
+                + "\n",
+            )
+
+    # Format dates in ZIP filename as M-D-YYYY
+    def _zip_date(s: str) -> str:
+        d = _parse_date(s)
+        if d:
+            return f"{d.month}-{d.day}-{d.year}"
+        return s or ""
 
     zip_buf.seek(0)
     safe_client = re.sub(r'[\\/:*?"<>|]', "_", client_name)
     safe_type   = re.sub(r'[\\/:*?"<>|]', "_", audit_type)
-    filename = f"{safe_client} - {safe_type} - {start_str} to {end_str}.zip"
+    filename = f"{safe_client} - {safe_type} - {_zip_date(start_str)} to {_zip_date(end_str)}.zip"
 
     from flask import send_file
     return send_file(

@@ -254,6 +254,26 @@
   var btnBuild   = document.getElementById('btn-build');
   var previewSec = document.getElementById('preview-section');
 
+  var RTR_CLIENT_ID = '{{ rtr_client_id }}';
+  var RTR_DEFAULT_START = '2025-09-30';
+  var RTR_DEFAULT_END   = '2026-09-30';
+
+  // Auto-fill RTR dates when RTR is selected
+  var clientSel = document.getElementById('f-client');
+  function applyRtrDefaults() {
+    if (clientSel.value === RTR_CLIENT_ID) {
+      var startEl = document.getElementById('f-start');
+      var endEl   = document.getElementById('f-end');
+      if (!startEl.value) startEl.value = RTR_DEFAULT_START;
+      if (!endEl.value)   endEl.value   = RTR_DEFAULT_END;
+    }
+  }
+  if (clientSel) {
+    clientSel.addEventListener('change', applyRtrDefaults);
+    // Apply on page load if RTR is already selected
+    applyRtrDefaults();
+  }
+
   // Auto-preview when all 4 required fields are filled
   ['f-client', 'f-start', 'f-end'].forEach(function (id) {
     var el = document.getElementById(id);
