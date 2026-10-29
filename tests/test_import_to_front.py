@@ -206,8 +206,9 @@ def test_build_message_fields(tmp_path):
     row = _row("COI_forms_p01.pdf", FAKE_SHA_1, page="1", page_count="47",
                source="COI forms.PDF")
     row["source_folder"] = "Original Certificates"
+    cert_meta = {"COI_forms_p01.pdf": {"subject": "Certificate - COI_forms_p01", "note": ""}}
     with patch.object(front, "SPLIT_DIR", tmp_path):
-        msg = front.build_message(row)
+        msg = front.build_message(row, cert_metadata=cert_meta)
 
     assert msg["inbox_id"] == "inb_k4xih"   # COI@
     assert msg["subject"] == "Certificate - COI_forms_p01"

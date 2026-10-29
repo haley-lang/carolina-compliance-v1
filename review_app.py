@@ -67,6 +67,18 @@ RTR_CLIENT_ID              = "recG2hxGoJKdgBr4M"
 
 _BILLY_RTR_PREFIXES = ("COI_forms_", "RTR_COI_", "N9WC", "coi.json")
 
+# Accepted certificate holder aliases for RTR Construction (normalised lowercase, no punctuation)
+_RTR_CLIENT_ALIASES = [
+    "rtr construction llc", "rtr renovations llc", "rtr renovation llc",
+    "rtr construction", "rtr renovations", "rtr renovation",
+    "rtr", "renovations to roofing",
+]
+
+def _norm_holder(s: str) -> str:
+    """Lowercase, strip all non-alphanumeric except spaces."""
+    return re.sub(r"[^a-z0-9 ]", "", (s or "").lower()).strip()
+
+
 def _is_billy_rtr(source_filename: str) -> bool:
     """True if the filename belongs to the Billy/RTR real-client batch."""
     fn = source_filename or ""
@@ -686,12 +698,20 @@ def compute_flags(airtable_fields: dict, raw_data: dict, required_policy_types=N
     ))
 
     # 8. Certificate holder mismatch (RTR only)
-    # Fires when the certificate_holder does NOT contain any expected RTR keyword
-    _RTR_HOLDER_KEYWORDS = ("rtr", "renovations", "construction")
+    # Fires when the holder is blank, equals the named insured (self-issued),
+    # or doesn't match any known RTR client alias.
     if required_policy_types is not None:
-        _holder = (raw_data.get("certificate_holder") or "").lower()
-        if _holder:
-            flags["holder_mismatch"] = not any(kw in _holder for kw in _RTR_HOLDER_KEYWORDS)
+        _holder_norm = _norm_holder(raw_data.get("certificate_holder") or "")
+        _ni_norm     = _norm_holder(raw_data.get("named_insured") or "")
+        if not _holder_norm:
+            flags["holder_mismatch"] = True
+        elif _holder_norm == _ni_norm:
+            flags["holder_mismatch"] = True  # cert issued to itself
+        elif not any(
+            _norm_holder(a) in _holder_norm or _holder_norm in _norm_holder(a)
+            for a in _RTR_CLIENT_ALIASES
+        ):
+            flags["holder_mismatch"] = True
         else:
             flags["holder_mismatch"] = False
     else:
@@ -1018,8 +1038,9 @@ def compute_issues(raw_data: dict, second_data, flags: dict, duplicate_match: st
             "field": None,
         })
 
-    # 7. Expired on arrival
+    # 7. Expired on arrival — combine into one card per cert (not one per policy)
     _today_for_issues = date.today()
+    _expired_pols = []
     for i, p in enumerate(policies):
         if req_indices is not None and i not in req_indices:
             continue
@@ -1027,20 +1048,64 @@ def compute_issues(raw_data: dict, second_data, flags: dict, duplicate_match: st
         if not exp_str:
             continue
         try:
-            from datetime import datetime as _dtm
-            exp_d = _dtm.strptime(exp_str, "%Y-%m-%d").date()
+            exp_d = date.fromisoformat(exp_str[:10])
         except (ValueError, TypeError):
             continue
         if exp_d < _today_for_issues:
-            pol_label = (p.get("policy_type") or f"Policy {i + 1}").strip()
-            exp_display = _fmt_date(exp_str) or exp_str
+            _expired_pols.append((p, exp_d))
+
+    if _expired_pols:
+        # Determine if a newer term is on file for these types (check on_file_types)
+        def _type_label_for_pol(p):
+            return (p.get("policy_type") or "Policy").strip()
+
+        # Separate into "has newer on file" vs "no newer term"
+        _no_newer = []
+        _has_newer = []
+        for p, exp_d in _expired_pols:
+            pt_lower = (p.get("policy_type") or "").lower()
+            # on_file_types contains all types on file including this cert's own policies;
+            # if the type is on file it suggests there may be coverage, but we can't tell
+            # direction without expiration dates. Show quiet note when on file, loud when not.
+            if on_file_types and any(pt_lower in t or t in pt_lower for t in on_file_types if len(t) > 3):
+                _has_newer.append((p, exp_d))
+            else:
+                _no_newer.append((p, exp_d))
+
+        def _fmt_expired_title(pol_list):
+            """Build a human title like 'GL and WC on this certificate ended 08/27/2025'."""
+            labels = [_type_label_for_pol(p) for p, _ in pol_list]
+            exps   = [exp_d for _, exp_d in pol_list]
+            if len(labels) == 1:
+                type_str = labels[0]
+            elif len(labels) == 2:
+                type_str = f"{labels[0]} and {labels[1]}"
+            else:
+                type_str = f"{labels[0]}, {labels[1]}, and {len(labels)-2} more"
+            if all(e == exps[0] for e in exps):
+                return f"{type_str} on this certificate ended {_fmt_date(pol_list[0][0].get('expiration_date') or '') or str(exps[0])}"
+            return f"{type_str} on this certificate are expired"
+
+        if _no_newer:
             issues.append({
-                "id": f"expired_arrival_{i}",
+                "id": "expired_arrival",
                 "type": "expired_arrival",
-                "title": f"{pol_label} expired {exp_display}",
+                "title": _fmt_expired_title(_no_newer),
                 "description": (
-                    "This policy expired before today. Confirm you're reviewing this certificate "
-                    "correctly or reject it."
+                    "These policies expired before today. Confirm you are reviewing the correct "
+                    "certificate, or reject if a renewal is already on file."
+                ),
+                "control": "none",
+                "field": None,
+            })
+        if _has_newer:
+            issues.append({
+                "id": "expired_older_term",
+                "type": "expired_arrival",
+                "title": f"Older term — {', '.join(_type_label_for_pol(p) for p, _ in _has_newer[:2])} on this cert",
+                "description": (
+                    "A newer term for this coverage type appears to be on file for this vendor. "
+                    "This certificate may be an older renewal."
                 ),
                 "control": "none",
                 "field": None,
@@ -1054,11 +1119,14 @@ def compute_issues(raw_data: dict, second_data, flags: dict, duplicate_match: st
 CLIENT_REQUIREMENTS_TABLE_ID = "tblFGQ6XgOIHSWtQN"
 
 
-def compute_snapshot(vendor_id: str, client_id, raw_data: dict, today) -> dict:
+def compute_snapshot(vendor_id: str, client_id, raw_data: dict, today, extraction_id=None) -> dict:
     """Compute a coverage snapshot for the detail page.
 
     Returns a dict with client info, per-type status, timeline data, and
     a plain-text 'what changed' summary.
+
+    extraction_id: if provided, policies created from this extraction are excluded
+    from the "existing policies" so that what_changed compares against OTHER certs only.
     """
     base_id = clean_base_id(config.AIRTABLE_BASE_ID)
     api = _api()
@@ -1067,14 +1135,36 @@ def compute_snapshot(vendor_id: str, client_id, raw_data: dict, today) -> dict:
     resolved_client_id = client_id
     client_name = ""
     client_found = False
+    _vrec = None  # cache so we don't fetch vendor record twice
 
     if not resolved_client_id:
-        # Try to find client via vendor's "Client Link" field
+        # Step 1a: vendor's "Client Link" field
         try:
-            vrec = api.table(base_id, VENDORS_TABLE_ID).get(vendor_id)
-            client_links = vrec["fields"].get("Client Link") or []
+            _vrec = api.table(base_id, VENDORS_TABLE_ID).get(vendor_id)
+            client_links = _vrec["fields"].get("Client Link") or []
             if isinstance(client_links, list) and client_links:
                 resolved_client_id = client_links[0]
+        except Exception:
+            pass
+
+    if not resolved_client_id:
+        # Step 1b: Vendor Client Assignments (VCA) — two-step lookup
+        try:
+            if _vrec is None:
+                _vrec = api.table(base_id, VENDORS_TABLE_ID).get(vendor_id)
+            vca_ids = _vrec["fields"].get("Vendor Client Assignments") or []
+            if vca_ids:
+                vca_tbl = api.table(base_id, VCA_TABLE_ID)
+                vca_formula = "AND(OR(" + ", ".join(f"RECORD_ID()='{v}'" for v in vca_ids) + "), {Active})"
+                vca_recs = vca_tbl.all(formula=vca_formula, fields=["Client Link"])
+                for vca in vca_recs:
+                    cl = vca["fields"].get("Client Link") or []
+                    if isinstance(cl, list) and cl:
+                        resolved_client_id = cl[0]
+                        break
+                    elif isinstance(cl, str) and cl:
+                        resolved_client_id = cl
+                        break
         except Exception:
             pass
 
@@ -1111,6 +1201,8 @@ def compute_snapshot(vendor_id: str, client_id, raw_data: dict, today) -> dict:
         required_labels = ["General Liability", "Workers' Comp"]
 
     # ── 3. Existing policies on file for this vendor ────────────────────────
+    # Excludes policies that came from this extraction so what_changed compares
+    # against OTHER certificates only (avoids "no change: same terms" false positive).
     existing_policies = []
     try:
         pol_ids = _get_vendor_policy_ids(vendor_id)
@@ -1119,10 +1211,18 @@ def compute_snapshot(vendor_id: str, client_id, raw_data: dict, today) -> dict:
             formula = "OR(" + ", ".join(f"RECORD_ID()='{p}'" for p in pol_ids) + ")"
             pol_records = pol_tbl.all(
                 formula=formula,
-                fields=["Policy Type", "Policy Number", "Carrier", "Effective Date", "Expiration Date"],
+                fields=["Policy Type", "Policy Number", "Carrier", "Effective Date", "Expiration Date",
+                        "Last Updated From Extraction"],
             )
             for pr in pol_records:
                 pf = pr["fields"]
+                # Skip policies created/updated from this very extraction
+                if extraction_id:
+                    updated_from = pf.get("Last Updated From Extraction") or []
+                    if not isinstance(updated_from, list):
+                        updated_from = [updated_from] if updated_from else []
+                    if extraction_id in updated_from:
+                        continue
                 existing_policies.append({
                     "policy_type":     pf.get("Policy Type") or "",
                     "policy_number":   pf.get("Policy Number") or "",
@@ -1436,9 +1536,46 @@ def queue():
         if r.get("duplicate_match")
     }
 
+    # Clean batch: high-confidence, no flags, pending — eligible for batch confirm
+    batch_clean = [
+        r for r in batch_rows
+        if r["review_status"] in PENDING_SET
+        and r.get("confidence") is not None and r["confidence"] >= 0.95
+        and not any(r["flags"].get(k) for k in (
+            "ai_disagreed", "missing_fields", "surplus_lines", "non_coi",
+            "holder_mismatch", "possible_duplicate",
+        ))
+    ] if chip == "pending" else []
+
     weekly_learnings = _get_weekly_learnings()
     return render_template("queue.html", rows=filtered, chip=chip, counts=counts, batch=batch,
-                           weekly_learnings=weekly_learnings)
+                           weekly_learnings=weekly_learnings, batch_clean=batch_clean)
+
+
+# ── Batch confirm ────────────────────────────────────────────────────────────
+
+@app.route("/batch-confirm", methods=["POST"])
+@login_required
+@csrf_protect
+def batch_confirm():
+    record_ids = request.form.getlist("record_ids")
+    if not record_ids:
+        flash("No certificates selected.", "warning")
+        return redirect(url_for("queue"))
+    table = _ie_table()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    confirmed = 0
+    for rid in record_ids[:50]:  # safety cap
+        try:
+            table.update(rid, {
+                "Review Status": REVIEW_STATUS_AUTO_APPROVED,
+                "Reviewed At": now_iso,
+            }, typecast=True)
+            confirmed += 1
+        except Exception:
+            app.logger.warning("batch_confirm: failed to update %s", rid)
+    flash(f"{confirmed} certificate(s) confirmed.", "success")
+    return redirect(url_for("queue"))
 
 
 # ── Detail ────────────────────────────────────────────────────────────────────
@@ -1527,6 +1664,7 @@ def detail(record_id):
                 client_id=(_mv_clients[0] if isinstance(_mv_clients, list) and _mv_clients else None),
                 raw_data=raw_data,
                 today=date.today(),
+                extraction_id=record_id,
             )
         except Exception:
             app.logger.exception("compute_snapshot failed for %s", _vendor_id)

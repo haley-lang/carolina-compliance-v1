@@ -185,7 +185,13 @@
             {% for type_label, terms in snapshot.timeline.items() %}
             {% if terms %}
             <div class="timeline-row">
-              <span class="timeline-label">{{ type_label[:2].upper() }}</span>
+              <span class="timeline-label">
+                {%- if 'general' in type_label.lower() or type_label.lower().startswith('gl') -%}GL
+                {%- elif 'workers' in type_label.lower() or type_label.lower() == 'wc' -%}WC
+                {%- elif 'auto' in type_label.lower() -%}Auto
+                {%- elif 'umbrella' in type_label.lower() or 'excess' in type_label.lower() -%}Umb
+                {%- else -%}{{ type_label[:3] }}{%- endif -%}
+              </span>
               <div class="timeline-bar-wrap" data-type="{{ type_label }}" data-terms="{{ terms | tojson | e }}">
                 <!-- Rendered by JS -->
               </div>
@@ -1171,12 +1177,12 @@
       e.preventDefault();
       var approve = document.getElementById('btn-approve');
       if (approve) approve.click();
-    } else if (e.key === 'j' || e.key === 'J') {
+    } else if (e.key === 'j' || e.key === 'J' || e.key === 'ArrowRight') {
       {% if next_id %}
       var next = document.getElementById('nav-next');
       if (next && next.tagName === 'A') next.click();
       {% endif %}
-    } else if (e.key === 'k' || e.key === 'K') {
+    } else if (e.key === 'k' || e.key === 'K' || e.key === 'ArrowLeft') {
       {% if prev_id %}
       var prev = document.getElementById('nav-prev');
       if (prev && prev.tagName === 'A') prev.click();

@@ -146,10 +146,15 @@
     {% endfor %}
   </div>
 
+  <!-- Queue table toolbar -->
+  <div class="queue-toolbar mb-8">
+    <button id="btn-group-vendor" class="btn btn-sm btn-secondary" onclick="toggleGroupByVendor()">Group by vendor</button>
+  </div>
+
   <!-- Queue table -->
   <div class="card">
     <div class="table-scroll-wrap">
-    <table class="queue-table" aria-label="Certificate queue">
+    <table class="queue-table" id="queue-table" aria-label="Certificate queue">
       <thead>
         <tr>
           <th>Named Insured</th>
@@ -163,7 +168,7 @@
       </thead>
       <tbody>
       {% for row in rows %}
-      <tr>
+      <tr data-vendor="{{ row.named_insured or '' }}">
         <td class="fw-600">{{ row.named_insured or '—' }}</td>
         <td class="small text-secondary">{{ row.source_filename }}</td>
         <td>
@@ -217,6 +222,132 @@
     </div>
   </div>
 
+  {% if batch_clean %}
+  <!-- Clean batch confirm -->
+  <div class="card mt-24" id="clean-batch-section">
+    <div class="clean-batch-header">
+      <div>
+        <h3 class="clean-batch-title">Clean batch — ready to confirm</h3>
+        <p class="clean-batch-desc">These certificates are 95%+ confidence with no flags. Review the list and confirm in bulk.</p>
+      </div>
+      <button class="btn btn-sm btn-secondary" onclick="toggleCleanBatch()" id="btn-toggle-clean">Hide</button>
+    </div>
+    <form method="post" action="/batch-confirm" id="clean-batch-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <table class="queue-table clean-batch-table" aria-label="Clean batch">
+        <thead>
+          <tr>
+            <th style="width:2.5rem;">
+              <input type="checkbox" id="select-all-clean" aria-label="Select all" onchange="toggleSelectAll(this)">
+            </th>
+            <th>Named Insured</th>
+            <th>File</th>
+            <th>Confidence</th>
+            <th>Policies</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in batch_clean %}
+          <tr>
+            <td><input type="checkbox" name="record_ids" value="{{ row.id }}" class="clean-batch-cb" onchange="updateConfirmCount()"></td>
+            <td class="fw-600">{{ row.named_insured or '—' }}</td>
+            <td class="small text-secondary">{{ row.source_filename }}</td>
+            <td><span class="conf-high">{{ "%.0f"|format(row.confidence * 100) }}%</span></td>
+            <td>{{ row.policies_count }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <div class="clean-batch-footer">
+        <button type="submit" class="btn btn-primary" id="btn-confirm-selected" disabled>
+          Confirm selected (0)
+        </button>
+        <span class="clean-batch-hint">Confirming sets status to Auto-Approved.</span>
+      </div>
+    </form>
+  </div>
+  {% endif %}
+
 </div>
+
+<script>
+/* ── Group by vendor ─────────────────────────────────────────────── */
+var _grouped = false;
+var _origOrder = null;
+
+function toggleGroupByVendor() {
+  var btn = document.getElementById('btn-group-vendor');
+  var tbody = document.querySelector('#queue-table tbody');
+  if (!tbody) return;
+
+  if (!_grouped) {
+    // Save original row order
+    _origOrder = Array.from(tbody.rows);
+
+    // Build vendor → rows map (preserve within-vendor order)
+    var vendorMap = {};
+    var vendorOrder = [];
+    _origOrder.forEach(function(row) {
+      var v = row.dataset.vendor || '';
+      if (!vendorMap[v]) { vendorMap[v] = []; vendorOrder.push(v); }
+      vendorMap[v].push(row);
+    });
+
+    // Re-append rows grouped, with a separator row between vendors
+    tbody.innerHTML = '';
+    vendorOrder.forEach(function(v, vi) {
+      if (vi > 0) {
+        var sep = document.createElement('tr');
+        sep.className = 'vendor-group-sep';
+        sep.innerHTML = '<td colspan="7" style="height:2px;background:var(--border-light);padding:0;"></td>';
+        tbody.appendChild(sep);
+      }
+      vendorMap[v].forEach(function(r) { tbody.appendChild(r); });
+    });
+
+    _grouped = true;
+    btn.textContent = 'Ungroup';
+    btn.classList.add('btn-primary');
+    btn.classList.remove('btn-secondary');
+  } else {
+    // Restore original order
+    tbody.innerHTML = '';
+    if (_origOrder) _origOrder.forEach(function(r) { tbody.appendChild(r); });
+    _grouped = false;
+    btn.textContent = 'Group by vendor';
+    btn.classList.add('btn-secondary');
+    btn.classList.remove('btn-primary');
+  }
+}
+
+/* ── Clean batch ─────────────────────────────────────────────────── */
+function toggleSelectAll(cb) {
+  document.querySelectorAll('.clean-batch-cb').forEach(function(c) { c.checked = cb.checked; });
+  updateConfirmCount();
+}
+
+function updateConfirmCount() {
+  var n = document.querySelectorAll('.clean-batch-cb:checked').length;
+  var btn = document.getElementById('btn-confirm-selected');
+  if (btn) {
+    btn.disabled = (n === 0);
+    btn.textContent = 'Confirm selected (' + n + ')';
+  }
+  var allCbs = document.querySelectorAll('.clean-batch-cb');
+  var allChecked = allCbs.length > 0 && Array.from(allCbs).every(function(c) { return c.checked; });
+  var selAll = document.getElementById('select-all-clean');
+  if (selAll) selAll.checked = allChecked;
+}
+
+var _cleanBatchVisible = true;
+function toggleCleanBatch() {
+  var form = document.getElementById('clean-batch-form');
+  var btn  = document.getElementById('btn-toggle-clean');
+  if (!form) return;
+  _cleanBatchVisible = !_cleanBatchVisible;
+  form.style.display = _cleanBatchVisible ? '' : 'none';
+  btn.textContent = _cleanBatchVisible ? 'Hide' : 'Show';
+}
+</script>
 </body>
 </html>
