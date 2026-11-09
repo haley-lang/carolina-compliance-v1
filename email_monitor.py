@@ -269,13 +269,21 @@ def fetch_unread_emails(server: IMAPClient) -> list[dict]:
 
             for part in msg.walk():
                 content_disposition = part.get_content_disposition() or ""
-                if "attachment" not in content_disposition:
+                filename = part.get_filename()
+
+                # Accept explicit attachments and inline parts that carry a
+                # filename. Gmail delivers forwarded image attachments as
+                # Content-Disposition: inline when the original sender embedded
+                # them in the email body; without this, every forwarded image
+                # COI is silently dropped as no_attachment.
+                is_explicit_attachment = "attachment" in content_disposition
+                is_inline_file = "inline" in content_disposition and bool(filename)
+                if not is_explicit_attachment and not is_inline_file:
                     continue
 
                 found_attachment = True
                 print("[email_monitor] Attachment found: True")
 
-                filename = part.get_filename()
                 if not filename:
                     continue
 
@@ -286,6 +294,10 @@ def fetch_unread_emails(server: IMAPClient) -> list[dict]:
 
                 if ext not in config.ALLOWED_EXTENSIONS:
                     logger.debug("Skipping non-COI attachment: %s", filename)
+                    continue
+
+                if re.search(r"\bw[\-_ ]?9\b", filename, re.IGNORECASE):
+                    print(f"[email_monitor] Skipping W-9 attachment: {filename}")
                     continue
 
                 safe_name = safe_filename(filename)
@@ -550,6 +562,74 @@ if __name__ == "__main__":
                         print(f"[email_monitor] Ladder {_matched_ladder} halted by response from {entry['sender']}")
                 except Exception as _exc:
                     print(f"[email_monitor] Ladder response check failed: {_exc}")
+
+                # ── Thread key matching: log inbound reply to Email Messages ──
+                # Look for [CCS-XXXX] in subject or body. If found, mark the
+                # matching outbound EM record "Reply received", create an Inbound
+                # record for audit, and cancel pending follow-up EQ records.
+                _subj_for_thread = entry.get("subject") or ""
+                _body_for_thread = (_extract_body_text(entry["msg"]) or "")[:8000]
+                _tk_match = re.search(r'\[CCS-([A-F0-9]{4})\]', _subj_for_thread) or \
+                            re.search(r'\[CCS-([A-F0-9]{4})\]', _body_for_thread)
+                if _tk_match:
+                    _tk = "CCS-" + _tk_match.group(1)
+                    try:
+                        from pyairtable import Api as _PATApi
+                        import config as _pcfg
+                        _pat_api = _PATApi(_pcfg.AIRTABLE_API_KEY)
+                        _em_tbl  = _pat_api.table(_pcfg.AIRTABLE_BASE_ID, "tblE5WKGwLF6eHLwA")
+                        _orig_em = _em_tbl.first(
+                            formula=f"AND({{Thread Key}}='{_tk}',{{Direction}}!='Inbound')"
+                        )
+                        if _orig_em:
+                            from datetime import datetime as _dt2, timezone as _tz2
+                            _now_iso2 = _dt2.now(_tz2.utc).isoformat()
+                            _of = _orig_em["fields"]
+                            # Mark the original outbound record
+                            if (_of.get("Status") or "") not in ("Reply received", "Closed"):
+                                _em_tbl.update(_orig_em["id"], {"Status": "Reply received"})
+                            # Create an inbound record for audit trail
+                            _ib_fields = {
+                                "Direction":  "Inbound",
+                                "Status":     "Reply received",
+                                "Thread Key": _tk,
+                                "Subject":    _subj_for_thread,
+                                "Body":       _body_for_thread[:5000],
+                                "To":         entry.get("sender") or "",
+                                "Sent At":    _now_iso2,
+                            }
+                            if _of.get("Vendor"):
+                                _ib_fields["Vendor"] = _of["Vendor"]
+                            if _of.get("Client"):
+                                _ib_fields["Client"] = _of["Client"]
+                            if _of.get("Linked Gap Request"):
+                                _ib_fields["Linked Gap Request"] = _of["Linked Gap Request"]
+                            _em_tbl.create(_ib_fields)
+                            # Cancel pending follow-up EQ records linked to gap requests
+                            _gap_ids = _of.get("Linked Gap Request") or []
+                            if _gap_ids:
+                                _gap_tbl = _pat_api.table(_pcfg.AIRTABLE_BASE_ID, "tbleY5UzcLYZFZFKF")
+                                _eq_tbl2 = _pat_api.table(_pcfg.AIRTABLE_BASE_ID, "tblCeRCf6RToTFkbL")
+                                for _gid in _gap_ids:
+                                    try:
+                                        _gr = _gap_tbl.get(_gid)
+                                        _eq_ids_raw = (_gr["fields"].get("EQ IDs") or "").strip()
+                                        if _eq_ids_raw:
+                                            for _eq_id in _eq_ids_raw.splitlines():
+                                                _eq_id = _eq_id.strip()
+                                                if _eq_id:
+                                                    _eq_tbl2.update(_eq_id, {"Reminder Status": "Cancelled"})
+                                        # Mark the gap request as reply received
+                                        _gap_tbl.update(_gid, {
+                                            "Cadence Status": "Reply received",
+                                        })
+                                    except Exception as _gex:
+                                        print(f"[email_monitor] EQ cancel failed for gap {_gid}: {_gex}")
+                            print(f"[email_monitor] Thread {_tk}: reply logged from {entry.get('sender')}")
+                        else:
+                            print(f"[email_monitor] Thread key {_tk} in email but no matching EM record found")
+                    except Exception as _tm_exc:
+                        print(f"[email_monitor] Thread matching failed for key {_tk}: {_tm_exc}")
 
                 if classification.should_skip:
                     print(f"[email_monitor] Email classified as {classification.event_type} — skipping extraction")

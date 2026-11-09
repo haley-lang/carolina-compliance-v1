@@ -19,8 +19,10 @@
   <div class="topnav-links">
     <a href="/queue" class="nav-link">← Queue</a>
     <a href="/gaps" class="nav-link">Gaps</a>
+    <a href="/requests" class="nav-link">Requests</a>
     <a href="/audit" class="nav-link">Audit Pack</a>
     <a href="/corrections" class="nav-link">Corrections</a>
+    <a href="/emails" class="nav-link">Emails{% set _ec = email_draft_count() %}{% if _ec > 0 %}<span class="nav-badge">{{ _ec }}</span>{% endif %}</a>
     {% if airtable_url %}
     <a href="{{ airtable_url }}" class="nav-link" target="_blank" rel="noopener">Open in Airtable ↗</a>
     {% endif %}
@@ -397,6 +399,31 @@
         </div>
         {% endif %}
 
+        <!-- Draft email about this certificate -->
+        {% if primary_issues or secondary_issues %}
+        <div class="mb-16">
+          <button type="button" class="btn btn-sm btn-secondary"
+                  onclick="toggleDraftEmailPanel()"
+                  id="btn-draft-email">Draft email about this</button>
+          <div id="draft-email-panel" style="display:none;margin-top:12px" class="card">
+            <div class="card-body" style="padding:14px 18px">
+              <p class="small text-secondary mb-8">Summarize what needs to change and an email draft will be created for you in the Emails tab.</p>
+              <textarea id="draft-email-issue" class="field-input" rows="3"
+                        placeholder="e.g. Certificate expired on 10/31 — needs renewal for GL and WC"></textarea>
+              <div class="d-flex gap-8 mt-8">
+                <button type="button" class="btn btn-sm btn-primary"
+                        onclick="createProblemDraft('{{ record_id }}', '{{ vendor_id }}')">
+                  Create draft
+                </button>
+                <button type="button" class="btn btn-sm btn-secondary"
+                        onclick="toggleDraftEmailPanel()">Cancel</button>
+              </div>
+              <div id="draft-email-result" style="display:none;margin-top:8px" class="small"></div>
+            </div>
+          </div>
+        </div>
+        {% endif %}
+
         <!-- "What we read" — the key fields Haley actually decides on -->
         <span class="section-label">WHAT WE READ</span>
         <div class="card mb-16">
@@ -407,6 +434,17 @@
                 <span class="summary-key">Named insured</span>
                 <span class="summary-val">{{ raw_data.get('named_insured') or '—' }}</span>
               </div>
+
+              {% if received_at %}
+              <div class="summary-row">
+                <span class="summary-key">Received</span>
+                <span class="summary-val">
+                  {{ received_at | fmt_received_long }}
+                  {% set _age = age_tag(received_at) %}
+                  {% if _age.label %}<span class="age-tag age-tag--{{ _age.level }}" style="margin-left:6px">{{ _age.label }}</span>{% endif %}
+                </span>
+              </div>
+              {% endif %}
 
               <div class="summary-row">
                 <span class="summary-key">Contact email</span>
@@ -1192,6 +1230,39 @@
     }
   });
 }());
+</script>
+<script>
+function toggleDraftEmailPanel() {
+  var panel = document.getElementById('draft-email-panel');
+  if (!panel) return;
+  panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+}
+function createProblemDraft(recordId, vendorId) {
+  var issue = (document.getElementById('draft-email-issue') || {}).value || '';
+  var csrf  = document.querySelector('input[name="csrf_token"]').value;
+  var body  = new FormData();
+  body.append('csrf_token',    csrf);
+  body.append('record_id',     recordId);
+  body.append('vendor_id',     vendorId);
+  body.append('issue_summary', issue);
+  var btn = document.querySelector('#draft-email-panel .btn-primary');
+  if (btn) { btn.disabled = true; btn.textContent = 'Creating…'; }
+  fetch('/emails/create-problem-draft', {method: 'POST', body: body})
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      var res = document.getElementById('draft-email-result');
+      if (d.ok) {
+        if (res) {
+          res.style.display = 'block';
+          res.innerHTML = '✓ Draft created. <a href="/emails" target="_blank">View in Emails ↗</a>';
+        }
+        if (btn) { btn.textContent = 'Created'; }
+      } else {
+        if (btn) { btn.disabled = false; btn.textContent = 'Create draft'; }
+        alert('Error: ' + (d.error || 'unknown'));
+      }
+    });
+}
 </script>
 </body>
 </html>

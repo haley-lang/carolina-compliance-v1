@@ -110,7 +110,8 @@ def load_json_safe(path: Path) -> dict:
 def build_fields(source_filename: str, data: dict, raw_json: str,
                  is_possible_duplicate: bool = False,
                  second_read=None,
-                 ai_disagreements=None) -> dict:
+                 ai_disagreements=None,
+                 received_at: str = None) -> dict:
     """Map extracted JSON fields to Airtable field names.
 
     is_possible_duplicate: passed by caller after check_duplicate_extraction
@@ -173,6 +174,17 @@ def build_fields(source_filename: str, data: dict, raw_json: str,
         "Review Status": review_status,
         "Review Reason": review_reason,
     }
+    if received_at:
+        fields["Received At"] = received_at
+    # Producer contact fields — optional, only write when present
+    for key, field in [
+        ("producer_name",   "Producer Name"),
+        ("producer_agency", "Producer Agency"),
+        ("producer_phone",  "Producer Phone"),
+    ]:
+        val = data.get(key)
+        if val:
+            fields[field] = str(val)
     if second_read_json is not None:
         fields[SECOND_READ_JSON_FIELD_ID] = second_read_json
     if ai_disagrees_str is not None:
@@ -292,6 +304,21 @@ def _import_single_file(json_path: Path, base_id: str, token: str) -> dict:
             json_path.name, _dup_exc,
         )
 
+    # Look up the email arrival date from Incoming Documents so we can store it
+    # on the extraction for queue sorting and pace metrics.
+    received_at: str = ""
+    try:
+        from pyairtable import Api as _Api2
+        _doc_tbl = _Api2(token).table(base_id, "Incoming Documents")
+        stem = json_path.stem  # e.g. "some_coi" from "some_coi.json"
+        _safe_stem = stem.replace("'", "\\'")
+        _doc_rec = _doc_tbl.first(formula=f"FIND('{_safe_stem}', {{File Names}}) > 0")
+        if _doc_rec:
+            received_at = (_doc_rec["fields"].get("Date Received") or "").strip()
+            logger.info("Linked to Incoming Document — Date Received: %s", received_at or "(blank)")
+    except Exception as _dr_exc:
+        logger.warning("Date Received lookup failed for %s (non-fatal): %s", json_path.name, _dr_exc)
+
     # Strip two-read metadata before building Raw JSON; pass them separately
     # so downstream code reading Raw JSON never sees underscore keys.
     second_read = data.get("_second_read")
@@ -300,7 +327,8 @@ def _import_single_file(json_path: Path, base_id: str, token: str) -> dict:
     raw_json = json.dumps(clean_data, indent=2)
     fields = build_fields(json_path.name, clean_data, raw_json,
                           is_possible_duplicate=is_possible_duplicate,
-                          second_read=second_read, ai_disagreements=ai_disagrees)
+                          second_read=second_read, ai_disagreements=ai_disagrees,
+                          received_at=received_at or None)
 
     logger.info("Creating record in Airtable table '%s'...", INCOMING_EXTRACTIONS_TABLE)
     record = push_to_airtable(base_id, token, fields)

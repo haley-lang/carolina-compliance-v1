@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CCS — Certificate Requests</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='ccs_icon.svg') }}">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='review.css') }}">
+  <style>
+    .page-title { font-family:var(--font-serif); font-size:1.7rem; margin-bottom:24px; color:var(--navy); }
+    .client-selector select { padding:8px 12px; border:1.5px solid var(--border); border-radius:7px;
+                               font-size:0.9rem; font-family:var(--font-sans); cursor:pointer; }
+    .req-table { width:100%; border-collapse:collapse; font-size:0.88rem; }
+    .req-table th { text-align:left; padding:8px 12px; border-bottom:2px solid var(--border);
+                    font-size:0.78rem; font-weight:700; color:var(--secondary); text-transform:uppercase; }
+    .req-table td { padding:8px 12px; border-bottom:1px solid var(--border); vertical-align:middle; }
+    .req-table tr:last-child td { border-bottom:none; }
+    .req-table tr:hover td { background:#f8f9fa; }
+    .cadence-badge { display:inline-block; padding:2px 9px; border-radius:12px; font-size:0.75rem; font-weight:700; }
+    .cb-draft          { background:#e9ecef; color:#495057; }
+    .cb-sent           { background:#cfe2ff; color:#084298; }
+    .cb-day4-due       { background:#fff3cd; color:#664d03; }
+    .cb-day4-drafted   { background:#d1ecf1; color:#0c5460; }
+    .cb-day8-due       { background:#ffe5d0; color:#7d3c00; }
+    .cb-day8-drafted   { background:#d1ecf1; color:#0c5460; }
+    .cb-day14          { background:#f8d7da; color:#842029; }
+    .cb-day21          { background:#e9d8fd; color:#3d0066; }
+    .cb-no-response    { background:#f8d7da; color:#842029; }
+    .cb-closed         { background:#d1e7dd; color:#0a3622; }
+    .overdue-flag      { color:#dc3545; font-weight:700; font-size:0.8rem; }
+    .due-soon-flag     { color:#856404; font-weight:700; font-size:0.8rem; }
+    .action-btns { display:flex; gap:6px; flex-wrap:wrap; }
+    .draft-preview { background:#f8f9fa; border:1px solid var(--border); border-radius:6px;
+                     padding:12px; font-size:0.83rem; font-family:monospace; line-height:1.5;
+                     white-space:pre-wrap; max-height:280px; overflow-y:auto; margin-top:10px; display:none; }
+    .contact-chip { display:inline-flex; align-items:center; gap:4px; font-size:0.82rem; color:var(--secondary); }
+    .contact-chip a { color:inherit; }
+    .no-results { font-size:0.9rem; color:var(--secondary); padding:24px 0; text-align:center; }
+    .filter-bar { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:20px; align-items:center; }
+    .filter-bar a { padding:5px 14px; border-radius:20px; font-size:0.82rem; font-weight:600;
+                    border:1.5px solid var(--border); background:#fff; color:var(--navy);
+                    text-decoration:none; transition:all 0.12s; }
+    .filter-bar a:hover, .filter-bar a.active { background:var(--navy); color:#fff; border-color:var(--navy); }
+    .stat-num  { font-family:var(--font-serif); font-size:2.1rem; color:#fff; }
+    .stat-label { font-size:0.78rem; color:rgba(255,255,255,0.65); font-weight:600;
+                  text-transform:uppercase; letter-spacing:0.04em; }
+  </style>
+</head>
+<body>
+
+<nav class="topnav">
+  <a href="/queue" class="topnav-logo" aria-label="Carolina Compliance Solutions">
+    <img src="{{ url_for('static', filename='ccs_logo_dark.svg') }}" alt="CCS">
+  </a>
+  <div class="topnav-links">
+    <a href="/queue" class="nav-link">Queue</a>
+    <a href="/gaps" class="nav-link">Gaps</a>
+    <a href="/requests" class="nav-link active">Requests</a>
+    <a href="/audit" class="nav-link">Audit Pack</a>
+    <a href="/corrections" class="nav-link">Corrections</a>
+    <a href="/emails" class="nav-link">Emails{% set _ec = email_draft_count() %}{% if _ec > 0 %}<span class="nav-badge">{{ _ec }}</span>{% endif %}</a>
+    <a href="/logout" class="btn btn-gold btn-sm">Sign out</a>
+  </div>
+</nav>
+
+<div class="page-wrap">
+
+  <h1 class="page-title">Certificate Requests — {{ client_name }}</h1>
+
+  <!-- Client selector -->
+  <div class="mb-24">
+    <span class="section-label">CLIENT</span>
+    <div class="mt-8">
+      <select onchange="window.location='/requests?client_id='+this.value+'&filter={{ status_filter }}'">
+        {% for c in clients %}
+        <option value="{{ c.id }}" {% if c.id == client_id %}selected{% endif %}>{{ c.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+  </div>
+
+  <!-- Stats band -->
+  <div class="stats-band" role="region" aria-label="Request summary">
+    <div class="stat-item">
+      <span class="stat-num">{{ stat_open }}</span>
+      <span class="stat-label">open</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-num">{{ stat_overdue }}</span>
+      <span class="stat-label">overdue</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-num">{{ stat_no_response }}</span>
+      <span class="stat-label">no response</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-num">{{ stat_draft }}</span>
+      <span class="stat-label">drafts</span>
+    </div>
+  </div>
+
+  <!-- Filter bar -->
+  <div class="filter-bar">
+    <span class="section-label" style="align-self:center">FILTER</span>
+    <a href="?client_id={{ client_id }}&filter=active"      class="{% if status_filter == 'active' %}active{% endif %}">Active</a>
+    <a href="?client_id={{ client_id }}&filter=overdue"     class="{% if status_filter == 'overdue' %}active{% endif %}">Overdue</a>
+    <a href="?client_id={{ client_id }}&filter=drafts"      class="{% if status_filter == 'drafts' %}active{% endif %}">Drafts</a>
+    <a href="?client_id={{ client_id }}&filter=no_response" class="{% if status_filter == 'no_response' %}active{% endif %}">No response</a>
+    <a href="?client_id={{ client_id }}&filter=all"         class="{% if status_filter == 'all' %}active{% endif %}">All</a>
+  </div>
+
+  <!-- Requests table -->
+  <div class="card">
+    <div class="table-scroll-wrap">
+    <table class="req-table">
+      <thead>
+        <tr>
+          <th>Sub / Coverage</th>
+          <th>Contact</th>
+          <th>Status</th>
+          <th>Next due</th>
+          <th>First requested</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for row in rows %}
+      <tr>
+        <td>
+          <div class="fw-600">{{ row.vendor_name }}</div>
+          <div class="small text-secondary">{{ row.coverage_type }}</div>
+          {% if row.gap_start or row.gap_end %}
+          <div class="small text-secondary">
+            {{ row.gap_start | fmt_date if row.gap_start else '—' }}
+            {% if row.gap_end %} – {{ row.gap_end | fmt_date }}{% endif %}
+          </div>
+          {% endif %}
+        </td>
+        <td>
+          {% if row.contact_email %}
+          <div class="contact-chip">
+            <a href="mailto:{{ row.contact_email }}">{{ row.contact_name or row.contact_email }}</a>
+          </div>
+          {% if row.contact_phone %}
+          <div class="small text-secondary">{{ row.contact_phone }}</div>
+          {% endif %}
+          {% else %}
+          <span class="text-secondary small">No contact</span>
+          {% endif %}
+        </td>
+        <td>
+          {% set cs = row.cadence_status %}
+          <span class="cadence-badge
+            {% if cs == 'Draft' %}cb-draft
+            {% elif 'Awaiting' in cs %}cb-sent
+            {% elif cs == 'Day 4 Due' %}cb-day4-due
+            {% elif cs == 'Day 4 Drafted' %}cb-day4-drafted
+            {% elif cs == 'Day 8 Due' %}cb-day8-due
+            {% elif cs == 'Day 8 Drafted' %}cb-day8-drafted
+            {% elif 'Day 14' in cs %}cb-day14
+            {% elif 'Day 21' in cs %}cb-day21
+            {% elif cs == 'No Response' %}cb-no-response
+            {% elif 'Closed' in cs %}cb-closed
+            {% else %}cb-draft{% endif %}">
+            {{ cs }}
+          </span>
+        </td>
+        <td>
+          {% if row.next_due %}
+            {% if row.days_until is not none and row.days_until < 0 %}
+              <span class="overdue-flag">{{ row.next_due | fmt_date }} ({{ row.days_until | abs }}d overdue)</span>
+            {% elif row.days_until is not none and row.days_until <= 2 %}
+              <span class="due-soon-flag">{{ row.next_due | fmt_date }} ({{ row.days_until }}d)</span>
+            {% else %}
+              {{ row.next_due | fmt_date }}
+            {% endif %}
+          {% else %}—{% endif %}
+        </td>
+        <td class="small text-secondary">{{ row.requested_on | fmt_date if row.requested_on else '—' }}</td>
+        <td>
+          <div class="action-btns">
+            {% if row.draft_body %}
+            <button class="btn btn-sm btn-secondary btn-preview"
+                    data-id="{{ row.id }}"
+                    data-body="{{ row.draft_body | e }}">
+              Preview
+            </button>
+            {% endif %}
+            {% if row.cadence_status == 'Draft' or row.cadence_status == 'Email Drafted' %}
+            <button class="btn btn-sm btn-primary btn-mark-sent"
+                    data-id="{{ row.id }}"
+                    data-csrf="{{ csrf_token() }}">
+              Mark sent
+            </button>
+            {% endif %}
+            {% if 'Closed' not in row.cadence_status %}
+            <button class="btn btn-sm btn-secondary btn-close-req"
+                    data-id="{{ row.id }}"
+                    data-csrf="{{ csrf_token() }}">
+              Close
+            </button>
+            {% endif %}
+          </div>
+          <div class="draft-preview" id="preview-{{ row.id }}">{{ row.draft_body }}</div>
+        </td>
+      </tr>
+      {% endfor %}
+      {% if not rows %}
+      <tr>
+        <td colspan="6">
+          <div class="no-results">No requests match this filter.</div>
+        </td>
+      </tr>
+      {% endif %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+
+</div><!-- /page-wrap -->
+
+<script>
+(function () {
+  document.addEventListener('click', function (e) {
+
+    // Preview toggle
+    var btn = e.target.closest('.btn-preview');
+    if (btn) {
+      var id  = btn.dataset.id;
+      var pre = document.getElementById('preview-' + id);
+      if (pre) {
+        var visible = pre.style.display === 'block';
+        pre.style.display = visible ? 'none' : 'block';
+        btn.textContent = visible ? 'Preview' : 'Hide';
+      }
+      return;
+    }
+
+    // Mark sent
+    var ms = e.target.closest('.btn-mark-sent');
+    if (ms) {
+      ms.disabled = true;
+      ms.textContent = 'Saving…';
+      var fd = new FormData();
+      fd.append('csrf_token', ms.dataset.csrf);
+      fetch('/requests/' + ms.dataset.id + '/mark-sent', { method: 'POST', body: fd })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (d.ok) {
+            ms.textContent = 'Sent ✓';
+            ms.classList.remove('btn-primary');
+            ms.classList.add('btn-secondary');
+            location.reload();
+          } else {
+            ms.textContent = 'Error';
+            ms.disabled = false;
+          }
+        })
+        .catch(function () { ms.textContent = 'Error'; ms.disabled = false; });
+      return;
+    }
+
+    // Close
+    var cl = e.target.closest('.btn-close-req');
+    if (cl) {
+      if (!confirm('Close this request? This will cancel any pending follow-up drafts.')) return;
+      cl.disabled = true;
+      cl.textContent = 'Closing…';
+      var fd2 = new FormData();
+      fd2.append('csrf_token', cl.dataset.csrf);
+      fetch('/requests/' + cl.dataset.id + '/close', { method: 'POST', body: fd2 })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (d.ok) { location.reload(); }
+          else { cl.textContent = 'Error'; cl.disabled = false; }
+        })
+        .catch(function () { cl.textContent = 'Error'; cl.disabled = false; });
+    }
+  });
+}());
+</script>
+</body>
+</html>
