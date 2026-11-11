@@ -45,9 +45,10 @@ TO_ADDRESS         = "rtr-import@carolinacompliancesolutions.com"
 IMPORT_TAGS        = ["RTR"]
 EXTERNAL_ID_PREFIX = "ccs-rtr-"
 
-SPLIT_DIR    = Path("/Users/haleybridges/Desktop/RTR Construction LLC/Split Certificates")
-INDEX_CSV    = SPLIT_DIR / "index.csv"
-LEDGER_PATH  = Path(__file__).parent / "front_imported.json"
+SPLIT_DIR     = Path("/Users/haleybridges/Desktop/RTR Construction LLC/Split Certificates")
+INDEX_CSV     = SPLIT_DIR / "index.csv"
+LEDGER_PATH   = Path(__file__).parent / "front_imported.json"
+METADATA_CSV  = SPLIT_DIR / "cert_metadata.csv"
 
 
 # ── Safety guards (raise on violation — tested explicitly) ────────────────────
@@ -104,6 +105,18 @@ def _require_not_a_channel(addresses: list[str], token: str) -> None:
             )
 
 
+# ── Certificate metadata (subject lines) ─────────────────────────────────────
+
+def load_cert_metadata(path: Path = METADATA_CSV) -> dict[str, dict]:
+    """Return {split_filename: {"subject": str, "note": str}} from cert_metadata.csv."""
+    if not path.exists():
+        return {}
+    result: dict[str, dict] = {}
+    for row in csv.DictReader(open(path)):
+        result[row["split_filename"]] = {"subject": row["subject"], "note": row.get("note", "")}
+    return result
+
+
 # ── Index loading + deduplication ─────────────────────────────────────────────
 
 def load_eligible_rows(index_csv: Path = INDEX_CSV) -> list[dict]:
@@ -157,10 +170,11 @@ def save_ledger(ledger: dict, path: Path = LEDGER_PATH) -> None:
 
 # ── Message construction ──────────────────────────────────────────────────────
 
-def build_message(row: dict) -> dict:
+def build_message(row: dict, cert_metadata: dict | None = None) -> dict:
     """Return a dict describing one import payload (no HTTP yet)."""
-    stem       = Path(row["split_filename"]).stem   # e.g. COI_forms_p01
-    subject    = f"Certificate - {stem}"
+    fn = row["split_filename"]
+    meta = (cert_metadata or {}).get(fn, {})
+    subject = meta.get("subject") or f"COI - Unreadable - review"
     # Body contains only structural metadata — no vendor names
     body = (
         f"Source file: {row['source_filename']}  |  "
@@ -259,7 +273,10 @@ def verify_imports(imported_results: list[dict], token: str) -> None:
     headers = {"Authorization": f"Bearer {token}"}
 
     subjects_to_check = {
-        r["split_filename"]: f"Certificate - {Path(r['split_filename']).stem}"
+        r["split_filename"]: (
+            r.get("subject")
+            or f"Certificate - {Path(r['split_filename']).stem}"
+        )
         for r in imported_results
         if r.get("status") == "imported"
     }
@@ -498,8 +515,9 @@ def run(
         _require_not_a_channel([SENDER_HANDLE, TO_ADDRESS], token)
         print(f"  ✓ {SENDER_HANDLE} is not a channel address")
 
-    eligible = load_eligible_rows(index_csv)
-    ledger   = load_ledger(ledger_path)
+    eligible      = load_eligible_rows(index_csv)
+    ledger        = load_ledger(ledger_path)
+    cert_metadata = load_cert_metadata()
 
     if files_filter is not None:
         allowed = set(files_filter)
@@ -515,7 +533,20 @@ def run(
     results: list[dict] = []
 
     for row in eligible:
-        msg = build_message(row)
+        # Skip semantic duplicates (same cert content, different PDF page)
+        fn   = row["split_filename"]
+        meta = cert_metadata.get(fn, {})
+        note = meta.get("note", "")
+        if note.startswith("semantic_duplicate"):
+            print(f"  [SKIP semantic_dup] {fn} — {note}")
+            results.append({
+                "split_filename": fn,
+                "status": "semantic_duplicate",
+                "note": note,
+            })
+            continue
+
+        msg    = build_message(row, cert_metadata)
         ext_id = msg["external_id"]
 
         if ext_id in ledger:
@@ -541,6 +572,7 @@ def run(
                 results.append({
                     "split_filename": row["split_filename"],
                     "status": "imported",
+                    "subject": msg["subject"],
                     "front_response": resp,
                 })
             except Exception as exc:

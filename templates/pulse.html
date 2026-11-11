@@ -1,0 +1,726 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CCS — System Pulse</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='ccs_icon.svg') }}">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='review.css') }}">
+  <style>
+    /* Inline supplement — these classes are defined in pulse_css_snippet.css;
+       duplicate here so the page works standalone before you merge the CSS. */
+    .banner-pulse{display:flex;align-items:center;gap:10px;padding:10px 32px;font-size:.84rem;font-weight:600;line-height:1.4;position:sticky;top:68px;z-index:190;border-bottom:1px solid transparent}
+    .banner-pulse a{text-decoration:underline;color:inherit;opacity:.85}
+    .banner-pulse--ok{background:#d4edda;color:#1a5e2d;border-color:#b8dfc8}
+    .banner-pulse--warn{background:#fff3cd;color:#7a5200;border-color:#fce08a}
+    .banner-pulse--error{background:#ffe8e8;color:#9b1a1a;border-color:#f5c6c6}
+    .status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;flex-shrink:0;vertical-align:middle;margin-right:5px;margin-top:-1px}
+    .status-dot--green{background:#22c55e}.status-dot--amber{background:#f59e0b}.status-dot--red{background:#ef4444}
+    .status-row{display:flex;align-items:center;gap:6px;padding:5px 0;font-size:.88rem;border-bottom:1px solid var(--border)}
+    .status-row:last-child{border-bottom:none}
+    .status-row-label{flex:1;color:var(--navy);font-weight:500}
+    .status-row-value{color:var(--secondary);font-size:.84rem;white-space:nowrap}
+    .pulse-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:24px}
+    .pulse-section--full{grid-column:1/-1}
+    .pulse-section{background:#fff;border:1px solid var(--border);border-radius:8px;box-shadow:0 1px 5px rgba(16,32,66,.06);overflow:hidden}
+    .pulse-section-header{display:flex;align-items:center;justify-content:space-between;padding:10px 18px 8px;background:var(--offwhite);border-bottom:1px solid var(--border);gap:8px}
+    .pulse-section-title{font-size:.68rem;font-weight:700;letter-spacing:.15em;text-transform:uppercase;color:var(--blue);margin:0}
+    .pulse-section-status{display:flex;align-items:center;gap:5px;font-size:.78rem;font-weight:600;white-space:nowrap}
+    .pulse-section-status--ok{color:#15803d}.pulse-section-status--warn{color:#92600a}.pulse-section-status--error{color:#b03a2e}
+    .pulse-section-body{padding:14px 18px}
+    .pulse-bar-wrap{height:10px;background:var(--bg);border-radius:5px;overflow:hidden;margin:6px 0}
+    .pulse-bar-fill{height:100%;border-radius:5px;transition:width .3s ease}
+    .pulse-bar-fill--ok{background:#22c55e}.pulse-bar-fill--warn{background:#f59e0b}.pulse-bar-fill--error{background:#ef4444}
+    .pulse-bar-label{display:flex;justify-content:space-between;font-size:.78rem;color:var(--secondary);margin-top:3px}
+    .pulse-bar-label strong{color:var(--navy)}
+    .pulse-table{width:100%;border-collapse:collapse;font-size:.84rem}
+    .pulse-table th{background:var(--offwhite);font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--secondary);padding:6px 10px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap}
+    .pulse-table td{padding:7px 10px;border-bottom:1px solid var(--border);vertical-align:middle}
+    .pulse-table tr:last-child td{border-bottom:none}
+    .pulse-table tbody tr:hover td{background:#faf9f7}
+    .pulse-table .num{text-align:right;font-variant-numeric:tabular-nums}
+    .pulse-metric-row{display:flex;gap:0;margin-bottom:14px}
+    .pulse-metric{flex:1;display:flex;flex-direction:column;gap:2px;padding-right:16px;border-right:1px solid var(--border);margin-right:16px}
+    .pulse-metric:last-child{border-right:none;margin-right:0;padding-right:0}
+    .pulse-metric-num{font-family:var(--font-serif);font-size:2rem;color:var(--navy);line-height:1.1}
+    .pulse-metric-num--warn{color:#92600a}.pulse-metric-num--error{color:#b03a2e}
+    .pulse-metric-label{font-size:.72rem;color:var(--secondary);text-transform:uppercase;letter-spacing:.05em;font-weight:600}
+    .pulse-skipped-item{border:1px solid var(--border);border-radius:7px;padding:10px 14px;margin-bottom:8px;background:#fff}
+    .pulse-skipped-item:last-child{margin-bottom:0}
+    .pulse-skipped-subject{font-weight:600;font-size:.88rem;color:var(--navy);margin-bottom:2px}
+    .pulse-skipped-meta{font-size:.78rem;color:var(--secondary);margin-bottom:8px}
+    .pulse-skipped-reason{display:inline-block;font-size:.72rem;font-weight:600;background:var(--offwhite);border:1px solid var(--border);border-radius:4px;padding:1px 7px;color:var(--secondary);margin-bottom:8px}
+    .pulse-skipped-actions{display:flex;gap:8px;flex-wrap:wrap}
+    .pulse-stuck-item{padding:7px 0;border-bottom:1px solid var(--border);font-size:.84rem}
+    .pulse-stuck-item:last-child{border-bottom:none}
+    .pulse-stuck-filename{font-weight:600;color:var(--navy)}
+    .pulse-stuck-meta{font-size:.78rem;color:var(--secondary);margin-top:2px}
+    .pulse-stuck-error{font-size:.75rem;color:#b03a2e;margin-top:3px;font-style:italic}
+    .pulse-error-list{list-style:none;margin:0;padding:0}
+    .pulse-error-item{display:flex;flex-direction:column;gap:2px;padding:7px 0;border-bottom:1px solid var(--border);font-size:.84rem}
+    .pulse-error-item:last-child{border-bottom:none}
+    .pulse-error-ts{font-size:.72rem;color:var(--secondary)}
+    .pulse-error-msg{color:#b03a2e;font-size:.84rem}
+    .pulse-error-retried{font-size:.72rem;color:#22c55e;font-weight:600}
+    .pulse-action-items{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    .pulse-action-item{background:var(--offwhite);border:1px solid var(--border);border-radius:7px;padding:10px 14px;display:flex;flex-direction:column;gap:3px}
+    .pulse-action-count{font-family:var(--font-serif);font-size:1.8rem;color:var(--navy);line-height:1}
+    .pulse-action-count--zero{color:var(--secondary);opacity:.5}
+    .pulse-action-count--warn{color:#92600a}.pulse-action-count--error{color:#b03a2e}
+    .pulse-action-label{font-size:.72rem;color:var(--secondary);text-transform:uppercase;letter-spacing:.05em;font-weight:600}
+    .pulse-job-row{display:grid;grid-template-columns:1fr auto auto;gap:8px 14px;align-items:start;padding:9px 0;border-bottom:1px solid var(--border);font-size:.84rem}
+    .pulse-job-row:last-child{border-bottom:none}
+    .pulse-job-name{font-weight:600;color:var(--navy)}
+    .pulse-job-meta{font-size:.75rem;color:var(--secondary);margin-top:1px}
+    .pulse-job-result{font-size:.78rem;font-weight:600;white-space:nowrap}
+    .pulse-job-result--ok{color:#15803d}.pulse-job-result--warn{color:#92600a}.pulse-job-result--error{color:#b03a2e}
+    .pulse-last-check{font-size:.78rem;color:var(--secondary);margin-top:6px}
+    .pulse-empty{font-size:.84rem;color:var(--secondary);font-style:italic;padding:8px 0}
+    .pulse-degraded{display:flex;align-items:center;gap:6px;font-size:.82rem;color:#92600a;background:#fffaed;border:1px solid #fce08a;border-radius:6px;padding:7px 12px;margin-bottom:10px}
+    .pulse-client-row-warn td{background:#fffaed!important}
+    .pulse-client-row-error td{background:#fff5f5!important}
+    @media(max-width:900px){.pulse-grid{grid-template-columns:1fr}.pulse-section--full{grid-column:1}.pulse-action-items{grid-template-columns:1fr 1fr}.banner-pulse{top:60px;padding:10px 16px}}
+    @media(max-width:540px){.pulse-action-items{grid-template-columns:1fr}.pulse-metric-row{flex-direction:column;gap:10px}.pulse-job-row{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+
+{# ── Top navigation ────────────────────────────────────────────────────── #}
+<nav class="topnav">
+  <a href="/queue" class="topnav-logo" aria-label="Carolina Compliance Solutions">
+    <img src="{{ url_for('static', filename='ccs_logo_dark.svg') }}" alt="CCS">
+  </a>
+  <div class="topnav-links">
+    <a href="/pulse"       class="nav-link nav-link--active">Pulse</a>
+    <a href="/queue"       class="nav-link">Queue</a>
+    <a href="/gaps"        class="nav-link">Gaps</a>
+    <a href="/requests"    class="nav-link">Requests</a>
+    <a href="/audits"      class="nav-link">Audits</a>
+    <a href="/corrections" class="nav-link">Corrections</a>
+    <a href="/emails"      class="nav-link">Emails{% set _ec = email_draft_count() %}{% if _ec > 0 %}<span class="nav-badge">{{ _ec }}</span>{% endif %}</a>
+    <a href="/logout"      class="btn btn-gold btn-sm">Sign out</a>
+  </div>
+</nav>
+
+{# ── Global status banner ─────────────────────────────────────────────── #}
+{% if overall_level == 'error' %}
+<div class="banner-pulse banner-pulse--error" role="alert">
+  <span class="status-dot status-dot--red"></span>
+  <strong>Action required</strong> — one or more systems need your attention.
+  <span style="font-weight:400;margin-left:4px;">See details below.</span>
+</div>
+{% elif overall_level == 'warn' %}
+<div class="banner-pulse banner-pulse--warn" role="status">
+  <span class="status-dot status-dot--amber"></span>
+  <strong>Needs attention</strong> — some items are waiting on you or running behind.
+</div>
+{% else %}
+<div class="banner-pulse banner-pulse--ok" role="status">
+  <span class="status-dot status-dot--green"></span>
+  All systems OK
+  {% if last_check %}<span style="font-weight:400;margin-left:4px;">— last checked {{ last_check }}</span>{% endif %}
+</div>
+{% endif %}
+
+<div class="page-wrap">
+
+  {# ── Page header ───────────────────────────────────────────────────── #}
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;flex-wrap:wrap;gap:12px;">
+    <div>
+      <span class="section-label">System Health</span>
+      <h1 class="headline" style="margin-bottom:0;">Pulse</h1>
+    </div>
+    <button class="btn btn-secondary btn-sm pulse-refresh-btn" onclick="window.location.reload()">
+      Refresh
+    </button>
+  </div>
+  {% if last_check %}
+  <p class="pulse-last-check">Last data pull: {{ last_check }}</p>
+  {% endif %}
+
+  <div class="pulse-grid">
+
+    {# ══════════════════════════════════════════════════════════════════
+       1. AIRTABLE SPACE
+       ══════════════════════════════════════════════════════════════════ #}
+    {% set sec = pulse_data.airtable_space %}
+    <div class="pulse-section">
+      <div class="pulse-section-header">
+        <h2 class="pulse-section-title">Airtable Space</h2>
+        <span class="pulse-section-status pulse-section-status--{{ sec.level }}">
+          <span class="status-dot status-dot--{% if sec.level == 'ok' %}green{% elif sec.level == 'warn' %}amber{% else %}red{% endif %}"></span>
+          {% if sec.level == 'ok' %}OK{% elif sec.level == 'warn' %}Needs attention{% else %}Action required{% endif %}
+        </span>
+      </div>
+      <div class="pulse-section-body">
+        {% if sec.total_records is not none %}
+          {% set pct = ((sec.total_records / sec.limit) * 100) | round(1) %}
+          {% set bar_level = 'error' if pct >= 80 else ('warn' if pct >= 60 else 'ok') %}
+          <div style="margin-bottom:12px;">
+            <div class="pulse-bar-wrap">
+              <div class="pulse-bar-fill pulse-bar-fill--{{ bar_level }}" style="width:{{ [pct, 100]|min }}%;"></div>
+            </div>
+            <div class="pulse-bar-label">
+              <span><strong>{{ "{:,}".format(sec.total_records) }}</strong> records</span>
+              <span>{{ pct }}% of {{ "{:,}".format(sec.limit) }} limit</span>
+            </div>
+          </div>
+          {% if sec.fastest_growing %}
+          <p style="font-size:.82rem;color:var(--secondary);margin-bottom:12px;">
+            Fastest growing: <strong style="color:var(--navy);">{{ sec.fastest_growing }}</strong>
+          </p>
+          {% endif %}
+          {% if sec.tables %}
+          <table class="pulse-table">
+            <thead>
+              <tr>
+                <th>Table</th>
+                <th class="num">Records</th>
+                <th class="num">+7d</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for t in sec.tables %}
+              <tr>
+                <td>{{ t.name }}</td>
+                <td class="num">{{ "{:,}".format(t.count) }}</td>
+                <td class="num" style="color:{% if t.growth_7d > 50 %}#92600a{% else %}var(--secondary){% endif %};">
+                  {{ t.growth_7d if t.growth_7d is not none else '—' }}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% endif %}
+        {% else %}
+          <p class="pulse-empty">Could not fetch Airtable record counts.</p>
+        {% endif %}
+      </div>
+    </div>
+
+    {# ══════════════════════════════════════════════════════════════════
+       2. EMAIL INTAKE
+       ══════════════════════════════════════════════════════════════════ #}
+    {% set sec = pulse_data.email_intake %}
+    <div class="pulse-section">
+      <div class="pulse-section-header">
+        <h2 class="pulse-section-title">Email Intake</h2>
+        <span class="pulse-section-status pulse-section-status--{{ sec.level }}">
+          <span class="status-dot status-dot--{% if sec.level == 'ok' %}green{% elif sec.level == 'warn' %}amber{% else %}red{% endif %}"></span>
+          {% if sec.level == 'ok' %}OK{% elif sec.level == 'warn' %}Needs attention{% else %}Action required{% endif %}
+        </span>
+      </div>
+      <div class="pulse-section-body">
+        <div class="pulse-metric-row">
+          <div class="pulse-metric">
+            <span class="pulse-metric-num">{{ sec.today_received }}</span>
+            <span class="pulse-metric-label">Received today</span>
+          </div>
+          <div class="pulse-metric">
+            <span class="pulse-metric-num">{{ sec.today_processed }}</span>
+            <span class="pulse-metric-label">Processed</span>
+          </div>
+          <div class="pulse-metric">
+            <span class="pulse-metric-num {% if sec.today_skipped > 0 %}pulse-metric-num--warn{% endif %}">
+              {{ sec.today_skipped }}
+            </span>
+            <span class="pulse-metric-label">Skipped</span>
+          </div>
+        </div>
+
+        <div class="status-row">
+          <span class="status-row-label">Last inbox check</span>
+          <span class="status-row-value">{{ sec.last_check or '—' }}</span>
+        </div>
+        <div class="status-row">
+          <span class="status-row-label">Last email received</span>
+          <span class="status-row-value">{{ sec.last_received or '—' }}</span>
+        </div>
+
+        {% if sec.skipped_items %}
+        <div style="margin-top:14px;">
+          <p class="section-label" style="margin-bottom:8px;">Skipped emails</p>
+          {% for item in sec.skipped_items %}
+          <div class="pulse-skipped-item">
+            <div class="pulse-skipped-subject">{{ item.subject or '(no subject)' }}</div>
+            <div class="pulse-skipped-meta">
+              From: {{ item.sender or '—' }}
+              {% if item.received_at %}&nbsp;&middot;&nbsp;{{ item.received_at }}{% endif %}
+            </div>
+            <span class="pulse-skipped-reason">{{ item.reason or 'skipped' }}</span>
+            <div class="pulse-skipped-actions">
+              <button class="btn btn-secondary btn-sm"
+                      onclick="reprocessDoc('{{ item.id }}')"
+                      data-id="{{ item.id }}">
+                Reprocess
+              </button>
+              <button class="btn btn-sm"
+                      style="background:#fff;border:1.5px solid var(--border);color:var(--secondary);"
+                      onclick="markNotNeeded('{{ item.id }}')"
+                      data-id="{{ item.id }}">
+                Mark as not needed
+              </button>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+        {% endif %}
+      </div>
+    </div>
+
+    {# ══════════════════════════════════════════════════════════════════
+       3. CERTIFICATE PIPELINE
+       ══════════════════════════════════════════════════════════════════ #}
+    {% set sec = pulse_data.pipeline %}
+    <div class="pulse-section">
+      <div class="pulse-section-header">
+        <h2 class="pulse-section-title">Certificate Pipeline</h2>
+        <span class="pulse-section-status pulse-section-status--{{ sec.level }}">
+          <span class="status-dot status-dot--{% if sec.level == 'ok' %}green{% elif sec.level == 'warn' %}amber{% else %}red{% endif %}"></span>
+          {% if sec.level == 'ok' %}OK{% elif sec.level == 'warn' %}Needs attention{% else %}Action required{% endif %}
+        </span>
+      </div>
+      <div class="pulse-section-body">
+        {# Stage counts #}
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px;">
+          {% for stage_key, stage_label in [
+              ('received',       'Received'),
+              ('extracted',      'Extracted'),
+              ('pending_review', 'Pending Review'),
+              ('confirmed',      'Confirmed'),
+          ] %}
+          <div style="text-align:center;background:var(--offwhite);border:1px solid var(--border);border-radius:6px;padding:8px 4px;">
+            <div style="font-family:var(--font-serif);font-size:1.5rem;color:var(--navy);line-height:1;">
+              {{ sec.by_stage.get(stage_key, 0) if sec.by_stage else '—' }}
+            </div>
+            <div style="font-size:.68rem;color:var(--secondary);text-transform:uppercase;letter-spacing:.05em;font-weight:600;margin-top:2px;">
+              {{ stage_label }}
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+
+        <div class="status-row">
+          <span class="status-row-label">Oldest pending (days)</span>
+          <span class="status-row-value {% if sec.oldest_pending_days and sec.oldest_pending_days > 7 %}" style="color:#b03a2e;font-weight:600"{% endif %}">
+            {{ sec.oldest_pending_days if sec.oldest_pending_days is not none else '—' }}
+          </span>
+        </div>
+        <div class="status-row">
+          <span class="status-row-label">Avg days received → confirmed</span>
+          <span class="status-row-value">
+            {{ "%.1f"|format(sec.avg_days_received_to_confirmed) if sec.avg_days_received_to_confirmed is not none else '—' }}
+          </span>
+        </div>
+
+        {% if sec.stuck %}
+        <div style="margin-top:12px;">
+          <p class="section-label" style="margin-bottom:6px;">Stuck / failed</p>
+          {% for item in sec.stuck %}
+          <div class="pulse-stuck-item">
+            <div class="pulse-stuck-filename">{{ item.filename }}</div>
+            <div class="pulse-stuck-meta">Stage: {{ item.stage }}</div>
+            {% if item.error %}<div class="pulse-stuck-error">{{ item.error }}</div>{% endif %}
+          </div>
+          {% endfor %}
+        </div>
+        {% endif %}
+      </div>
+    </div>
+
+    {# ══════════════════════════════════════════════════════════════════
+       4. WRITES & ERRORS
+       ══════════════════════════════════════════════════════════════════ #}
+    {% set sec = pulse_data.writes_errors %}
+    <div class="pulse-section">
+      <div class="pulse-section-header">
+        <h2 class="pulse-section-title">Writes &amp; Errors</h2>
+        <span class="pulse-section-status pulse-section-status--{{ sec.level }}">
+          <span class="status-dot status-dot--{% if sec.level == 'ok' %}green{% elif sec.level == 'warn' %}amber{% else %}red{% endif %}"></span>
+          {% if sec.level == 'ok' %}OK{% elif sec.level == 'warn' %}Needs attention{% else %}Action required{% endif %}
+        </span>
+      </div>
+      <div class="pulse-section-body">
+        {# Airtable write failures #}
+        <p class="section-label" style="margin-bottom:6px;">Airtable write failures (24h)</p>
+        {% if sec.write_failures_24h %}
+        <ul class="pulse-error-list" style="margin-bottom:14px;">
+          {% for err in sec.write_failures_24h %}
+          <li class="pulse-error-item">
+            <span class="pulse-error-ts">{{ err.ts }}</span>
+            <span class="pulse-error-msg">{{ err.table }}: {{ err.error }}</span>
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <p class="pulse-empty" style="margin-bottom:14px;">None in the last 24 hours.</p>
+        {% endif %}
+
+        {# AI API errors #}
+        <p class="section-label" style="margin-bottom:6px;">AI API errors (24h)</p>
+        {% if sec.ai_errors_24h %}
+        <ul class="pulse-error-list">
+          {% for err in sec.ai_errors_24h %}
+          <li class="pulse-error-item">
+            <span class="pulse-error-ts">{{ err.ts }}</span>
+            <span class="pulse-error-msg">{{ err.error }}</span>
+            {% if err.retried %}<span class="pulse-error-retried">Retried successfully</span>{% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <p class="pulse-empty">None in the last 24 hours.</p>
+        {% endif %}
+      </div>
+    </div>
+
+    {# ══════════════════════════════════════════════════════════════════
+       5. SCHEDULED JOBS
+       ══════════════════════════════════════════════════════════════════ #}
+    {% set jobs = pulse_data.scheduled_jobs %}
+    <div class="pulse-section">
+      <div class="pulse-section-header">
+        <h2 class="pulse-section-title">Scheduled Jobs</h2>
+        {% set jobs_level = 'ok' %}
+        {% for j in jobs %}{% if j.level == 'error' %}{% set jobs_level = 'error' %}{% elif j.level == 'warn' and jobs_level != 'error' %}{% set jobs_level = 'warn' %}{% endif %}{% endfor %}
+        <span class="pulse-section-status pulse-section-status--{{ jobs_level }}">
+          <span class="status-dot status-dot--{% if jobs_level == 'ok' %}green{% elif jobs_level == 'warn' %}amber{% else %}red{% endif %}"></span>
+          {% if jobs_level == 'ok' %}OK{% elif jobs_level == 'warn' %}Needs attention{% else %}Action required{% endif %}
+        </span>
+      </div>
+      <div class="pulse-section-body">
+        {% if jobs %}
+          {% for job in jobs %}
+          <div class="pulse-job-row">
+            <div>
+              <div class="pulse-job-name">{{ job.name }}</div>
+              {% if job.last_run %}
+              <div class="pulse-job-meta">Last run: {{ job.last_run }}</div>
+              {% endif %}
+              {% if job.next_expected %}
+              <div class="pulse-job-meta">Next: {{ job.next_expected }}</div>
+              {% endif %}
+            </div>
+            <div></div>
+            <div class="pulse-job-result pulse-job-result--{{ job.level }}">
+              {{ job.result or '—' }}
+            </div>
+          </div>
+          {% endfor %}
+        {% else %}
+          <p class="pulse-empty">No job data available.</p>
+        {% endif %}
+      </div>
+    </div>
+
+    {# ══════════════════════════════════════════════════════════════════
+       6. RUNAWAY DETECTOR
+       ══════════════════════════════════════════════════════════════════ #}
+    {% set sec = pulse_data.runaway %}
+    <div class="pulse-section">
+      <div class="pulse-section-header">
+        <h2 class="pulse-section-title">Runaway Detector</h2>
+        <span class="pulse-section-status pulse-section-status--{{ sec.level }}">
+          <span class="status-dot status-dot--{% if sec.level == 'ok' %}green{% elif sec.level == 'warn' %}amber{% else %}red{% endif %}"></span>
+          {% if sec.level == 'ok' %}OK{% elif sec.level == 'warn' %}Needs attention{% else %}Action required{% endif %}
+        </span>
+      </div>
+      <div class="pulse-section-body">
+        {% if sec.writes_per_hour %}
+        <table class="pulse-table">
+          <thead>
+            <tr>
+              <th>Table</th>
+              <th class="num">Writes/hr</th>
+              <th class="num">Normal band</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in sec.writes_per_hour %}
+            {% set over = row.count > row.normal_band %}
+            <tr>
+              <td>{{ row.table }}</td>
+              <td class="num" {% if over %}style="color:#b03a2e;font-weight:700"{% endif %}>
+                {{ row.count }}
+              </td>
+              <td class="num" style="color:var(--secondary);">
+                &lt;&nbsp;{{ row.normal_band }}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+          <p class="pulse-empty">Write rate data not available.</p>
+        {% endif %}
+      </div>
+    </div>
+
+    {# ══════════════════════════════════════════════════════════════════
+       7. OUTSIDE SERVICES
+       ══════════════════════════════════════════════════════════════════ #}
+    {% set services = pulse_data.services %}
+    <div class="pulse-section">
+      <div class="pulse-section-header">
+        <h2 class="pulse-section-title">Outside Services</h2>
+        {% set svc_level = 'ok' %}
+        {% for s in services %}{% if s.level == 'error' %}{% set svc_level = 'error' %}{% elif s.level == 'warn' and svc_level != 'error' %}{% set svc_level = 'warn' %}{% endif %}{% endfor %}
+        <span class="pulse-section-status pulse-section-status--{{ svc_level }}">
+          <span class="status-dot status-dot--{% if svc_level == 'ok' %}green{% elif svc_level == 'warn' %}amber{% else %}red{% endif %}"></span>
+          {% if svc_level == 'ok' %}All reachable{% elif svc_level == 'warn' %}Degraded{% else %}Action required{% endif %}
+        </span>
+      </div>
+      <div class="pulse-section-body">
+        {% if services %}
+          {% for svc in services %}
+          <div class="status-row">
+            <span class="status-dot status-dot--{% if svc.level == 'ok' %}green{% elif svc.level == 'warn' %}amber{% else %}red{% endif %}"></span>
+            <span class="status-row-label">{{ svc.name }}</span>
+            <span class="status-row-value" title="{{ svc.detail or '' }}">
+              {{ svc.status }}
+            </span>
+          </div>
+          {% endfor %}
+        {% else %}
+          <p class="pulse-empty">Service status not available.</p>
+        {% endif %}
+      </div>
+    </div>
+
+    {# ══════════════════════════════════════════════════════════════════
+       8. WAITING ON HALEY
+       ══════════════════════════════════════════════════════════════════ #}
+    {% set sec = pulse_data.waiting_on_haley %}
+    <div class="pulse-section">
+      <div class="pulse-section-header">
+        <h2 class="pulse-section-title">Waiting on Haley</h2>
+        {% set woh_level = 'ok' %}
+        {% if sec.queue_count > 0 or sec.unsent_drafts > 0 or sec.followups_due_today > 0 or sec.skipped_emails > 0 or sec.no_contact > 0 %}
+          {% set woh_level = 'warn' %}
+        {% endif %}
+        {% if (sec.oldest_queue_days or 0) > 7 %}
+          {% set woh_level = 'error' %}
+        {% endif %}
+        <span class="pulse-section-status pulse-section-status--{{ woh_level }}">
+          <span class="status-dot status-dot--{% if woh_level == 'ok' %}green{% elif woh_level == 'warn' %}amber{% else %}red{% endif %}"></span>
+          {% if woh_level == 'ok' %}Nothing waiting{% elif woh_level == 'warn' %}Items pending{% else %}Action required{% endif %}
+        </span>
+      </div>
+      <div class="pulse-section-body">
+        <div class="pulse-action-items">
+          <div class="pulse-action-item">
+            <span class="pulse-action-count {% if sec.queue_count == 0 %}pulse-action-count--zero{% elif sec.queue_count > 5 %}pulse-action-count--warn{% endif %}">
+              {{ sec.queue_count }}
+            </span>
+            <span class="pulse-action-label">
+              Certs in queue
+              {% if sec.oldest_queue_days %}(oldest {{ sec.oldest_queue_days }}d){% endif %}
+            </span>
+          </div>
+          <div class="pulse-action-item">
+            <span class="pulse-action-count {% if sec.unsent_drafts == 0 %}pulse-action-count--zero{% elif sec.unsent_drafts > 3 %}pulse-action-count--warn{% endif %}">
+              {{ sec.unsent_drafts }}
+            </span>
+            <span class="pulse-action-label">Unsent drafts</span>
+          </div>
+          <div class="pulse-action-item">
+            <span class="pulse-action-count {% if sec.followups_due_today == 0 %}pulse-action-count--zero{% else %}pulse-action-count--warn{% endif %}">
+              {{ sec.followups_due_today }}
+            </span>
+            <span class="pulse-action-label">Follow-ups due today</span>
+          </div>
+          <div class="pulse-action-item">
+            <span class="pulse-action-count {% if sec.skipped_emails == 0 %}pulse-action-count--zero{% elif sec.skipped_emails > 0 %}pulse-action-count--warn{% endif %}">
+              {{ sec.skipped_emails }}
+            </span>
+            <span class="pulse-action-label">Skipped emails</span>
+          </div>
+          <div class="pulse-action-item">
+            <span class="pulse-action-count {% if sec.no_contact == 0 %}pulse-action-count--zero{% else %}pulse-action-count--warn{% endif %}">
+              {{ sec.no_contact }}
+            </span>
+            <span class="pulse-action-label">No contact on file</span>
+          </div>
+        </div>
+        <div style="margin-top:12px;">
+          <a href="/queue" class="btn btn-secondary btn-sm" style="margin-right:6px;">Open Queue</a>
+          <a href="/emails" class="btn btn-secondary btn-sm">Open Emails</a>
+        </div>
+      </div>
+    </div>
+
+    {# ══════════════════════════════════════════════════════════════════
+       9. BUSINESS SNAPSHOT
+       ══════════════════════════════════════════════════════════════════ #}
+    {% set sec = pulse_data.business %}
+    <div class="pulse-section pulse-section--full">
+      <div class="pulse-section-header">
+        <h2 class="pulse-section-title">Business Snapshot</h2>
+      </div>
+      <div class="pulse-section-body">
+        {# Top-level metrics #}
+        <div class="pulse-metric-row" style="margin-bottom:20px;">
+          <div class="pulse-metric">
+            <span class="pulse-metric-num">{{ sec.clients }}</span>
+            <span class="pulse-metric-label">Clients</span>
+          </div>
+          <div class="pulse-metric">
+            <span class="pulse-metric-num">{{ sec.vendors_tracked }}</span>
+            <span class="pulse-metric-label">Vendors tracked</span>
+          </div>
+          <div class="pulse-metric">
+            <span class="pulse-metric-num">{{ sec.certs_on_file }}</span>
+            <span class="pulse-metric-label">Certs on file</span>
+          </div>
+          <div class="pulse-metric">
+            <span class="pulse-metric-num {% if sec.open_gaps > 0 %}pulse-metric-num--warn{% endif %}">
+              {{ sec.open_gaps }}
+            </span>
+            <span class="pulse-metric-label">Open gaps</span>
+          </div>
+        </div>
+
+        {# Per-client summary table #}
+        {% if sec.per_client %}
+        <table class="pulse-table">
+          <thead>
+            <tr>
+              <th>Client</th>
+              <th class="num">Certs on file</th>
+              <th class="num">Certs required</th>
+              <th class="num">Coverage %</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in sec.per_client %}
+            {% set covered = (row.certs_on_file / row.certs_required * 100) | round(0) | int if row.certs_required > 0 else 100 %}
+            {% set row_level = 'error' if covered < 70 else ('warn' if covered < 90 else 'ok') %}
+            <tr class="pulse-client-row-{{ row_level }}">
+              <td style="font-weight:600;">{{ row.name }}</td>
+              <td class="num">{{ row.certs_on_file }}</td>
+              <td class="num">{{ row.certs_required }}</td>
+              <td class="num">
+                <span style="font-weight:700;color:{% if covered < 70 %}#b03a2e{% elif covered < 90 %}#92600a{% else %}#15803d{% endif %};">
+                  {{ covered }}%
+                </span>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+      </div>
+    </div>
+
+  </div>{# /pulse-grid #}
+
+  {# ── Recent events log (collapsible) ──────────────────────────────── #}
+  {% if pulse_data.recent_events %}
+  <details style="margin-top:24px;">
+    <summary style="list-style:none;cursor:pointer;user-select:none;" class="btn btn-secondary btn-sm">
+      Recent events log ({{ pulse_data.recent_events | length }})
+    </summary>
+    <div class="card" style="margin-top:8px;">
+      <div class="table-scroll-wrap">
+        <table class="pulse-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Category</th>
+              <th>Level</th>
+              <th>Title</th>
+              <th>Detail</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for ev in pulse_data.recent_events %}
+            <tr>
+              <td style="white-space:nowrap;font-size:.78rem;color:var(--secondary);">{{ ev.ts }}</td>
+              <td><span class="flag flag-muted">{{ ev.category }}</span></td>
+              <td>
+                <span class="status-dot status-dot--{% if ev.level == 'ok' %}green{% elif ev.level == 'warn' %}amber{% else %}red{% endif %}"></span>
+                {{ ev.level }}
+              </td>
+              <td style="font-weight:600;">{{ ev.title }}</td>
+              <td style="font-size:.82rem;color:var(--secondary);max-width:300px;word-break:break-word;">
+                {{ ev.body or '' }}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </details>
+  {% endif %}
+
+</div>{# /page-wrap #}
+
+<script>
+/* ── CSRF token helper ────────────────────────────────────────────────── */
+function getCsrf() {
+  var m = document.cookie.match(/csrf_token=([^;]+)/);
+  return m ? decodeURIComponent(m[1]) : '';
+}
+
+/* ── Reprocess a skipped document ────────────────────────────────────── */
+function reprocessDoc(docId) {
+  var btn = document.querySelector('[data-id="' + docId + '"]');
+  if (btn) { btn.disabled = true; btn.textContent = 'Processing…'; }
+  fetch('/pulse/reprocess', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-CSRFToken': getCsrf(),
+    },
+    body: JSON.stringify({ doc_id: docId }),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (d.ok) {
+      if (btn) { btn.textContent = 'Queued'; btn.classList.remove('btn-secondary'); btn.classList.add('btn-primary'); }
+    } else {
+      if (btn) { btn.textContent = 'Failed'; btn.disabled = false; }
+      alert('Could not reprocess: ' + (d.error || 'unknown error'));
+    }
+  })
+  .catch(function() {
+    if (btn) { btn.textContent = 'Error'; btn.disabled = false; }
+  });
+}
+
+/* ── Mark a document as not needed ──────────────────────────────────── */
+function markNotNeeded(docId) {
+  if (!confirm('Mark this document as not needed? This will update its status in Airtable.')) return;
+  var btn = document.querySelectorAll('[data-id="' + docId + '"]');
+  btn.forEach(function(b) { b.disabled = true; });
+  fetch('/pulse/mark-not-needed', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-CSRFToken': getCsrf(),
+    },
+    body: JSON.stringify({ doc_id: docId }),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (d.ok) {
+      var item = document.querySelector('.pulse-skipped-item button[data-id="' + docId + '"]');
+      var card = item ? item.closest('.pulse-skipped-item') : null;
+      if (card) { card.style.opacity = '0.4'; card.style.pointerEvents = 'none'; }
+    } else {
+      btn.forEach(function(b) { b.disabled = false; });
+      alert('Could not update: ' + (d.error || 'unknown error'));
+    }
+  })
+  .catch(function() {
+    btn.forEach(function(b) { b.disabled = false; });
+  });
+}
+</script>
+
+</body>
+</html>

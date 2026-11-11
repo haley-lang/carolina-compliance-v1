@@ -1436,6 +1436,13 @@ def process_policies(
                         "Failed to update compliance failure reasons on certificate %s: %s",
                         certificate_record_id, exc,
                     )
+                    try:
+                        import health_store as _hs
+                        _hs.record_event("write_error", "warn",
+                                          f"Certificate compliance reason update failed: {certificate_record_id}",
+                                          body=str(exc), table_name="Insurance Certificates")
+                    except ImportError:
+                        pass
             continue
 
         if not policy_number:
@@ -1816,6 +1823,13 @@ def run():
                 extract_idx, total, extraction_id, exc,
             )
             failed_ids.append(extraction_id)
+            try:
+                import health_store as _hs
+                _hs.record_event("write_error", "error",
+                                  f"Processor failed: extraction {extraction_id}",
+                                  body=str(exc), table_name="Insurance Policies")
+            except ImportError:
+                pass
 
     logger.info(
         "=== Module 4 complete: %d of %d processed successfully%s ===",
@@ -2024,6 +2038,32 @@ def _process_single_extraction(extraction, tables, base_id=""):
     vendor_id   = vendor["id"]
     vendor_name = vendor["fields"].get("Vendor Name", "")
     logger.info("Vendor matched — ID: %s  Name: '%s'", vendor_id, vendor_name)
+
+    # ── Backfill agent contact from producer extraction ───────────────────────
+    # Only write when the vendor has no Agent Email yet (don't overwrite manual data).
+    _producer_name   = raw_data.get("producer_name") or ""
+    _producer_agency = raw_data.get("producer_agency") or ""
+    _producer_phone  = raw_data.get("producer_phone") or ""
+    if _producer_name or _producer_agency or _producer_phone:
+        _current_agent_email = vendor.get("fields", {}).get("Agent Email") or ""
+        if not _current_agent_email:
+            _contact_emails = raw_data.get("contact_emails") or []
+            _first_email = _contact_emails[0] if _contact_emails else ""
+            _agent_update: dict = {}
+            if _producer_name:   _agent_update["Agent Name"]   = _producer_name
+            if _producer_agency: _agent_update["Agent Agency"] = _producer_agency
+            if _producer_phone:  _agent_update["Agent Phone"]  = _producer_phone
+            if _first_email:     _agent_update["Agent Email"]  = _first_email
+            if _agent_update:
+                _source_filename = extraction_fields.get("Source Filename", "")
+                _agent_update["Agent Source"] = f"{_source_filename} — {date.today().isoformat()}"
+                try:
+                    tables[TABLE_VENDORS].update(vendor_id, _agent_update)
+                    logger.info(
+                        "Agent contact backfilled on vendor %s from producer extraction", vendor_id
+                    )
+                except Exception as _exc:
+                    logger.warning("Agent contact backfill failed for vendor %s: %s", vendor_id, _exc)
 
     # ── 1E Review gate ───────────────────────────────────────────────────────
     # After vendor + client match, check whether matched client is in
@@ -2425,6 +2465,13 @@ def _process_single_extraction(extraction, tables, base_id=""):
             "If this is an unknown-field Airtable error, add these Insurance Certificates fields to enable writeback: %s",
             ", ".join(COMPLIANCE_CERT_FIELD_NAMES.values()),
         )
+        try:
+            import health_store as _hs
+            _hs.record_event("write_error", "error",
+                              f"Compliance writeback failed: certificate {certificate_id}",
+                              body=str(exc), table_name="Insurance Certificates")
+        except ImportError:
+            pass
 
     # ── Step 7: mark extraction as Processed ──────────────────────────────────
     logger.info("Step 7 — Marking extraction as 'Processed'...")

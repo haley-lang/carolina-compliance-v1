@@ -1,0 +1,1057 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CCS — Audit: {{ audit.client_name }}</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='ccs_icon.svg') }}">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='review.css') }}">
+  <style>
+    /* ── Workspace layout ── */
+    .ws-header { margin-bottom:28px; }
+    .ws-title  { font-family:var(--font-serif); font-size:1.5rem; color:var(--navy); margin-bottom:4px; }
+    .ws-meta   { font-size:0.86rem; color:var(--secondary); display:flex; gap:16px; flex-wrap:wrap; align-items:center; }
+    .ws-status-chip { display:inline-block; padding:3px 10px; border-radius:12px; font-size:0.76rem; font-weight:700; }
+    .chip-draft           { background:#e2e3e5; color:#383d41; }
+    .chip-gathering       { background:#cfe2ff; color:#084298; }
+    .chip-ready           { background:#fff3cd; color:#664d03; }
+    .chip-pack-built      { background:#d1e7dd; color:#0a3622; }
+    .chip-submitted       { background:#d1e7dd; color:#0a3622; }
+
+    /* ── Progress bar ── */
+    .checklist-bar { background:#fff; border:1.5px solid var(--border); border-radius:10px;
+                     padding:16px 20px; margin-bottom:20px; }
+    .checklist-progress { display:flex; align-items:center; gap:12px; margin-bottom:10px; }
+    .progress-track { flex:1; height:7px; background:var(--border); border-radius:4px; overflow:hidden; }
+    .progress-fill  { height:100%; background:var(--blue); border-radius:4px; transition:width 0.3s; }
+    .checklist-next { font-size:0.88rem; color:var(--secondary); }
+    .checklist-next strong { color:var(--navy); }
+
+    /* ── Next best action card ── */
+    .nba-card { background:var(--navy); color:#fff; border-radius:10px;
+                padding:16px 20px; margin-bottom:20px; display:flex; align-items:center; gap:16px; }
+    .nba-label { font-size:0.74rem; font-weight:700; text-transform:uppercase; letter-spacing:0.06em; opacity:0.7; }
+    .nba-text  { font-size:1rem; font-weight:600; margin-top:2px; }
+    .nba-btn   { background:var(--gold); color:var(--navy); border:none; border-radius:7px;
+                 padding:9px 18px; font-size:0.86rem; font-weight:700; cursor:pointer;
+                 white-space:nowrap; flex-shrink:0; text-decoration:none; }
+
+    /* ── Section cards ── */
+    .ws-section { border:1.5px solid var(--border); border-radius:10px; margin-bottom:14px;
+                  background:#fff; overflow:hidden; }
+    .ws-section-header { padding:14px 18px; display:flex; align-items:center; gap:10px;
+                         cursor:pointer; user-select:none; }
+    .ws-section-header:hover { background:#f8f7f5; }
+    .ws-step-num  { width:26px; height:26px; border-radius:50%; background:var(--border);
+                    display:flex; align-items:center; justify-content:center;
+                    font-size:0.76rem; font-weight:700; color:var(--secondary); flex-shrink:0; }
+    .ws-step-num.done { background:#198754; color:#fff; }
+    .ws-section-title { font-weight:600; font-size:0.95rem; color:var(--navy); flex:1; }
+    .ws-section-badge { font-size:0.76rem; font-weight:700; padding:2px 8px; border-radius:10px;
+                        background:var(--border); color:var(--secondary); }
+    .ws-section-badge.warn { background:#fff3cd; color:#664d03; }
+    .ws-section-badge.ok   { background:#d1e7dd; color:#0a3622; }
+    .ws-section-chevron { font-size:0.8rem; color:var(--secondary); transition:transform 0.15s; }
+    .ws-section-body { display:none; padding:0 18px 18px; border-top:1px solid var(--border); }
+    .ws-section.open .ws-section-body { display:block; }
+    .ws-section.open .ws-section-chevron { transform:rotate(180deg); }
+
+    /* ── File upload zone ── */
+    .drop-zone { border:2px dashed var(--border); border-radius:10px; padding:40px 20px;
+                 text-align:center; cursor:pointer; transition:border-color 0.15s; margin-top:14px; }
+    .drop-zone:hover, .drop-zone.drag-over { border-color:var(--blue); background:#f0f4ff; }
+    .drop-zone p  { margin:0; color:var(--secondary); font-size:0.9rem; }
+    .drop-zone strong { color:var(--navy); }
+    .file-accept  { color:var(--secondary); font-size:0.8rem; margin-top:8px; }
+    .parse-result { background:var(--offwhite); border:1.5px solid var(--border); border-radius:8px;
+                    padding:14px 18px; margin-top:14px; font-size:0.88rem; }
+    .parse-result strong { color:var(--navy); }
+    .parse-warning { color:#8a5a00; background:#fff3cd; border-radius:6px;
+                     padding:6px 10px; font-size:0.82rem; margin-top:8px; }
+    .preview-table-wrap { overflow-x:auto; margin-top:12px; }
+    .preview-table { font-size:0.8rem; border-collapse:collapse; width:100%; }
+    .preview-table th,.preview-table td { padding:5px 8px; border:1px solid var(--border); text-align:left; }
+    .preview-table th { background:var(--offwhite); font-weight:700; }
+
+    /* ── Payee table ── */
+    .payee-table { width:100%; border-collapse:collapse; font-size:0.86rem; margin-top:12px; }
+    .payee-table th { text-align:left; padding:7px 10px; border-bottom:2px solid var(--border);
+                      font-size:0.76rem; font-weight:700; color:var(--secondary); text-transform:uppercase; }
+    .payee-table td { padding:8px 10px; border-bottom:1px solid var(--border); vertical-align:top; }
+    .payee-table tr:last-child td { border-bottom:none; }
+    .match-badge { display:inline-block; padding:2px 7px; border-radius:10px; font-size:0.74rem; font-weight:700; }
+    .match-exact    { background:#d1e7dd; color:#0a3622; }
+    .match-likely   { background:#fff3cd; color:#664d03; }
+    .match-possible { background:#f8d7da; color:#58151c; }
+    .group-badge { display:inline-block; padding:2px 7px; border-radius:10px; font-size:0.74rem; font-weight:600; }
+    .group-ccs_vendor  { background:#cfe2ff; color:#084298; }
+    .group-likely_sub  { background:#fff3cd; color:#664d03; }
+    .group-unclear     { background:#e2e3e5; color:#383d41; }
+    .group-not_sub     { background:#f1f3f5; color:#6c757d; }
+    .payee-filter-tabs { display:flex; gap:0; margin-top:12px; border-bottom:2px solid var(--border); }
+    .payee-filter-tab  { padding:8px 14px; font-size:0.84rem; font-weight:600; cursor:pointer;
+                         color:var(--secondary); border-bottom:2px solid transparent; margin-bottom:-2px; }
+    .payee-filter-tab.active { color:var(--blue); border-bottom-color:var(--blue); }
+
+    /* ── Analysis table ── */
+    .analysis-table { width:100%; border-collapse:collapse; font-size:0.86rem; margin-top:12px; }
+    .analysis-table th { text-align:left; padding:7px 10px; border-bottom:2px solid var(--border);
+                         font-size:0.76rem; font-weight:700; color:var(--secondary); text-transform:uppercase; }
+    .analysis-table td { padding:8px 10px; border-bottom:1px solid var(--border); vertical-align:top; }
+    .analysis-table tr.sub-row:hover td { background:#f8f7f5; cursor:pointer; }
+    .status-on-file     { background:#d1e7dd; color:#0a3622; }
+    .status-partial     { background:#fff3cd; color:#664d03; }
+    .status-not-on-file { background:#f8d7da; color:#58151c; }
+    .status-not-in-ccs  { background:#e2e3e5; color:#383d41; }
+    .status-label { display:inline-block; padding:2px 8px; border-radius:10px; font-size:0.74rem; font-weight:700; }
+    .headline-strip { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:16px; padding:14px;
+                      background:var(--offwhite); border-radius:8px; border:1px solid var(--border); }
+    .hl-box { text-align:center; min-width:80px; }
+    .hl-num { font-family:var(--font-serif); font-size:1.6rem; color:var(--navy); display:block; }
+    .hl-label { font-size:0.7rem; font-weight:700; color:var(--secondary); text-transform:uppercase; letter-spacing:0.03em; }
+    .hl-box.hl-alert .hl-num { color:#dc3545; }
+    .payments-detail { display:none; padding:10px; background:var(--offwhite); font-size:0.82rem; }
+    .payments-detail table { width:100%; border-collapse:collapse; }
+    .payments-detail td { padding:4px 8px; border-bottom:1px solid var(--border); }
+
+    /* ── Checklist steps ── */
+    .step-list { margin-top:14px; }
+    .step-item { display:flex; align-items:flex-start; gap:12px; padding:12px 0;
+                 border-bottom:1px solid var(--border); }
+    .step-item:last-child { border-bottom:none; }
+    .step-check { width:22px; height:22px; border-radius:50%; display:flex; align-items:center;
+                  justify-content:center; font-size:0.76rem; font-weight:700; flex-shrink:0; margin-top:1px; }
+    .step-check.done   { background:#198754; color:#fff; }
+    .step-check.todo   { background:var(--border); color:var(--secondary); }
+    .step-title { font-weight:600; font-size:0.9rem; color:var(--navy); }
+    .step-detail { font-size:0.82rem; color:var(--secondary); margin-top:2px; }
+
+    /* ── Remediation form ── */
+    .rem-form select,.rem-form textarea {
+      padding:6px 10px; border:1.5px solid var(--border); border-radius:6px;
+      font-size:0.86rem; font-family:var(--font-sans); width:100%; }
+
+    .nav-link.nav-link--active { color:#fff !important; font-weight:700; }
+
+    @media (max-width:640px) {
+      .form-grid  { grid-template-columns:1fr; }
+      .headline-strip { gap:10px; }
+    }
+  </style>
+</head>
+<body>
+
+<nav class="topnav">
+  <a href="/queue" class="topnav-logo" aria-label="Carolina Compliance Solutions">
+    <img src="{{ url_for('static', filename='ccs_logo_dark.svg') }}" alt="CCS">
+  </a>
+  <div class="topnav-links">
+    <a href="/pulse" class="nav-link">Pulse</a>
+    <a href="/queue" class="nav-link">Queue</a>
+    <a href="/gaps" class="nav-link">Gaps</a>
+    <a href="/requests" class="nav-link">Requests</a>
+    <a href="/audits" class="nav-link nav-link--active">Audits</a>
+    <a href="/corrections" class="nav-link">Corrections</a>
+    <a href="/emails" class="nav-link">Emails{% set _ec = email_draft_count() %}{% if _ec > 0 %}<span class="nav-badge">{{ _ec }}</span>{% endif %}</a>
+    <a href="/logout" class="btn btn-gold btn-sm">Sign out</a>
+  </div>
+</nav>
+
+{% set _pb = pulse_banner() %}{% if _pb.level != 'ok' %}
+<div class="banner-pulse banner-pulse--{{ _pb.level }}">
+  <span class="status-dot status-dot--{{ _pb.level }}"></span>
+  {{ _pb.text }} — <a href="/pulse">View Pulse</a>
+</div>
+{% endif %}
+
+<div class="page-wrap">
+
+  <!-- Workspace header -->
+  <div class="ws-header">
+    <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+      <a href="/audits" style="font-size:0.82rem; color:var(--secondary); text-decoration:none;">← All audits</a>
+    </div>
+    <h1 class="ws-title" style="margin-top:8px">
+      {{ audit.client_name }} &mdash; {{ audit.coverage }}
+    </h1>
+    <div class="ws-meta">
+      {% set sc = {'Draft':'chip-draft','Gathering certificates':'chip-gathering',
+                   'Ready to build pack':'chip-ready','Pack built':'chip-pack-built',
+                   'Submitted':'chip-submitted'} %}
+      <span class="ws-status-chip {{ sc.get(audit.status, 'chip-draft') }}" id="audit-status-chip">
+        {{ audit.status }}
+      </span>
+      <span>{{ audit.start_date | fmt_date }} – {{ audit.end_date | fmt_date }}</span>
+      {% if audit.auditor_name %}<span>{{ audit.auditor_name }}</span>{% endif %}
+      {% if audit.due_date %}<span>Due {{ audit.due_date | fmt_date }}</span>{% endif %}
+      {% if audit.policy_number %}<span>Policy: {{ audit.policy_number }}</span>{% endif %}
+    </div>
+  </div>
+
+  <!-- Progress / checklist bar -->
+  <div class="checklist-bar" id="checklist-bar">
+    <div class="checklist-progress">
+      <span style="font-size:0.82rem; font-weight:700; color:var(--secondary); white-space:nowrap" id="step-label">Loading…</span>
+      <div class="progress-track"><div class="progress-fill" id="progress-fill" style="width:0%"></div></div>
+      <span style="font-size:0.82rem; color:var(--secondary); white-space:nowrap" id="step-counter"></span>
+    </div>
+    <div class="checklist-next" id="checklist-next"></div>
+  </div>
+
+  <!-- Next best action -->
+  <div class="nba-card" id="nba-card" style="display:none">
+    <div style="flex:1">
+      <div class="nba-label">Next best action</div>
+      <div class="nba-text" id="nba-text"></div>
+    </div>
+    <a class="nba-btn" id="nba-btn" href="#" style="display:none">Go</a>
+  </div>
+
+  <!-- SECTION 1: Payments file -->
+  <div class="ws-section open" id="sec-file">
+    <div class="ws-section-header" onclick="toggleSection('sec-file')">
+      <div class="ws-step-num {% if files %}done{% endif %}" id="step-num-1">{% if files %}✓{% else %}1{% endif %}</div>
+      <span class="ws-section-title">Payments file</span>
+      {% if files %}
+        <span class="ws-section-badge ok">{{ files[0].row_count | default(0) | int }} payments</span>
+      {% else %}
+        <span class="ws-section-badge warn">No file uploaded</span>
+      {% endif %}
+      <span class="ws-section-chevron">▼</span>
+    </div>
+    <div class="ws-section-body">
+      {% if files %}
+        {% set f = files[0] %}
+        <div class="parse-result" style="margin-top:14px">
+          <strong id="file-summary-text">{{ f.parse_notes.splitlines()[0] if f.parse_notes else 'File parsed' }}</strong>
+          <br><span style="color:var(--secondary); font-size:0.82rem">{{ f.original_filename }}</span>
+          {% if f.parse_notes %}
+            {% for ln in f.parse_notes.splitlines()[1:] %}
+            <div class="parse-warning">{{ ln }}</div>
+            {% endfor %}
+          {% endif %}
+          <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+            <span style="font-size:0.82rem; color:var(--secondary)">
+              Transactions: <strong>{{ f.row_count | int }}</strong> &nbsp;|&nbsp;
+              Total: <strong>${{ '{:,.2f}'.format(f.total_amount or 0) }}</strong> &nbsp;|&nbsp;
+              {{ f.date_min | fmt_date }} to {{ f.date_max | fmt_date }}
+            </span>
+          </div>
+        </div>
+        <p style="font-size:0.82rem; color:var(--secondary); margin-top:12px">
+          Replace file? Drop a new file or choose one below.
+        </p>
+      {% endif %}
+
+      <div class="drop-zone" id="drop-zone" onclick="document.getElementById('file-input').click()">
+        <strong>Drop a payments file here</strong>
+        <p class="file-accept">QuickBooks Transaction List CSV &bull; XLSX &bull; QB Expenses Summary PDF</p>
+        <input type="file" id="file-input" accept=".csv,.xlsx,.xls,.pdf" style="display:none">
+      </div>
+      <div id="upload-status" style="display:none; margin-top:12px; font-size:0.88rem; color:var(--secondary)">Uploading…</div>
+      <div id="parse-result-new" style="display:none" class="parse-result"></div>
+      <div id="preview-wrap" style="display:none">
+        <div class="preview-table-wrap">
+          <table class="preview-table" id="preview-tbl"></table>
+        </div>
+        <div style="display:flex; gap:10px; margin-top:12px;">
+          <button class="btn btn-primary" onclick="confirmFile()">Looks right</button>
+          <button class="btn btn-secondary" onclick="clearFileResult()">That's wrong — try another</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SECTION 2: Payee groups -->
+  <div class="ws-section" id="sec-payees">
+    <div class="ws-section-header" onclick="toggleSection('sec-payees', loadPayees)">
+      <div class="ws-step-num" id="step-num-2">2</div>
+      <span class="ws-section-title">Payee groups</span>
+      {% if possible_count or unclear_count %}
+        <span class="ws-section-badge warn">{{ possible_count + unclear_count }} need a decision</span>
+      {% elif files %}
+        <span class="ws-section-badge ok">All confirmed</span>
+      {% else %}
+        <span class="ws-section-badge">Upload file first</span>
+      {% endif %}
+      <span class="ws-section-chevron">▼</span>
+    </div>
+    <div class="ws-section-body">
+      <div id="payees-loading" style="color:var(--secondary); font-size:0.88rem; padding:12px 0">Loading payees…</div>
+      <div id="payees-content" style="display:none">
+        <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
+          <div class="payee-filter-tabs" id="payee-tabs">
+            <div class="payee-filter-tab active" data-group="all" onclick="filterPayees('all', this)">All</div>
+            <div class="payee-filter-tab" data-group="ccs_vendor" onclick="filterPayees('ccs_vendor', this)">CCS subs</div>
+            <div class="payee-filter-tab" data-group="likely_sub" onclick="filterPayees('likely_sub', this)">Likely subs</div>
+            <div class="payee-filter-tab" data-group="unclear" onclick="filterPayees('unclear', this)">Unclear</div>
+            <div class="payee-filter-tab" data-group="not_sub" onclick="filterPayees('not_sub', this)">Not a sub</div>
+          </div>
+          <div id="confirm-all-btn" style="display:none">
+            <button class="btn btn-sm btn-primary" onclick="confirmAllLikely()">Confirm all likely matches</button>
+          </div>
+        </div>
+        <div class="mb-8" style="font-size:0.82rem; color:var(--secondary)" id="payee-group-counts"></div>
+        <div style="overflow-x:auto">
+          <table class="payee-table" id="payees-tbl">
+            <thead>
+              <tr>
+                <th>Payee name</th>
+                <th>Paid (audit period)</th>
+                <th>Group</th>
+                <th>CCS match</th>
+                <th>Trade / work type</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="payees-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SECTION 3: Analysis -->
+  <div class="ws-section" id="sec-analysis">
+    <div class="ws-section-header" onclick="toggleSection('sec-analysis', loadAnalysis)">
+      <div class="ws-step-num" id="step-num-3">3</div>
+      <span class="ws-section-title">Coverage analysis</span>
+      <span class="ws-section-badge" id="analysis-badge">Load to see</span>
+      <span class="ws-section-chevron">▼</span>
+    </div>
+    <div class="ws-section-body">
+      <div id="analysis-loading" style="color:var(--secondary); font-size:0.88rem; padding:12px 0">Loading analysis…</div>
+      <div id="analysis-content" style="display:none">
+        <div class="headline-strip" id="headline-strip"></div>
+        <p style="font-size:0.8rem; color:var(--secondary); margin-bottom:10px">
+          "On file" means a certificate with an effective-to-expiration term was received.
+          Gaps are calendar days within the audit period with no term on file.
+          Paid during gaps = payments whose date falls in a gap.
+        </p>
+        <div style="overflow-x:auto">
+          <table class="analysis-table" id="analysis-tbl">
+            <thead>
+              <tr>
+                <th>Payee</th>
+                <th>Paid (period)</th>
+                <th>Terms on file</th>
+                <th>Days not on file</th>
+                <th>Paid in gaps</th>
+                <th>Status</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="analysis-tbody"></tbody>
+          </table>
+        </div>
+        <p style="font-size:0.76rem; color:var(--secondary); margin-top:10px">
+          Terms: effective date through expiration date as recorded. Overlapping terms are merged.
+          WC on file (shown for GL audits) is informational — auditors often ask for both.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <!-- SECTION 4: Checklist -->
+  <div class="ws-section" id="sec-checklist">
+    <div class="ws-section-header" onclick="toggleSection('sec-checklist', loadChecklist)">
+      <div class="ws-step-num" id="step-num-4">4</div>
+      <span class="ws-section-title">Path to completion</span>
+      <span class="ws-section-badge" id="checklist-badge">Load to see</span>
+      <span class="ws-section-chevron">▼</span>
+    </div>
+    <div class="ws-section-body">
+      <div id="checklist-loading" style="color:var(--secondary); font-size:0.88rem; padding:12px 0">Loading checklist…</div>
+      <div id="checklist-content" style="display:none">
+        <div class="step-list" id="step-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SECTION 5: Email drafts -->
+  <div class="ws-section" id="sec-emails">
+    <div class="ws-section-header" onclick="toggleSection('sec-emails')">
+      <div class="ws-step-num" id="step-num-5">5</div>
+      <span class="ws-section-title">Request drafts</span>
+      <span class="ws-section-badge">Generate below, view on Emails page</span>
+      <span class="ws-section-chevron">▼</span>
+    </div>
+    <div class="ws-section-body">
+      <p style="margin-top:14px; font-size:0.88rem; color:var(--secondary)">
+        Drafts are batched per agent — one email per agent covering all their subs with missing certificates for this audit period.
+        Vendors with no agent get direct-to-vendor drafts. Payees with no contact go into a client contact request.
+        Nothing sends automatically; use the Emails page to review, edit, and mark sent.
+      </p>
+      <div style="display:flex; gap:10px; margin-top:14px; flex-wrap:wrap;">
+        <button class="btn btn-primary" id="btn-create-drafts" onclick="createDrafts()">Generate drafts</button>
+        <a class="btn btn-secondary" href="/emails">View Emails page ↗</a>
+      </div>
+      <div id="draft-result" style="display:none; margin-top:12px; font-size:0.88rem;"></div>
+    </div>
+  </div>
+
+  <!-- SECTION 6: Handle remainder -->
+  <div class="ws-section" id="sec-remainder">
+    <div class="ws-section-header" onclick="toggleSection('sec-remainder', loadRemainder)">
+      <div class="ws-step-num" id="step-num-6">6</div>
+      <span class="ws-section-title">Handle the remainder</span>
+      <span class="ws-section-badge">Mark payees as resolved or skipped</span>
+      <span class="ws-section-chevron">▼</span>
+    </div>
+    <div class="ws-section-body">
+      <div id="remainder-loading" style="color:var(--secondary); font-size:0.88rem; padding:12px 0">Loading…</div>
+      <div id="remainder-content" style="display:none">
+        <p style="font-size:0.88rem; color:var(--secondary); margin:14px 0 10px">
+          For subs that cannot or will not provide a certificate, mark them so their status appears in the audit pack.
+        </p>
+        <table class="analysis-table" id="remainder-tbl">
+          <thead>
+            <tr><th>Payee</th><th>Paid</th><th>Status</th><th>Mark as</th><th>Note</th><th></th></tr>
+          </thead>
+          <tbody id="remainder-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- SECTION 7: Build pack -->
+  <div class="ws-section" id="sec-pack">
+    <div class="ws-section-header" onclick="toggleSection('sec-pack')">
+      <div class="ws-step-num {% if packs %}done{% endif %}">{% if packs %}✓{% else %}7{% endif %}</div>
+      <span class="ws-section-title">Build audit pack</span>
+      {% if packs %}
+        <span class="ws-section-badge ok">v{{ packs[0].version }} built</span>
+      {% endif %}
+      <span class="ws-section-chevron">▼</span>
+    </div>
+    <div class="ws-section-body">
+      <p style="margin-top:14px; font-size:0.88rem; color:var(--secondary)">
+        Builds a ZIP with: Excel workbook (Summary, Subcontractors, Payments, Terms on File) + text summary + certificate PDFs.
+        You can build with open items; the pack will show a DRAFT watermark.
+      </p>
+      {% if packs %}
+      <div style="margin-bottom:14px;">
+        <strong style="font-size:0.88rem">Previous versions:</strong>
+        <ul style="margin:6px 0; padding-left:16px; font-size:0.86rem;">
+          {% for p in packs %}
+          <li>v{{ p.version }} — built {{ p.created_at | int | timestamp_fmt if p.created_at else '' }}
+            {% if p.has_open_items %}<span style="color:#dc3545; font-size:0.76rem">(open items)</span>{% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+        <button class="btn btn-primary" id="btn-build" onclick="buildPack()">Build audit pack (.zip)</button>
+        <span id="build-status" style="display:none; font-size:0.86rem; color:var(--secondary)">Building…</span>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /page-wrap -->
+
+<script>
+(function(){
+
+var AUDIT_ID     = '{{ audit.id }}';
+var CSRF_TOKEN   = '{{ csrf_token() }}';
+var analysisData = null;
+var payeesData   = null;
+var currentPayeeFilter = 'all';
+
+// ── Section toggle ───────────────────────────────────────────────────────────
+function toggleSection(id, loadFn) {
+  var sec = document.getElementById(id);
+  if (!sec) return;
+  var wasOpen = sec.classList.contains('open');
+  sec.classList.toggle('open');
+  if (!wasOpen && loadFn) loadFn();
+}
+window.toggleSection = toggleSection;
+
+// ── Checklist bar ────────────────────────────────────────────────────────────
+function loadChecklistBar() {
+  fetch('/audits/' + AUDIT_ID + '/checklist')
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if (!d.ok) return;
+      var done = d.done_count, total = d.total_count;
+      var pct  = total > 0 ? Math.round((done / total) * 100) : 0;
+      document.getElementById('progress-fill').style.width = pct + '%';
+      document.getElementById('step-label').textContent = 'Step ' + done + ' of ' + total;
+      document.getElementById('step-counter').textContent = pct + '%';
+
+      var nx = d.next_step || {};
+      if (nx.title) {
+        document.getElementById('checklist-next').innerHTML =
+          '<strong>Next:</strong> ' + esc(nx.title) +
+          (nx.detail ? ' — ' + esc(nx.detail) : '');
+        var nbaCard = document.getElementById('nba-card');
+        document.getElementById('nba-text').textContent = nx.title + (nx.detail ? ' — ' + nx.detail : '');
+        nbaCard.style.display = 'flex';
+        var nbaBtn = document.getElementById('nba-btn');
+        if (nx.link) { nbaBtn.href = nx.link; nbaBtn.style.display = ''; }
+        else { nbaBtn.style.display = 'none'; }
+      }
+    })
+    .catch(function(){});
+}
+loadChecklistBar();
+
+// ── File upload ──────────────────────────────────────────────────────────────
+var dropZone  = document.getElementById('drop-zone');
+var fileInput = document.getElementById('file-input');
+var pendingFile = null;
+
+dropZone.addEventListener('dragover', function(e){
+  e.preventDefault(); dropZone.classList.add('drag-over');
+});
+dropZone.addEventListener('dragleave', function(){
+  dropZone.classList.remove('drag-over');
+});
+dropZone.addEventListener('drop', function(e){
+  e.preventDefault(); dropZone.classList.remove('drag-over');
+  var files = e.dataTransfer.files;
+  if (files.length > 0) uploadFile(files[0]);
+});
+fileInput.addEventListener('change', function(){
+  if (this.files.length > 0) uploadFile(this.files[0]);
+});
+
+function uploadFile(file) {
+  pendingFile = file;
+  var fd = new FormData();
+  fd.append('csrf_token', CSRF_TOKEN);
+  fd.append('file', file);
+
+  document.getElementById('upload-status').style.display = 'block';
+  document.getElementById('upload-status').textContent = 'Parsing ' + file.name + '…';
+  document.getElementById('parse-result-new').style.display = 'none';
+  document.getElementById('preview-wrap').style.display = 'none';
+
+  fetch('/audits/' + AUDIT_ID + '/upload', {method:'POST', body:fd})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      document.getElementById('upload-status').style.display = 'none';
+      if (!d.ok) {
+        showParseResult('<strong style="color:#dc3545">Parse error:</strong> ' + esc(d.error), []);
+        return;
+      }
+      var html = '<strong>' + esc(d.summary) + '</strong>';
+      var warns = d.warnings || [];
+      showParseResult(html, warns);
+      renderPreview(d.preview_rows, d.account_counts);
+      loadChecklistBar();
+    })
+    .catch(function(err){
+      document.getElementById('upload-status').style.display = 'none';
+      showParseResult('<strong style="color:#dc3545">Upload error:</strong> ' + esc(String(err)), []);
+    });
+}
+
+function showParseResult(html, warnings) {
+  var el = document.getElementById('parse-result-new');
+  var warn_html = warnings.map(function(w){
+    return '<div class="parse-warning">⚠ ' + esc(w) + '</div>';
+  }).join('');
+  el.innerHTML = html + warn_html;
+  el.style.display = 'block';
+}
+
+function renderPreview(rows, accounts) {
+  if (!rows || rows.length === 0) return;
+  var wrap = document.getElementById('preview-wrap');
+  var tbl  = document.getElementById('preview-tbl');
+  var cols = ['txn_date','payee_raw','account','txn_type','amount'];
+  var headers = ['Date','Payee','Account','Type','Amount'];
+  var html = '<thead><tr>' + headers.map(function(h){ return '<th>'+h+'</th>'; }).join('') + '</tr></thead><tbody>';
+  rows.forEach(function(r){
+    html += '<tr>' + cols.map(function(c){
+      var v = r[c] || '';
+      if (c === 'amount') v = '$' + parseFloat(v||0).toLocaleString('en-US',{minimumFractionDigits:2});
+      return '<td>' + esc(String(v)) + '</td>';
+    }).join('') + '</tr>';
+  });
+  html += '</tbody>';
+  tbl.innerHTML = html;
+
+  if (accounts && Object.keys(accounts).length) {
+    var acctHtml = '<div style="margin-top:10px; font-size:0.8rem; color:var(--secondary)"><strong>Accounts:</strong> ';
+    acctHtml += Object.entries(accounts).map(function(e){ return esc(e[0]) + ' (' + e[1] + ')'; }).join(' &bull; ');
+    acctHtml += '</div>';
+    wrap.innerHTML += acctHtml;
+  }
+
+  wrap.style.display = 'block';
+}
+
+function confirmFile() {
+  document.getElementById('preview-wrap').style.display = 'none';
+  document.getElementById('parse-result-new').style.display = 'none';
+  location.reload();
+}
+
+function clearFileResult() {
+  document.getElementById('parse-result-new').style.display = 'none';
+  document.getElementById('preview-wrap').style.display = 'none';
+  document.getElementById('upload-status').style.display = 'none';
+  pendingFile = null;
+}
+window.clearFileResult = clearFileResult;
+window.confirmFile = confirmFile;
+
+// ── Payees ───────────────────────────────────────────────────────────────────
+function loadPayees() {
+  document.getElementById('payees-loading').style.display = 'block';
+  document.getElementById('payees-content').style.display = 'none';
+  fetch('/audits/' + AUDIT_ID + '/payees')
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      document.getElementById('payees-loading').style.display = 'none';
+      if (!d.ok) return;
+      payeesData = d.payees;
+      renderPayees(d.payees, d.groups);
+      document.getElementById('payees-content').style.display = 'block';
+    });
+}
+window.loadPayees = loadPayees;
+
+function renderPayees(payees, groups) {
+  var gc = groups || {};
+  var countHtml = 'CCS subs: <strong>' + (gc.ccs_vendor||0) + '</strong> &nbsp;|&nbsp; ' +
+    'Likely subs: <strong>' + (gc.likely_sub||0) + '</strong> &nbsp;|&nbsp; ' +
+    'Unclear: <strong>' + (gc.unclear||0) + '</strong> &nbsp;|&nbsp; ' +
+    'Not a sub: <strong>' + (gc.not_sub||0) + '</strong>';
+  if (gc.needs_confirm > 0) countHtml += ' &nbsp;|&nbsp; <span style="color:#8a5a00"><strong>' + gc.needs_confirm + '</strong> need confirming</span>';
+  document.getElementById('payee-group-counts').innerHTML = countHtml;
+
+  if (gc.likely_sub > 0 || gc.needs_confirm > 0) {
+    document.getElementById('confirm-all-btn').style.display = 'block';
+  }
+
+  var filtered = currentPayeeFilter === 'all' ? payees :
+    payees.filter(function(p){ return p.payee_group === currentPayeeFilter; });
+
+  var tbody = document.getElementById('payees-tbody');
+  if (!filtered.length) {
+    tbody.innerHTML = '<tr><td colspan="6" style="color:var(--secondary); padding:20px; font-style:italic">None in this group.</td></tr>';
+    return;
+  }
+
+  var html = '';
+  filtered.forEach(function(p){
+    var matchHtml = '';
+    if (p.match_type === 'exact')    matchHtml = '<span class="match-badge match-exact">exact</span> ';
+    if (p.match_type === 'likely')   matchHtml = '<span class="match-badge match-likely">likely</span> ';
+    if (p.match_type === 'possible') matchHtml = '<span class="match-badge match-possible">possible</span> ';
+    var vendorText = p.vendor_name ? matchHtml + esc(p.vendor_name) : '<span style="color:var(--secondary)">—</span>';
+
+    var groupLabel = {ccs_vendor:'CCS sub',likely_sub:'Likely sub',unclear:'Unclear',not_sub:'Not a sub'}[p.payee_group] || p.payee_group;
+    var groupCls   = 'group-' + p.payee_group;
+    var amt = '$' + parseFloat(p.total_amount||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+
+    html += '<tr data-payee="' + esc(p.payee_raw) + '" data-group="' + esc(p.payee_group) + '">' +
+      '<td>' + esc(p.payee_raw) + (p.confirmed ? ' <span style="color:var(--secondary);font-size:0.72rem">✓</span>' : '') + '</td>' +
+      '<td style="white-space:nowrap">' + amt + '<br><span style="color:var(--secondary);font-size:0.76rem">' + (p.txn_count||0) + ' txn' + (p.txn_count===1?'':'s') + '</span></td>' +
+      '<td><span class="group-badge ' + groupCls + '">' + groupLabel + '</span></td>' +
+      '<td>' + vendorText + '</td>' +
+      '<td><input type="text" value="' + esc(p.trade||'') + '" placeholder="e.g. grading" style="width:100%; padding:4px 7px; border:1.5px solid var(--border); border-radius:5px; font-size:0.84rem;" onchange="updateTrade(\'' + esc(p.payee_raw) + '\', this.value)"></td>' +
+      '<td style="white-space:nowrap">' +
+        '<select onchange="updateGroup(\'' + esc(p.payee_raw) + '\', this.value)" style="padding:4px 7px; border:1.5px solid var(--border); border-radius:5px; font-size:0.82rem;">' +
+          '<option value="">Change group…</option>' +
+          '<option value="ccs_vendor">CCS sub</option>' +
+          '<option value="likely_sub">Likely sub</option>' +
+          '<option value="unclear">Unclear</option>' +
+          '<option value="not_sub">Not a sub</option>' +
+        '</select>' +
+      '</td>' +
+      '</tr>';
+  });
+  tbody.innerHTML = html;
+}
+
+function filterPayees(group, el) {
+  currentPayeeFilter = group;
+  document.querySelectorAll('.payee-filter-tab').forEach(function(t){ t.classList.remove('active'); });
+  if (el) el.classList.add('active');
+  if (payeesData) renderPayees(payeesData, null);
+}
+window.filterPayees = filterPayees;
+
+function updateGroup(payeeRaw, group) {
+  if (!group) return;
+  apiPost('/audits/' + AUDIT_ID + '/payees/update-one', {payee_raw: payeeRaw, payee_group: group})
+    .then(function(){ loadPayees(); loadChecklistBar(); });
+}
+window.updateGroup = updateGroup;
+
+function updateTrade(payeeRaw, trade) {
+  apiPost('/audits/' + AUDIT_ID + '/payees/update-one', {payee_raw: payeeRaw, trade: trade});
+}
+window.updateTrade = updateTrade;
+
+function confirmAllLikely() {
+  if (!payeesData) return;
+  var likelies = payeesData.filter(function(p){ return p.match_type === 'likely' && !p.confirmed; });
+  if (!likelies.length) { alert('No unconfirmed likely matches.'); return; }
+  var promises = likelies.map(function(p){
+    return apiPost('/audits/' + AUDIT_ID + '/payees/update-one', {
+      payee_raw: p.payee_raw, payee_group: 'ccs_vendor',
+      vendor_id: p.vendor_id, vendor_name: p.vendor_name,
+      match_type: p.match_type,
+    });
+  });
+  Promise.all(promises).then(function(){ loadPayees(); loadChecklistBar(); });
+}
+window.confirmAllLikely = confirmAllLikely;
+
+// ── Analysis ─────────────────────────────────────────────────────────────────
+function loadAnalysis() {
+  document.getElementById('analysis-loading').style.display = 'block';
+  document.getElementById('analysis-content').style.display = 'none';
+  fetch('/audits/' + AUDIT_ID + '/analysis')
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      document.getElementById('analysis-loading').style.display = 'none';
+      if (!d.ok) return;
+      analysisData = d;
+      renderAnalysis(d.subs, d.headline);
+      document.getElementById('analysis-content').style.display = 'block';
+
+      var totalSubs = (d.headline || {}).subs_count || 0;
+      var full = (d.headline || {}).full_count || 0;
+      document.getElementById('analysis-badge').textContent =
+        full + ' of ' + totalSubs + ' on file for whole period';
+    });
+}
+window.loadAnalysis = loadAnalysis;
+
+function renderAnalysis(subs, headline) {
+  if (!subs) return;
+
+  // Headline strip
+  var h = headline || {};
+  var fmt = function(n){ return '$' + parseFloat(n||0).toLocaleString('en-US',{minimumFractionDigits:0,maximumFractionDigits:0}); };
+  var hboxes = [
+    {num: h.subs_count||0, label:'Payees'},
+    {num: fmt(h.total_paid), label:'Total paid'},
+    {num: h.full_count||0, label:'Whole period on file'},
+    {num: h.partial_count||0, label:'Part of period'},
+    {num: h.missing_count||0, label:'Not on file'},
+    {num: h.not_in_ccs_count||0, label:'Not in CCS yet'},
+    {num: fmt(h.paid_in_gaps_total), label:'Paid in gaps', alert:true},
+  ];
+  document.getElementById('headline-strip').innerHTML = hboxes.map(function(b){
+    return '<div class="hl-box' + (b.alert?' hl-alert':'') + '"><span class="hl-num">' + b.num + '</span><span class="hl-label">' + b.label + '</span></div>';
+  }).join('');
+
+  // Status readiness line
+  var ready_text = '';
+  if (h.subs_count > 0) {
+    var open_items = (h.subs_count||0) - (h.full_count||0);
+    ready_text = (h.full_count||0) + ' of ' + (h.subs_count||0) +
+      ' subcontractor payees have a certificate on file for the whole period. ' +
+      (open_items > 0 ? open_items + ' items left.' : 'All covered.');
+  }
+
+  var statusColors = {
+    'full':           'status-on-file',
+    'short_gap':      'status-partial',
+    'gap':            'status-partial',
+    'none_in_window': 'status-not-on-file',
+    'no_policy':      'status-not-on-file',
+    'not_in_ccs':     'status-not-in-ccs',
+  };
+
+  var tbody = document.getElementById('analysis-tbody');
+  var rows = '';
+  subs.forEach(function(s, idx){
+    var statusCls = statusColors[s.status] || 'status-not-in-ccs';
+    var amt    = '$' + parseFloat(s.total_paid||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+    var gapAmt = '$' + parseFloat(s.paid_in_gaps||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+    var termsHtml = '';
+    if (s.terms && s.terms.length) {
+      termsHtml = s.terms.map(function(t){ return esc(t.effective) + ' to ' + esc(t.expiration); }).join('<br>');
+    } else {
+      termsHtml = '<span style="color:var(--secondary)">None on file</span>';
+    }
+    var wcBadge = '';
+    if (s.wc_on_file !== null && s.wc_on_file !== undefined) {
+      wcBadge = s.wc_on_file ?
+        '<br><span style="font-size:0.72rem; color:#0a3622; background:#d1e7dd; padding:1px 5px; border-radius:8px">WC on file</span>' :
+        '<br><span style="font-size:0.72rem; color:#383d41; background:#e2e3e5; padding:1px 5px; border-radius:8px">WC not on file</span>';
+    }
+
+    rows += '<tr class="sub-row" onclick="togglePayments(' + idx + ', this)">' +
+      '<td><strong>' + esc(s.payee_raw) + '</strong>' +
+        (s.vendor_id ? '<br><span style="font-size:0.76rem; color:var(--secondary)">' + esc(s.vendor_name) + '</span>' : '') +
+        (s.trade ? '<br><span style="font-size:0.76rem; color:var(--secondary)">' + esc(s.trade) + '</span>' : '') +
+      '</td>' +
+      '<td style="white-space:nowrap">' + amt + '<br><span style="font-size:0.76rem; color:var(--secondary)">' + (s.txn_count||0) + ' txns</span></td>' +
+      '<td style="font-size:0.82rem">' + termsHtml + wcBadge + '</td>' +
+      '<td>' + (s.days_not_on_file||0) + ' days</td>' +
+      '<td style="font-weight:600; white-space:nowrap">' + (s.paid_in_gaps > 0 ? gapAmt : '<span style="color:var(--secondary)">—</span>') + '</td>' +
+      '<td><span class="status-label ' + statusCls + '">' + esc(s.status_label) + '</span></td>' +
+      '<td style="font-size:0.76rem"><button class="btn btn-sm btn-secondary" onclick="event.stopPropagation(); showRemForm(' + idx + ')">Note</button></td>' +
+      '</tr>' +
+      '<tr id="pay-detail-' + idx + '" style="display:none"><td colspan="7" style="padding:0"><div class="payments-detail" id="pay-detail-body-' + idx + '">Loading…</div></td></tr>' +
+      '<tr id="rem-form-' + idx + '" style="display:none"><td colspan="7" style="padding:8px 10px"><div class="rem-form" id="rem-form-body-' + idx + '"></div></td></tr>';
+  });
+  if (!rows) rows = '<tr><td colspan="7" style="color:var(--secondary); padding:20px; font-style:italic">No subcontractor payees found. Upload a payments file and confirm payees first.</td></tr>';
+  tbody.innerHTML = rows;
+
+  // Store analysis data for payment lookup
+  window._analysisSubs = subs;
+
+  if (ready_text) {
+    var readyEl = document.createElement('p');
+    readyEl.style.cssText = 'font-size:0.86rem; font-weight:600; margin-bottom:12px; color:var(--navy)';
+    readyEl.textContent = ready_text;
+    document.getElementById('analysis-content').insertBefore(readyEl, document.getElementById('analysis-tbl').parentElement);
+  }
+}
+
+function togglePayments(idx, row) {
+  var detailRow = document.getElementById('pay-detail-' + idx);
+  if (!detailRow) return;
+  var showing = detailRow.style.display !== 'none';
+  detailRow.style.display = showing ? 'none' : '';
+  if (!showing) loadPaymentDetail(idx);
+}
+window.togglePayments = togglePayments;
+
+function loadPaymentDetail(idx) {
+  var subs = window._analysisSubs || [];
+  if (idx >= subs.length) return;
+  var sub  = subs[idx];
+  var body = document.getElementById('pay-detail-body-' + idx);
+  if (!body) return;
+  fetch('/audits/' + AUDIT_ID + '/payments?payee=' + encodeURIComponent(sub.payee_raw))
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if (!d.ok || !d.payments.length) {
+        body.textContent = 'No payments found in audit period.'; return;
+      }
+      var rows = d.payments.map(function(p){
+        var amt = '$' + parseFloat(p.amount||0).toFixed(2);
+        return '<tr><td>' + esc(p.txn_date) + '</td><td>' + esc(p.account||'') + '</td>' +
+          '<td>' + esc(p.txn_type||'') + '</td><td style="text-align:right">' + amt + '</td>' +
+          '<td>' + (p.is_card ? 'Card' : 'Bank') + '</td></tr>';
+      }).join('');
+      body.innerHTML = '<table><thead><tr><th>Date</th><th>Account</th><th>Type</th><th>Amount</th><th>Method</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    });
+}
+
+function showRemForm(idx) {
+  var subs = window._analysisSubs || [];
+  if (idx >= subs.length) return;
+  var sub = subs[idx];
+  var row = document.getElementById('rem-form-' + idx);
+  if (!row) return;
+  row.style.display = row.style.display === 'none' ? '' : 'none';
+  if (row.style.display !== 'none') {
+    var body = document.getElementById('rem-form-body-' + idx);
+    body.innerHTML =
+      '<div style="display:flex; gap:10px; align-items:flex-start; flex-wrap:wrap;">' +
+        '<select id="rem-status-' + idx + '" style="padding:6px 10px; border:1.5px solid var(--border); border-radius:6px; font-size:0.86rem;">' +
+          '<option value="">Mark as…</option>' +
+          '<option value="requested_no_response">Requested, no response</option>' +
+          '<option value="not_a_sub">Not a subcontractor</option>' +
+          '<option value="provided_as_is">Provided to auditor as-is</option>' +
+          '<option value="other">Other</option>' +
+        '</select>' +
+        '<input type="text" id="rem-note-' + idx + '" placeholder="Note (optional)" style="flex:1; padding:6px 10px; border:1.5px solid var(--border); border-radius:6px; font-size:0.86rem;">' +
+        '<button class="btn btn-sm btn-primary" onclick="saveRem(' + idx + ', \'' + esc(sub.payee_raw) + '\')">Save</button>' +
+      '</div>';
+  }
+}
+window.showRemForm = showRemForm;
+
+function saveRem(idx, payeeRaw) {
+  var status = document.getElementById('rem-status-' + idx).value;
+  var note   = document.getElementById('rem-note-' + idx).value;
+  apiPost('/audits/' + AUDIT_ID + '/remediation', {payee_raw: payeeRaw, status: status, note: note})
+    .then(function(){
+      document.getElementById('rem-form-' + idx).style.display = 'none';
+    });
+}
+window.saveRem = saveRem;
+
+// ── Checklist section ────────────────────────────────────────────────────────
+function loadChecklist() {
+  document.getElementById('checklist-loading').style.display = 'block';
+  document.getElementById('checklist-content').style.display = 'none';
+  fetch('/audits/' + AUDIT_ID + '/checklist')
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      document.getElementById('checklist-loading').style.display = 'none';
+      if (!d.ok) return;
+      var steps = d.steps || [];
+      var html = '';
+      steps.forEach(function(s){
+        html += '<div class="step-item">' +
+          '<div class="step-check ' + (s.done ? 'done' : 'todo') + '">' + (s.done ? '✓' : s.step) + '</div>' +
+          '<div>' +
+            '<div class="step-title">' + esc(s.title) + '</div>' +
+            '<div class="step-detail">' + esc(s.detail || '') +
+              (s.link ? ' <a href="' + s.link + '" style="color:var(--blue)">Go ↗</a>' : '') +
+            '</div>' +
+          '</div>' +
+          '</div>';
+      });
+      document.getElementById('step-list').innerHTML = html;
+      document.getElementById('checklist-badge').textContent = d.done_count + ' of ' + d.total_count + ' done';
+      document.getElementById('checklist-content').style.display = 'block';
+    });
+}
+window.loadChecklist = loadChecklist;
+
+// ── Remainder section ────────────────────────────────────────────────────────
+function loadRemainder() {
+  if (!analysisData) {
+    // Load analysis first
+    fetch('/audits/' + AUDIT_ID + '/analysis')
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if (!d.ok) return;
+        analysisData = d;
+        renderRemainder(d.subs);
+      });
+  } else {
+    renderRemainder(analysisData.subs);
+  }
+}
+window.loadRemainder = loadRemainder;
+
+function renderRemainder(subs) {
+  document.getElementById('remainder-loading').style.display = 'none';
+  document.getElementById('remainder-content').style.display = 'block';
+  if (!subs) return;
+  var needsRem = subs.filter(function(s){ return s.status !== 'full'; });
+  if (!needsRem.length) {
+    document.getElementById('remainder-tbody').innerHTML =
+      '<tr><td colspan="6" style="color:var(--secondary); padding:20px; font-style:italic">All subs are on file for the whole period.</td></tr>';
+    return;
+  }
+  var html = '';
+  needsRem.forEach(function(s, idx){
+    var amt = '$' + parseFloat(s.total_paid||0).toFixed(2);
+    var curStatus = s.remediation || '';
+    var curNote   = s.remediation_note || '';
+    html += '<tr>' +
+      '<td>' + esc(s.payee_raw) + '</td>' +
+      '<td>' + amt + '</td>' +
+      '<td>' + esc(s.status_label) + '</td>' +
+      '<td>' +
+        '<select id="rrem-status-' + idx + '" style="padding:5px 8px; border:1.5px solid var(--border); border-radius:5px; font-size:0.82rem;">' +
+          '<option value=""' + (!curStatus?'selected':'') + '>—</option>' +
+          '<option value="requested_no_response"' + (curStatus==='requested_no_response'?'selected':'') + '>Requested, no response</option>' +
+          '<option value="not_a_sub"' + (curStatus==='not_a_sub'?'selected':'') + '>Not a sub</option>' +
+          '<option value="provided_as_is"' + (curStatus==='provided_as_is'?'selected':'') + '>Provided as-is</option>' +
+          '<option value="other"' + (curStatus==='other'?'selected':'') + '>Other</option>' +
+        '</select>' +
+      '</td>' +
+      '<td><input type="text" id="rrem-note-' + idx + '" value="' + esc(curNote) + '" placeholder="Optional note" style="width:100%; padding:5px 8px; border:1.5px solid var(--border); border-radius:5px; font-size:0.82rem;"></td>' +
+      '<td><button class="btn btn-sm btn-secondary" onclick="saveRemR(' + idx + ', \'' + esc(s.payee_raw) + '\')">Save</button></td>' +
+      '</tr>';
+  });
+  document.getElementById('remainder-tbody').innerHTML = html;
+}
+
+function saveRemR(idx, payeeRaw) {
+  var status = document.getElementById('rrem-status-' + idx).value;
+  var note   = document.getElementById('rrem-note-' + idx).value;
+  apiPost('/audits/' + AUDIT_ID + '/remediation', {payee_raw: payeeRaw, status: status, note: note});
+}
+window.saveRemR = saveRemR;
+
+// ── Create drafts ────────────────────────────────────────────────────────────
+function createDrafts() {
+  var btn = document.getElementById('btn-create-drafts');
+  btn.disabled = true; btn.textContent = 'Generating…';
+  var fd = new FormData();
+  fd.append('csrf_token', CSRF_TOKEN);
+  fetch('/audits/' + AUDIT_ID + '/create-drafts', {method:'POST', body:fd})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      btn.disabled = false; btn.textContent = 'Generate drafts';
+      var el = document.getElementById('draft-result');
+      if (!d.ok) {
+        el.innerHTML = '<span style="color:#dc3545">Error: ' + esc(d.error||'unknown') + '</span>';
+        el.style.display = 'block'; return;
+      }
+      var html = '<strong>' + d.drafts_created + ' draft' + (d.drafts_created===1?'':'s') + ' created.</strong>';
+      if (d.agent_count)   html += ' ' + d.agent_count + ' batched per agent.';
+      if (d.direct_count)  html += ' ' + d.direct_count + ' direct to vendor.';
+      if (d.no_contact && d.no_contact.length) {
+        html += '<br><span style="color:var(--secondary)">No contact on file for: ' +
+          d.no_contact.map(function(n){ return esc(n); }).join(', ') + '</span>';
+      }
+      if (d.cert_holder_missing) {
+        html += '<br><span style="color:#dc3545">Certificate holder not set for this client — set it in Clients before copying any draft.</span>';
+      }
+      html += ' <a href="' + d.emails_url + '" class="btn btn-sm btn-secondary" style="margin-left:8px">View Emails ↗</a>';
+      el.innerHTML = html; el.style.display = 'block';
+      loadChecklistBar();
+    })
+    .catch(function(e){
+      btn.disabled=false; btn.textContent='Generate drafts';
+      var el = document.getElementById('draft-result');
+      el.innerHTML = '<span style="color:#dc3545">' + esc(String(e)) + '</span>';
+      el.style.display = 'block';
+    });
+}
+window.createDrafts = createDrafts;
+
+// ── Build pack ───────────────────────────────────────────────────────────────
+function buildPack() {
+  var btn = document.getElementById('btn-build');
+  var status = document.getElementById('build-status');
+  btn.disabled = true; status.style.display = 'inline';
+  var fd = new FormData();
+  fd.append('csrf_token', CSRF_TOKEN);
+  fetch('/audits/' + AUDIT_ID + '/build-pack', {method:'POST', body:fd})
+    .then(function(r){
+      if (!r.ok) throw new Error('Server error ' + r.status);
+      return r.blob();
+    })
+    .then(function(blob){
+      var url = URL.createObjectURL(blob);
+      var a   = document.createElement('a');
+      a.href  = url; a.download = 'audit_pack.zip';
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      btn.disabled = false; status.style.display = 'none';
+      loadChecklistBar();
+    })
+    .catch(function(e){
+      btn.disabled=false; status.style.display='none';
+      alert('Build failed: ' + e);
+    });
+}
+window.buildPack = buildPack;
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+function apiPost(url, data) {
+  var fd = new FormData();
+  fd.append('csrf_token', CSRF_TOKEN);
+  // Also send as JSON for JSON-expecting endpoints
+  return fetch(url, {
+    method:'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({...data, csrf_token: CSRF_TOKEN}),
+  }).then(function(r){ return r.json(); });
+}
+
+})();
+</script>
+</body>
+</html>

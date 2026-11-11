@@ -1583,3 +1583,442 @@ select.policy-input {
   vertical-align: middle;
 }
 .nav-link--active { color: var(--navy); font-weight: 700; }
+/* ── Pulse page styles ───────────────────────────────────────────────────────
+   Add these rules to static/review.css (or @import this file from there).
+   All CSS variables come from the existing :root block in review.css.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+/* ── Global pulse banner (shown on every page when system is not green) ── */
+.banner-pulse {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 32px;
+  font-size: 0.84rem;
+  font-weight: 600;
+  line-height: 1.4;
+  position: sticky;
+  top: 68px;   /* sits flush under .topnav */
+  z-index: 190;
+  border-bottom: 1px solid transparent;
+}
+.banner-pulse a {
+  text-decoration: underline;
+  color: inherit;
+  opacity: 0.85;
+}
+.banner-pulse a:hover { opacity: 1; }
+
+.banner-pulse--ok {
+  background: #d4edda;
+  color: #1a5e2d;
+  border-color: #b8dfc8;
+}
+.banner-pulse--warn {
+  background: #fff3cd;
+  color: #7a5200;
+  border-color: #fce08a;
+}
+.banner-pulse--error {
+  background: #ffe8e8;
+  color: #9b1a1a;
+  border-color: #f5c6c6;
+}
+
+/* ── Status dots ─────────────────────────────────────────────────────────── */
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  vertical-align: middle;
+  margin-right: 5px;
+  margin-top: -1px;
+}
+.status-dot--green { background: #22c55e; }
+.status-dot--amber { background: #f59e0b; }
+.status-dot--red   { background: #ef4444; }
+
+/* ── Status row (dot + label + value in one line) ────────────────────────── */
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 0;
+  font-size: 0.88rem;
+  border-bottom: 1px solid var(--border);
+}
+.status-row:last-child { border-bottom: none; }
+
+.status-row-label {
+  flex: 1;
+  color: var(--navy);
+  font-weight: 500;
+}
+.status-row-value {
+  color: var(--secondary);
+  font-size: 0.84rem;
+  white-space: nowrap;
+}
+.status-row-detail {
+  font-size: 0.78rem;
+  color: var(--secondary);
+  margin-top: 1px;
+}
+
+/* ── Pulse page grid ─────────────────────────────────────────────────────── */
+.pulse-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin-top: 24px;
+}
+
+/* Sections that should span both columns */
+.pulse-section--full { grid-column: 1 / -1; }
+
+/* ── Pulse section card ──────────────────────────────────────────────────── */
+.pulse-section {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 1px 5px rgba(16,32,66,0.06);
+  overflow: hidden;
+}
+
+.pulse-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 18px 8px;
+  background: var(--offwhite);
+  border-bottom: 1px solid var(--border);
+  gap: 8px;
+}
+
+.pulse-section-title {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--blue);
+  margin: 0;
+}
+
+.pulse-section-status {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.pulse-section-status--ok    { color: #15803d; }
+.pulse-section-status--warn  { color: #92600a; }
+.pulse-section-status--error { color: #b03a2e; }
+
+.pulse-section-body {
+  padding: 14px 18px;
+}
+
+/* ── Progress bar ────────────────────────────────────────────────────────── */
+.pulse-bar-wrap {
+  height: 10px;
+  background: var(--bg);
+  border-radius: 5px;
+  overflow: hidden;
+  margin: 6px 0;
+}
+.pulse-bar-fill {
+  height: 100%;
+  border-radius: 5px;
+  transition: width 0.3s ease;
+}
+.pulse-bar-fill--ok    { background: #22c55e; }
+.pulse-bar-fill--warn  { background: #f59e0b; }
+.pulse-bar-fill--error { background: #ef4444; }
+
+.pulse-bar-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.78rem;
+  color: var(--secondary);
+  margin-top: 3px;
+}
+.pulse-bar-label strong { color: var(--navy); }
+
+/* ── Compact data table ──────────────────────────────────────────────────── */
+.pulse-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.84rem;
+}
+.pulse-table th {
+  background: var(--offwhite);
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--secondary);
+  padding: 6px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.pulse-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.pulse-table tr:last-child td { border-bottom: none; }
+.pulse-table tbody tr:hover td { background: #faf9f7; }
+
+/* Right-aligned numeric columns */
+.pulse-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* ── Metric pair (big number + label) ───────────────────────────────────── */
+.pulse-metric-row {
+  display: flex;
+  gap: 0;
+  margin-bottom: 14px;
+}
+.pulse-metric {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-right: 16px;
+  border-right: 1px solid var(--border);
+  margin-right: 16px;
+}
+.pulse-metric:last-child {
+  border-right: none;
+  margin-right: 0;
+  padding-right: 0;
+}
+.pulse-metric-num {
+  font-family: var(--font-serif);
+  font-size: 2rem;
+  color: var(--navy);
+  line-height: 1.1;
+}
+.pulse-metric-num--warn  { color: #92600a; }
+.pulse-metric-num--error { color: #b03a2e; }
+.pulse-metric-label {
+  font-size: 0.72rem;
+  color: var(--secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+
+/* ── Skipped email item ──────────────────────────────────────────────────── */
+.pulse-skipped-item {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 10px 14px;
+  margin-bottom: 8px;
+  background: #fff;
+}
+.pulse-skipped-item:last-child { margin-bottom: 0; }
+.pulse-skipped-subject {
+  font-weight: 600;
+  font-size: 0.88rem;
+  color: var(--navy);
+  margin-bottom: 2px;
+}
+.pulse-skipped-meta {
+  font-size: 0.78rem;
+  color: var(--secondary);
+  margin-bottom: 8px;
+}
+.pulse-skipped-reason {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 600;
+  background: var(--offwhite);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 7px;
+  color: var(--secondary);
+  margin-bottom: 8px;
+}
+.pulse-skipped-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ── Stuck cert item ─────────────────────────────────────────────────────── */
+.pulse-stuck-item {
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.84rem;
+}
+.pulse-stuck-item:last-child { border-bottom: none; }
+.pulse-stuck-filename {
+  font-weight: 600;
+  color: var(--navy);
+}
+.pulse-stuck-meta {
+  font-size: 0.78rem;
+  color: var(--secondary);
+  margin-top: 2px;
+}
+.pulse-stuck-error {
+  font-size: 0.75rem;
+  color: #b03a2e;
+  margin-top: 3px;
+  font-style: italic;
+}
+
+/* ── Error list (write failures, AI errors) ──────────────────────────────── */
+.pulse-error-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.pulse-error-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.84rem;
+}
+.pulse-error-item:last-child { border-bottom: none; }
+.pulse-error-ts {
+  font-size: 0.72rem;
+  color: var(--secondary);
+}
+.pulse-error-msg {
+  color: #b03a2e;
+  font-size: 0.84rem;
+}
+.pulse-error-retried {
+  font-size: 0.72rem;
+  color: #22c55e;
+  font-weight: 600;
+}
+
+/* ── Waiting-on-Haley counters ───────────────────────────────────────────── */
+.pulse-action-items {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.pulse-action-item {
+  background: var(--offwhite);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.pulse-action-count {
+  font-family: var(--font-serif);
+  font-size: 1.8rem;
+  color: var(--navy);
+  line-height: 1;
+}
+.pulse-action-count--zero    { color: var(--secondary); opacity: 0.5; }
+.pulse-action-count--warn    { color: #92600a; }
+.pulse-action-count--error   { color: #b03a2e; }
+.pulse-action-label {
+  font-size: 0.72rem;
+  color: var(--secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+
+/* ── Per-client summary table inside Business snapshot ──────────────────── */
+.pulse-client-row-ok    { }
+.pulse-client-row-warn  td { background: #fffaed !important; }
+.pulse-client-row-error td { background: #fff5f5 !important; }
+
+/* ── Scheduled jobs ──────────────────────────────────────────────────────── */
+.pulse-job-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 8px 14px;
+  align-items: center;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.84rem;
+}
+.pulse-job-row:last-child { border-bottom: none; }
+.pulse-job-name {
+  font-weight: 600;
+  color: var(--navy);
+}
+.pulse-job-meta {
+  font-size: 0.75rem;
+  color: var(--secondary);
+  margin-top: 1px;
+}
+.pulse-job-result {
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.pulse-job-result--ok    { color: #15803d; }
+.pulse-job-result--warn  { color: #92600a; }
+.pulse-job-result--error { color: #b03a2e; }
+
+/* ── Last-check timestamp ────────────────────────────────────────────────── */
+.pulse-last-check {
+  font-size: 0.78rem;
+  color: var(--secondary);
+  margin-top: 6px;
+}
+
+/* ── Empty / degraded notice inside a section ───────────────────────────── */
+.pulse-empty {
+  font-size: 0.84rem;
+  color: var(--secondary);
+  font-style: italic;
+  padding: 8px 0;
+}
+
+.pulse-degraded {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  color: #92600a;
+  background: #fffaed;
+  border: 1px solid #fce08a;
+  border-radius: 6px;
+  padding: 7px 12px;
+  margin-bottom: 10px;
+}
+
+/* ── Refresh button ──────────────────────────────────────────────────────── */
+.pulse-refresh-btn {
+  font-size: 0.78rem;
+}
+
+/* ── Mobile ──────────────────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+  .pulse-grid { grid-template-columns: 1fr; }
+  .pulse-section--full { grid-column: 1; }
+  .pulse-action-items { grid-template-columns: 1fr 1fr; }
+  .banner-pulse { top: 60px; padding: 10px 16px; }
+}
+@media (max-width: 540px) {
+  .pulse-action-items { grid-template-columns: 1fr; }
+  .pulse-metric-row { flex-direction: column; gap: 10px; }
+  .pulse-metric {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    padding-right: 0;
+    margin-right: 0;
+    padding-bottom: 10px;
+    margin-bottom: 0;
+  }
+  .pulse-metric:last-child { border-bottom: none; }
+  .pulse-job-row { grid-template-columns: 1fr; }
+}

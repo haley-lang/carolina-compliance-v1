@@ -895,32 +895,107 @@ def trigger_post_evaluation_hooks(
             logger.warning("Short-dated check failed for cert %s: %s", cert_id, exc)
 
 
+def _build_last_log_cache(compliance_log_table) -> dict:
+    """Load the most recent Compliance Log entry per (vendor_id, client_id).
+
+    Returns {(vendor_id, client_id): {"decision": str, "failure_reasons": str}}
+    so that write_compliance_log can skip identical repeat entries without an
+    extra API call per vendor.  Built once at the start of run().
+    """
+    cache: dict = {}
+    try:
+        all_rows = compliance_log_table.all(
+            fields=[
+                "fldkq8vZZsN6uBTL0",   # Vendor Link
+                "fldbKVYBi20p6wykZ",    # Client Link
+                "fld6Ml1MK3QpmIICK",    # Decision
+                "fldoTDHEEkekT2jAj",    # Failure Reasons
+                "fldWzdPiDQOXqlwhg",    # Timestamp — used to find the most recent
+            ],
+            sort=["fldWzdPiDQOXqlwhg"],  # ascending by timestamp
+            use_field_ids=True,
+        )
+        for row in all_rows:
+            f = row["fields"]
+            vendor_links = f.get("fldkq8vZZsN6uBTL0") or []
+            client_links = f.get("fldbKVYBi20p6wykZ") or []
+            if not vendor_links or not client_links:
+                continue
+            vid = vendor_links[0]
+            cid = client_links[0]
+            decision_val = f.get("fld6Ml1MK3QpmIICK")
+            decision_str = decision_val.get("name") if isinstance(decision_val, dict) else (decision_val or "")
+            failure_str  = (f.get("fldoTDHEEkekT2jAj") or "").strip()
+            cache[(vid, cid)] = {"decision": decision_str, "failure_reasons": failure_str}
+        logger.info("Compliance log cache built: %d vendor×client pairs", len(cache))
+    except Exception as exc:
+        logger.warning("Could not build compliance log cache (will write all): %s", exc)
+    return cache
+
+
 def write_compliance_log(vendor_id, vendor_name, client_id, client_name,
                          new_decision, previous_decision, failure_reasons,
-                         compliance_log_table):
-    """Write one record to the Compliance Log table after every compliance decision."""
+                         compliance_log_table, _last_log_cache: dict | None = None):
+    """Write a Compliance Log record only when the decision or failure reasons changed.
+
+    Pass `_last_log_cache` (built once per run via _build_last_log_cache) so
+    this function can skip duplicate writes without extra API calls.
+    If the cache is None (e.g. from module_8b's legacy call path) the write
+    proceeds unconditionally — same as before this fix, so no regression.
+    """
     if not vendor_id:
         logger.info("Skipping compliance log — no vendor ID")
         return
     if not client_id:
         logger.info("Skipping compliance log — no client ID")
         return
+
+    new_failure_str = "\n".join(failure_reasons).strip() if failure_reasons else ""
+
+    # ── Dedup: skip if decision AND failure reasons are unchanged ─────────
+    if _last_log_cache is not None:
+        last = _last_log_cache.get((vendor_id, client_id))
+        if last:
+            if last["decision"] == new_decision and last["failure_reasons"] == new_failure_str:
+                logger.debug("Compliance log skipped (unchanged): %s / %s → %s",
+                             vendor_name, client_name, new_decision)
+                return
+        # Update cache so subsequent calls within the same run use the new state
+        _last_log_cache[(vendor_id, client_id)] = {
+            "decision": new_decision,
+            "failure_reasons": new_failure_str,
+        }
+
+    # ── Circuit breaker ───────────────────────────────────────────────────
+    try:
+        import health_store as _hs
+        _hs.record_write("Compliance Log")
+        if not _hs.check_circuit_breaker("Compliance Log"):
+            logger.error(
+                "Circuit breaker tripped for Compliance Log — aborting write "
+                "for %s / %s. Too many writes in the last %s minutes.",
+                vendor_name, client_name, _hs.CB_WINDOW_MINUTES,
+            )
+            return
+    except ImportError:
+        pass  # health_store not yet available during tests
+
     try:
         log_date = date.today().isoformat()
         log_entry = f"{vendor_name} — {client_name} — {log_date}"
         decision_changed = (new_decision != previous_decision)
 
         record = {
-            "fldzUTll7izbXfBEB": log_entry,                          # Log Entry (primary)
-            "fldWzdPiDQOXqlwhg": datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),  # Timestamp
-            "fldu8DcdwPbDxCvpb": vendor_name,                        # Vendor Name
-            "fldcbzhSPWdOBanym": client_name,                        # Client Name
-            "fld6Ml1MK3QpmIICK": new_decision,                       # Decision
-            "fldoTDHEEkekT2jAj": "\n".join(failure_reasons) if failure_reasons else "",  # Failure Reasons
-            "fld4HwkZfiYTwVnW6": previous_decision or "",            # Previous Decision
-            "fld7lWbXuLhKg46Dk": decision_changed,                   # Decision Changed
-            "fldkq8vZZsN6uBTL0": [vendor_id],                       # Vendor Link
-            "fldbKVYBi20p6wykZ": [client_id],                        # Client Link
+            "fldzUTll7izbXfBEB": log_entry,
+            "fldWzdPiDQOXqlwhg": datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+            "fldu8DcdwPbDxCvpb": vendor_name,
+            "fldcbzhSPWdOBanym": client_name,
+            "fld6Ml1MK3QpmIICK": new_decision,
+            "fldoTDHEEkekT2jAj": new_failure_str,
+            "fld4HwkZfiYTwVnW6": previous_decision or "",
+            "fld7lWbXuLhKg46Dk": decision_changed,
+            "fldkq8vZZsN6uBTL0": [vendor_id],
+            "fldbKVYBi20p6wykZ": [client_id],
         }
 
         compliance_log_table.create(record)
@@ -929,6 +1004,15 @@ def write_compliance_log(vendor_id, vendor_name, client_id, client_name,
     except Exception as e:
         logger.error("Failed to write compliance log for %s / %s: %s",
                       vendor_name, client_name, e)
+        try:
+            import health_store as _hs
+            _hs.record_event(
+                "write_error", "error",
+                f"Compliance Log write failed: {vendor_name} / {client_name}",
+                body=str(e), table_name="Compliance Log",
+            )
+        except ImportError:
+            pass
 
 
 def run():
@@ -945,6 +1029,7 @@ def run():
     assignments_table = api.table(AIRTABLE_BASE_ID, "Vendor Client Assignments")
     clients_table = api.table(AIRTABLE_BASE_ID, "tbltnBIWke20IEI3K")  # Clients table
     compliance_log_table = api.table(AIRTABLE_BASE_ID, COMPLIANCE_LOG_TABLE_ID)
+    last_log_cache = _build_last_log_cache(compliance_log_table)
     overrides_table = api.table(AIRTABLE_BASE_ID, "tblKVIdTYwF1Sp5Iw")  # Vendor Requirement Overrides
     vendors = fetch_records(vendors_table)
 
@@ -1016,6 +1101,7 @@ def run():
                     previous_decision=previous_decision,
                     failure_reasons=failure_reasons,
                     compliance_log_table=compliance_log_table,
+                    _last_log_cache=last_log_cache,
                 )
 
                 # Ladder + short-dated hooks (module 20/22)
@@ -1077,6 +1163,7 @@ def run():
                 previous_decision=previous_decision_legacy,
                 failure_reasons=[],  # Legacy path does not produce granular reasons
                 compliance_log_table=compliance_log_table,
+                _last_log_cache=last_log_cache,
             )
 
             # Ladder + short-dated hooks (legacy path — no structured reasons)
@@ -1092,6 +1179,11 @@ def run():
             )
 
     logger.info("=== Requirement validation complete ===")
+    try:
+        import health_store as _hs
+        _hs.record_heartbeat("pipeline")
+    except ImportError:
+        pass
 
 if __name__ == "__main__":
     run()

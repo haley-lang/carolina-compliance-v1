@@ -735,6 +735,11 @@ if __name__ == "__main__":
                 raise
 
         print(f"[email_monitor] Entrypoint: results count = {len(results)} (actionable: {len(actionable_results)})")
+        try:
+            import health_store as _hs
+            _hs.record_heartbeat("email_monitor")
+        except Exception:
+            pass
     except Exception:
         print("[email_monitor] Entrypoint: exception occurred")
         print(traceback.format_exc())

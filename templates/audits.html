@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CCS — Audits</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='ccs_icon.svg') }}">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='review.css') }}">
+  <style>
+    .page-title { font-family:var(--font-serif); font-size:1.7rem; margin-bottom:4px; color:var(--navy); }
+    .page-sub   { font-size:0.9rem; color:var(--secondary); margin-bottom:28px; }
+    .section-heading { font-family:var(--font-serif); font-size:1.15rem; margin-bottom:14px; color:var(--navy); }
+    .form-grid  { display:grid; grid-template-columns:1fr 1fr; gap:14px 20px; }
+    .form-group { display:flex; flex-direction:column; gap:4px; }
+    .form-group label { font-size:0.78rem; font-weight:700; color:var(--secondary); text-transform:uppercase; letter-spacing:0.04em; }
+    .form-group select,.form-group input { padding:9px 12px; border:1.5px solid var(--border); border-radius:7px;
+      font-size:0.9rem; font-family:var(--font-sans); background:#fff; }
+    .form-group select:focus,.form-group input:focus { outline:none; border-color:var(--blue); }
+    .type-toggle { display:flex; }
+    .type-toggle label { flex:1; }
+    .type-toggle input { display:none; }
+    .type-toggle .pill { display:block; text-align:center; padding:9px 14px; border:1.5px solid var(--border);
+      font-size:0.86rem; font-weight:600; cursor:pointer; background:#fff; color:var(--navy); transition:all 0.12s; }
+    .type-toggle label:first-child .pill { border-radius:7px 0 0 7px; }
+    .type-toggle label:last-child  .pill { border-radius:0 7px 7px 0; border-left:none; }
+    .type-toggle input:checked + .pill { background:var(--navy); color:#fff; border-color:var(--navy); }
+    .audit-row { display:grid; grid-template-columns:2fr 1fr 1.5fr 1fr 1fr; gap:0; border-bottom:1px solid var(--border);
+      text-decoration:none; color:inherit; }
+    .audit-row:hover { background:#f8f7f5; }
+    .audit-row td, .audit-row-cell { padding:11px 12px; font-size:0.88rem; }
+    .audits-table { width:100%; border-collapse:collapse; }
+    .audits-table th { text-align:left; padding:8px 12px; border-bottom:2px solid var(--border);
+      font-size:0.75rem; font-weight:700; color:var(--secondary); text-transform:uppercase; letter-spacing:0.04em; }
+    .audits-table td { padding:10px 12px; border-bottom:1px solid var(--border); font-size:0.88rem; }
+    .audits-table tr:hover td { background:#f8f7f5; cursor:pointer; }
+    .status-chip { display:inline-block; padding:2px 9px; border-radius:12px; font-size:0.74rem; font-weight:700; }
+    .chip-draft           { background:#e2e3e5; color:#383d41; }
+    .chip-gathering       { background:#cfe2ff; color:#084298; }
+    .chip-ready           { background:#fff3cd; color:#664d03; }
+    .chip-pack-built      { background:#d1e7dd; color:#0a3622; }
+    .chip-submitted       { background:#d1e7dd; color:#0a3622; }
+    .new-btn { display:inline-flex; align-items:center; gap:6px; }
+    .empty-row td { color:var(--secondary); font-style:italic; padding:28px 12px; }
+    .nav-link.nav-link--active { color:#fff !important; font-weight:700; }
+  </style>
+</head>
+<body>
+
+<nav class="topnav">
+  <a href="/queue" class="topnav-logo" aria-label="Carolina Compliance Solutions">
+    <img src="{{ url_for('static', filename='ccs_logo_dark.svg') }}" alt="CCS">
+  </a>
+  <div class="topnav-links">
+    <a href="/pulse" class="nav-link">Pulse</a>
+    <a href="/queue" class="nav-link">Queue</a>
+    <a href="/gaps" class="nav-link">Gaps</a>
+    <a href="/requests" class="nav-link">Requests</a>
+    <a href="/audits" class="nav-link nav-link--active">Audits</a>
+    <a href="/corrections" class="nav-link">Corrections</a>
+    <a href="/emails" class="nav-link">Emails{% set _ec = email_draft_count() %}{% if _ec > 0 %}<span class="nav-badge">{{ _ec }}</span>{% endif %}</a>
+    <a href="/logout" class="btn btn-gold btn-sm">Sign out</a>
+  </div>
+</nav>
+
+{% set _pb = pulse_banner() %}{% if _pb.level != 'ok' %}
+<div class="banner-pulse banner-pulse--{{ _pb.level }}">
+  <span class="status-dot status-dot--{{ _pb.level }}"></span>
+  {{ _pb.text }} — <a href="/pulse">View Pulse</a>
+</div>
+{% endif %}
+
+<div class="page-wrap">
+
+  {% for category, message in get_flashed_messages(with_categories=True) %}
+  <div class="flash flash-{{ category }}">{{ message }}</div>
+  {% endfor %}
+
+  <div style="display:flex; align-items:flex-start; justify-content:space-between; margin-bottom:28px;">
+    <div>
+      <h1 class="page-title" style="margin-bottom:4px">Audits</h1>
+      <p class="page-sub">Certificate audit workspace — payments, payee groups, coverage analysis, drafts, and pack export.</p>
+    </div>
+    <button class="btn btn-primary new-btn" onclick="document.getElementById('new-form-section').style.display='block'; this.style.display='none'">
+      + New audit
+    </button>
+  </div>
+
+  <!-- New audit form -->
+  <div id="new-form-section" style="display:{% if show_new_form %}block{% else %}none{% endif %}; margin-bottom:32px;">
+    <h2 class="section-heading">New audit</h2>
+    <div class="card">
+      <div class="card-body">
+        <form method="post" action="/audits/new">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <div class="form-grid">
+            <div class="form-group">
+              <label for="f-client">Client</label>
+              <select id="f-client" name="client_id" required>
+                {% for c in clients %}
+                <option value="{{ c.id }}" {% if c.id == rtr_client_id %}selected{% endif %}>{{ c.name }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="f-auditor">Auditor / Insurer (optional)</label>
+              <input type="text" id="f-auditor" name="auditor_name" placeholder="e.g. Erie / NEIS">
+            </div>
+            <div class="form-group" style="grid-column:1 / -1">
+              <label>Coverage</label>
+              <div class="type-toggle">
+                <label><input type="radio" name="coverage" value="General Liability" checked><span class="pill">General Liability</span></label>
+                <label><input type="radio" name="coverage" value="Workers' Comp"><span class="pill">Workers' Comp</span></label>
+                <label><input type="radio" name="coverage" value="Other"><span class="pill">Other</span></label>
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="f-start">Start Date</label>
+              <input type="date" id="f-start" name="start_date" required>
+            </div>
+            <div class="form-group">
+              <label for="f-end">End Date</label>
+              <input type="date" id="f-end" name="end_date" required>
+            </div>
+            <div class="form-group">
+              <label for="f-polnum">Policy Number (optional)</label>
+              <input type="text" id="f-polnum" name="policy_number" placeholder="optional">
+            </div>
+            <div class="form-group">
+              <label for="f-due">Pack Due Date (optional)</label>
+              <input type="date" id="f-due" name="due_date">
+            </div>
+            <div class="form-group" style="grid-column:1 / -1">
+              <label for="f-notes">Notes</label>
+              <input type="text" id="f-notes" name="notes" placeholder="Any additional context">
+            </div>
+          </div>
+          <div class="d-flex gap-8 mt-16">
+            <button type="submit" class="btn btn-primary">Create audit</button>
+            <button type="button" class="btn btn-secondary" onclick="document.getElementById('new-form-section').style.display='none'; document.querySelector('.new-btn').style.display=''">Cancel</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Filter -->
+  {% if clients | length > 1 %}
+  <div style="display:flex; gap:12px; align-items:center; margin-bottom:20px;">
+    <label style="font-size:0.82rem; font-weight:700; color:var(--secondary); text-transform:uppercase;">Filter by client</label>
+    <select onchange="window.location='?client_id='+this.value" style="padding:7px 10px; border:1.5px solid var(--border); border-radius:7px; font-size:0.88rem; font-family:var(--font-sans);">
+      <option value="">All clients</option>
+      {% for c in clients %}
+      <option value="{{ c.id }}" {% if c.id == client_filter %}selected{% endif %}>{{ c.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  {% endif %}
+
+  <!-- Audit list -->
+  <div class="card" style="overflow:hidden">
+    <table class="audits-table">
+      <thead>
+        <tr>
+          <th>Audit</th>
+          <th>Coverage</th>
+          <th>Period</th>
+          <th>Status</th>
+          <th>Due</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% if audits %}
+        {% for a in audits %}
+        <tr onclick="window.location='/audits/{{ a.id }}'" style="cursor:pointer">
+          <td>
+            <strong>{{ a.client_name }}</strong>
+            {% if a.auditor_name %}<br><span style="font-size:0.8rem; color:var(--secondary)">{{ a.auditor_name }}</span>{% endif %}
+          </td>
+          <td>{{ a.coverage }}</td>
+          <td style="white-space:nowrap">{{ a.start_date | fmt_date }} – {{ a.end_date | fmt_date }}</td>
+          <td>
+            {% set sc = {'Draft':'chip-draft','Gathering certificates':'chip-gathering',
+                         'Ready to build pack':'chip-ready','Pack built':'chip-pack-built',
+                         'Submitted':'chip-submitted'} %}
+            <span class="status-chip {{ sc.get(a.status, 'chip-draft') }}">{{ a.status }}</span>
+          </td>
+          <td style="color:var(--secondary)">{{ a.due_date | fmt_date if a.due_date else '—' }}</td>
+        </tr>
+        {% endfor %}
+      {% else %}
+        <tr class="empty-row"><td colspan="5">No audits yet. Create one above.</td></tr>
+      {% endif %}
+      </tbody>
+    </table>
+  </div>
+
+  <p style="margin-top:16px; font-size:0.82rem; color:var(--secondary)">
+    The old <a href="/audit">Audit Pack builder</a> is still available.
+  </p>
+
+</div>
+
+<script>
+(function(){
+  var clientSel = document.getElementById('f-client');
+  var RTR_ID = '{{ rtr_client_id }}';
+  if (clientSel && clientSel.value === RTR_ID) {
+    var s = document.getElementById('f-start');
+    var e = document.getElementById('f-end');
+    if (s && !s.value) s.value = '2025-09-30';
+    if (e && !e.value) e.value = '2026-09-30';
+  }
+  if (clientSel) {
+    clientSel.addEventListener('change', function() {
+      if (this.value === RTR_ID) {
+        var s = document.getElementById('f-start');
+        var e = document.getElementById('f-end');
+        if (s && !s.value) s.value = '2025-09-30';
+        if (e && !e.value) e.value = '2026-09-30';
+      }
+    });
+  }
+})();
+</script>
+</body>
+</html>

@@ -114,6 +114,9 @@ Rules:
   description of operations. Do NOT include email addresses that appear only in the
   CERTIFICATE HOLDER section — those belong to the requesting party, not the insured
   or their agent, and must not be used as vendor contact information.
+- For producer_name, extract the agent or broker name from the PRODUCER/AGENT section (upper-left of the ACORD form). Return null if not clearly visible. This is a person name (e.g. "John Smith"), not a company name.
+- For producer_agency, extract the agency or brokerage company name from the PRODUCER/AGENT section. Return null if not clearly visible.
+- For producer_phone, extract the phone number from the PRODUCER/AGENT section. Return null if not present.
 - For ACORD forms, extract certificate_holder from the "CERTIFICATE HOLDER" section (bottom-left of the form).
 - certificate_holder is usually the company/entity receiving the certificate.
 - Do NOT confuse certificate_holder with named_insured.
@@ -232,6 +235,9 @@ Return this exact JSON structure:
   "certificate_holder": "<string or null>",
   "certificate_date": "<string or null>",
   "contact_emails": ["<email>"],
+  "producer_name": "<string or null>",
+  "producer_agency": "<string or null>",
+  "producer_phone": "<string or null>",
   "description_of_operations": "<string or null>",
   "notices": "<string or null>",
   "confidence": <float between 0.0 and 1.0>,

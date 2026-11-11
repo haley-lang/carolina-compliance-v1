@@ -43,6 +43,7 @@ from flask import (
 )
 
 import config
+import health_store as _hs
 from airtable_importer import clean_base_id, INCOMING_EXTRACTIONS_TABLE
 from review_gate import (
     REVIEW_STATUS_APPROVED, REVIEW_STATUS_APPROVED_EDITED,
@@ -277,6 +278,24 @@ def _inject_email_badge():
     return {"email_draft_count": _email_draft_count}
 
 
+@app.context_processor
+def _inject_pulse_banner():
+    """Inject overall health level and banner text into every template."""
+    def _banner():
+        try:
+            events = _hs.get_recent_events(limit=20, since_hours=1)
+            errors  = [e for e in events if e.get("level") == "error"]
+            warns   = [e for e in events if e.get("level") == "warn"]
+            if errors:
+                return {"level": "error", "text": errors[0]["title"]}
+            if warns:
+                return {"level": "warn",  "text": warns[0]["title"]}
+        except Exception:
+            pass
+        return {"level": "ok", "text": ""}
+    return {"pulse_banner": _banner}
+
+
 def _fmt_date(val):
     """Convert YYYY-MM-DD to MM/DD/YYYY for display. Passes anything else through unchanged."""
     if not val:
@@ -306,6 +325,16 @@ def _fmt_received(iso_str: str) -> str:
         return iso_str[:10]
 
 app.jinja_env.filters["fmt_received"] = _fmt_received
+
+
+def _timestamp_fmt(ts) -> str:
+    """Format a Unix timestamp as MM/DD/YYYY."""
+    try:
+        return datetime.fromtimestamp(float(ts)).strftime("%-m/%-d/%Y")
+    except Exception:
+        return str(ts)
+
+app.jinja_env.filters["timestamp_fmt"] = _timestamp_fmt
 
 
 def _age_tag(iso_str: str) -> dict:
@@ -353,11 +382,21 @@ app.jinja_env.filters["fmt_received_long"] = _fmt_received_long
 
 
 def csrf_protect(f):
-    """Decorator: reject POST requests that don't carry the correct session CSRF token."""
+    """Decorator: reject POST requests that don't carry the correct session CSRF token.
+
+    Checks both form data and JSON body (for JSON API endpoints).
+    """
     @wraps(f)
     def wrapper(*args, **kwargs):
         if request.method == "POST":
             submitted = request.form.get("csrf_token", "")
+            if not submitted:
+                # Try JSON body
+                try:
+                    jdata = request.get_json(silent=True, force=True) or {}
+                    submitted = jdata.get("csrf_token", "")
+                except Exception:
+                    submitted = ""
             expected = session.get("csrf_token", "")
             if not submitted or not expected or not secrets.compare_digest(submitted, expected):
                 abort(403)
@@ -4754,5 +4793,1865 @@ def payments_import():
         )
 
 
+# ── Pulse page ────────────────────────────────────────────────────────────────
+
+@app.route("/pulse")
+@login_required
+def pulse():
+    """System Pulse page — live health dashboard."""
+    base_id = clean_base_id(config.AIRTABLE_BASE_ID)
+    api     = _api()
+
+    def _now_iso():
+        return datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    def _level_max(*levels):
+        order = {"ok": 0, "warn": 1, "error": 2}
+        return max(levels, key=lambda l: order.get(l, 0))
+
+    # 1. Airtable space
+    airtable_space = {"total_records": None, "limit": 50_000, "level": "ok", "tables": [], "fastest_growing": None}
+    try:
+        table_names = [
+            "Incoming Documents", "Incoming Extractions", "Insurance Policies",
+            "Insurance Certificates", "Vendors", "Clients", "Email Queue",
+            "Compliance Log", "Vendor Client Assignments", "Client Requirements",
+        ]
+        rows = []
+        total = 0
+        for tname in table_names:
+            try:
+                tbl = api.table(base_id, tname)
+                count = len(tbl.all(fields=["Name"]))
+                total += count
+                rows.append({"name": tname, "count": count})
+            except Exception:
+                rows.append({"name": tname, "count": 0})
+        rows.sort(key=lambda r: r["count"], reverse=True)
+        airtable_space["total_records"] = total
+        airtable_space["tables"] = rows[:5]
+        if rows:
+            airtable_space["fastest_growing"] = rows[0]["name"]
+        pct = total / airtable_space["limit"]
+        if pct >= 0.80:
+            airtable_space["level"] = "error"
+        elif pct >= 0.60:
+            airtable_space["level"] = "warn"
+    except Exception as exc:
+        app.logger.warning("pulse airtable_space error: %s", exc)
+        airtable_space["level"] = "error"
+
+    # 2. Email intake
+    today_str = date.today().isoformat()
+    email_intake = {
+        "last_check": None, "last_received": None,
+        "today_received": 0, "today_processed": 0, "today_skipped": 0,
+        "skipped_items": [], "level": "ok",
+    }
+    try:
+        doc_tbl = api.table(base_id, "Incoming Documents")
+        all_docs = doc_tbl.all(fields=["Subject", "From", "Date Received", "Status", "Skip Reason"])
+        last_recv_ts = None
+        skipped = []
+        for rec in all_docs:
+            f = rec["fields"]
+            received_raw = (f.get("Date Received") or "").strip()
+            if not received_raw:
+                continue
+            try:
+                ts = datetime.fromisoformat(received_raw.replace("Z", "+00:00"))
+                if last_recv_ts is None or ts > last_recv_ts:
+                    last_recv_ts = ts
+            except ValueError:
+                pass
+            if not received_raw.startswith(today_str):
+                continue
+            email_intake["today_received"] += 1
+            status = (f.get("Status") or "").strip()
+            if status in ("Skipped", "Not needed", "Not a COI"):
+                email_intake["today_skipped"] += 1
+                skipped.append({"id": rec["id"], "subject": f.get("Subject") or "(no subject)",
+                                 "sender": f.get("From") or "", "received_at": received_raw,
+                                 "reason": f.get("Skip Reason") or status})
+            elif status:
+                email_intake["today_processed"] += 1
+        email_intake["skipped_items"] = skipped
+        if last_recv_ts:
+            email_intake["last_received"] = last_recv_ts.strftime("%Y-%m-%d %H:%M UTC")
+        last_hb = _hs.get_last_heartbeat("pulse_cron")
+        if last_hb:
+            email_intake["last_check"] = datetime.fromtimestamp(last_hb, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        if email_intake["today_skipped"] > 5:
+            email_intake["level"] = "error"
+        elif email_intake["today_skipped"] > 0:
+            email_intake["level"] = "warn"
+    except Exception as exc:
+        app.logger.warning("pulse email_intake error: %s", exc)
+        email_intake["level"] = "error"
+
+    # 3. Pipeline stage counts
+    pipeline = {
+        "by_stage": {"received": 0, "extracted": 0, "pending_review": 0, "confirmed": 0},
+        "oldest_pending_days": None, "avg_days_received_to_confirmed": None,
+        "stuck": [], "level": "ok",
+    }
+    try:
+        ie_tbl = api.table(base_id, INCOMING_EXTRACTIONS_TABLE)
+        recs = ie_tbl.all(fields=["Processing Status", "Review Status", "Created", "Error Message", "Source Filename"])
+        now_utc = datetime.now(tz=timezone.utc)
+        oldest_pending = None
+        stuck = []
+        for rec in recs:
+            f = rec["fields"]
+            status = (f.get("Processing Status") or "").strip().lower()
+            if status in ("received", "new", ""):
+                pipeline["by_stage"]["received"] += 1
+            elif status in ("extracted", "imported"):
+                pipeline["by_stage"]["extracted"] += 1
+            elif "pending" in status or "review" in status:
+                pipeline["by_stage"]["pending_review"] += 1
+                created_raw = (f.get("Created") or "").strip()
+                if created_raw:
+                    try:
+                        created_dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+                        age_days = (now_utc - created_dt).days
+                        if oldest_pending is None or age_days > oldest_pending:
+                            oldest_pending = age_days
+                    except ValueError:
+                        pass
+            elif status in ("confirmed", "approved", "processed"):
+                pipeline["by_stage"]["confirmed"] += 1
+            err = (f.get("Error Message") or "").strip()
+            if err:
+                stuck.append({"filename": f.get("Source Filename") or rec["id"], "stage": status, "error": err[:120]})
+        pipeline["oldest_pending_days"] = oldest_pending
+        pipeline["stuck"] = stuck[:5]
+        if oldest_pending is not None and oldest_pending > 7:
+            pipeline["level"] = "error"
+        elif (oldest_pending is not None and oldest_pending > 3) or stuck:
+            pipeline["level"] = "warn"
+    except Exception as exc:
+        app.logger.warning("pulse pipeline error: %s", exc)
+        pipeline["level"] = "error"
+
+    # 4. Writes & errors
+    writes_errors = {"write_failures_24h": [], "ai_errors_24h": [], "level": "ok"}
+    try:
+        all_events = _hs.get_recent_events(limit=200, since_hours=24)
+        write_failures = [
+            {"ts": e["ts"], "table": e.get("table_name") or "", "error": e["body"] or e["title"]}
+            for e in all_events if e.get("category") in ("write_error", "airtable_write") and e.get("level") == "error"
+        ]
+        ai_errors = [
+            {"ts": e["ts"], "error": e["title"], "retried": "retry" in (e.get("body") or "").lower()}
+            for e in all_events if e.get("category") == "api_error" and e.get("level") == "error"
+        ]
+        writes_errors["write_failures_24h"] = write_failures
+        writes_errors["ai_errors_24h"] = ai_errors
+        if write_failures or ai_errors:
+            writes_errors["level"] = "error" if len(write_failures) > 3 else "warn"
+    except Exception as exc:
+        app.logger.warning("pulse writes_errors error: %s", exc)
+        writes_errors["level"] = "error"
+
+    # 5. Scheduled jobs
+    scheduled_jobs = []
+    try:
+        job_specs = [
+            {"name": "Email intake poll",    "service": "email_monitor", "expected_interval_minutes": 15,   "result_ok": "Polled"},
+            {"name": "Daily pipeline",       "service": "run_pipeline",  "expected_interval_minutes": 1440, "result_ok": "Ran"},
+            {"name": "Pulse cron",           "service": "pulse_cron",    "expected_interval_minutes": 15,   "result_ok": "Checked"},
+            {"name": "Requirement validator","service": "pipeline",      "expected_interval_minutes": 15,   "result_ok": "Ran"},
+        ]
+        now_ts = datetime.now(tz=timezone.utc).timestamp()
+        for spec in job_specs:
+            last_hb = _hs.get_last_heartbeat(spec["service"])
+            last_run_str = None
+            result_str = "No data"
+            level = "warn"
+            if last_hb:
+                last_run_dt = datetime.fromtimestamp(last_hb, tz=timezone.utc)
+                last_run_str = last_run_dt.strftime("%Y-%m-%d %H:%M UTC")
+                age_minutes = (now_ts - last_hb) / 60
+                max_minutes = spec["expected_interval_minutes"] * 1.5
+                if age_minutes <= max_minutes:
+                    result_str = spec["result_ok"]
+                    level = "ok"
+                else:
+                    result_str = f"Overdue ({int(age_minutes)}m ago)"
+                    level = "error" if age_minutes > max_minutes * 2 else "warn"
+            scheduled_jobs.append({"name": spec["name"], "last_run": last_run_str,
+                                    "result": result_str, "next_expected": None, "level": level})
+    except Exception as exc:
+        app.logger.warning("pulse scheduled_jobs error: %s", exc)
+        scheduled_jobs = [{"name": "Error", "last_run": None, "result": str(exc)[:60], "next_expected": None, "level": "error"}]
+
+    # 6. Runaway detector
+    runaway = {"writes_per_hour": [], "level": "ok"}
+    try:
+        tables_to_watch = [("Compliance Log", 50), ("Insurance Policies", 30), ("Incoming Extractions", 40)]
+        any_over = False
+        for tname, normal_band in tables_to_watch:
+            count = _hs.get_write_rate(tname, window_minutes=60)
+            if count > normal_band:
+                any_over = True
+            runaway["writes_per_hour"].append({"table": tname, "count": count, "normal_band": normal_band})
+        if any_over:
+            runaway["level"] = "warn"
+    except Exception as exc:
+        app.logger.warning("pulse runaway error: %s", exc)
+        runaway["level"] = "error"
+
+    # 7. Outside services
+    services = []
+    try:
+        at_level = "ok" if airtable_space["total_records"] is not None else "error"
+        services.append({"name": "Airtable API", "status": "Reachable" if at_level == "ok" else "Unreachable",
+                          "last_ok": _now_iso() if at_level == "ok" else None, "level": at_level, "detail": ""})
+        ai_key = (config.ANTHROPIC_API_KEY if hasattr(config, "ANTHROPIC_API_KEY") else os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+        if ai_key and ai_key.startswith("sk-"):
+            services.append({"name": "AI API (Anthropic)", "status": "Key present", "last_ok": None, "level": "ok", "detail": ""})
+        else:
+            services.append({"name": "AI API (Anthropic)", "status": "Key missing", "last_ok": None, "level": "error",
+                              "detail": "ANTHROPIC_API_KEY not set or invalid"})
+        sg_key = os.environ.get("SENDGRID_API_KEY", "").strip()
+        services.append({"name": "SendGrid", "status": "Key present" if sg_key else "Key missing",
+                          "last_ok": None, "level": "ok" if sg_key else "warn",
+                          "detail": "" if sg_key else "SENDGRID_API_KEY not set"})
+        email_ok = bool(os.environ.get("EMAIL_ADDRESS") and os.environ.get("EMAIL_PASSWORD"))
+        services.append({"name": "Gmail inbox",
+                          "status": "Credentials present" if email_ok else "Credentials missing",
+                          "last_ok": None, "level": "ok" if email_ok else "error",
+                          "detail": "" if email_ok else "EMAIL_ADDRESS or EMAIL_PASSWORD not set"})
+    except Exception as exc:
+        app.logger.warning("pulse services error: %s", exc)
+
+    # 8. Waiting on Haley
+    waiting_on_haley = {
+        "queue_count": 0, "oldest_queue_days": None, "unsent_drafts": 0,
+        "followups_due_today": 0, "skipped_emails": email_intake["today_skipped"], "no_contact": 0,
+    }
+    try:
+        now_utc2 = datetime.now(tz=timezone.utc)
+        ie_tbl2 = api.table(base_id, INCOMING_EXTRACTIONS_TABLE)
+        pending_recs = ie_tbl2.all(formula="{Review Status}='Pending Review'", fields=["Created"])
+        waiting_on_haley["queue_count"] = len(pending_recs)
+        oldest_days = None
+        for rec in pending_recs:
+            created_raw = (rec["fields"].get("Created") or "").strip()
+            if created_raw:
+                try:
+                    dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+                    age = (now_utc2 - dt).days
+                    if oldest_days is None or age > oldest_days:
+                        oldest_days = age
+                except ValueError:
+                    pass
+        waiting_on_haley["oldest_queue_days"] = oldest_days
+        try:
+            em_tbl2 = api.table(base_id, EMAIL_MESSAGES_TABLE_ID)
+            drafts = em_tbl2.all(formula="AND({Status}='Draft',NOT({Snoozed Until}))", fields=["Status"])
+            waiting_on_haley["unsent_drafts"] = len(drafts)
+        except Exception:
+            pass
+        try:
+            no_contact = api.table(base_id, "Vendors").all(formula="NOT({Vendor Email})", fields=["Vendor Email"])
+            waiting_on_haley["no_contact"] = len(no_contact)
+        except Exception:
+            pass
+    except Exception as exc:
+        app.logger.warning("pulse waiting_on_haley error: %s", exc)
+
+    # 9. Business snapshot
+    business = {"clients": 0, "vendors_tracked": 0, "certs_on_file": 0, "open_gaps": 0, "per_client": []}
+    try:
+        clients_recs = api.table(base_id, "Clients").all(fields=["Client Name"])
+        business["clients"] = len(clients_recs)
+        client_list = [{"id": r["id"], "name": r["fields"].get("Client Name") or r["id"]} for r in clients_recs]
+        business["vendors_tracked"] = len(api.table(base_id, "Vendors").all(fields=["Vendor Name"]))
+        business["certs_on_file"] = len(api.table(base_id, "Insurance Certificates").all(fields=["Name"]))
+        try:
+            comp_recs = api.table(base_id, "Compliance Log").all(formula="NOT({Resolved})", fields=["Resolved"])
+            business["open_gaps"] = len(comp_recs)
+        except Exception:
+            pass
+        try:
+            reqs_all = api.table(base_id, "Client Requirements").all(fields=["Client Link"])
+            reqs_by_client = {}
+            for r in reqs_all:
+                for cid in (r["fields"].get("Client Link") or []):
+                    reqs_by_client[cid] = reqs_by_client.get(cid, 0) + 1
+            vca_recs = api.table(base_id, "Vendor Client Assignments").all(fields=["Client Link"])
+            certs_by_client = {}
+            for r in vca_recs:
+                for cid in (r["fields"].get("Client Link") or []):
+                    certs_by_client[cid] = certs_by_client.get(cid, 0) + 1
+            per_client = [{"name": c["name"], "certs_on_file": certs_by_client.get(c["id"], 0),
+                            "certs_required": reqs_by_client.get(c["id"], 0)} for c in client_list]
+            per_client.sort(key=lambda r: r["name"])
+            business["per_client"] = per_client
+        except Exception:
+            pass
+    except Exception as exc:
+        app.logger.warning("pulse business error: %s", exc)
+
+    # Recent events
+    try:
+        recent_events = _hs.get_recent_events(limit=50, since_hours=24)
+    except Exception:
+        recent_events = []
+
+    pulse_data = {
+        "airtable_space": airtable_space, "email_intake": email_intake,
+        "pipeline": pipeline, "writes_errors": writes_errors,
+        "scheduled_jobs": scheduled_jobs, "runaway": runaway,
+        "services": services, "waiting_on_haley": waiting_on_haley,
+        "business": business, "recent_events": recent_events,
+    }
+
+    section_levels = (
+        [airtable_space["level"], email_intake["level"], pipeline["level"],
+         writes_errors["level"], runaway["level"]]
+        + [s["level"] for s in services]
+        + [j["level"] for j in scheduled_jobs]
+    )
+    overall_level = _level_max(*section_levels) if section_levels else "ok"
+
+    return render_template("pulse.html", pulse_data=pulse_data,
+                            overall_level=overall_level, last_check=_now_iso())
+
+
+@app.route("/pulse/settings", methods=["POST"])
+@login_required
+def pulse_settings():
+    """Save Pulse threshold settings to pulse_settings.json."""
+    from flask import jsonify
+    try:
+        data = request.get_json(force=True) or {}
+        settings_path = os.path.join(os.path.dirname(__file__), "pulse_settings.json")
+        existing = {}
+        if os.path.exists(settings_path):
+            try:
+                with open(settings_path) as fh:
+                    existing = json.load(fh)
+            except Exception:
+                existing = {}
+        existing.update(data)
+        with open(settings_path, "w") as fh:
+            json.dump(existing, fh, indent=2)
+        return jsonify({"ok": True})
+    except Exception as exc:
+        app.logger.error("pulse_settings error: %s", exc)
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/pulse/mark-not-needed", methods=["POST"])
+@login_required
+def pulse_mark_not_needed():
+    """Mark an Incoming Document as 'Not needed'."""
+    from flask import jsonify
+    try:
+        data = request.get_json(force=True) or {}
+        doc_id = (data.get("doc_id") or "").strip()
+        if not doc_id:
+            return jsonify({"ok": False, "error": "doc_id required"}), 400
+        base_id = clean_base_id(config.AIRTABLE_BASE_ID)
+        _api().table(base_id, "Incoming Documents").update(doc_id, {"Status": "Not needed"}, typecast=True)
+        _hs.record_event("pipeline", "ok", f"Marked doc {doc_id} as not needed", table_name="Incoming Documents")
+        return jsonify({"ok": True})
+    except Exception as exc:
+        app.logger.error("pulse_mark_not_needed error: %s", exc)
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/pulse/reprocess", methods=["POST"])
+@login_required
+def pulse_reprocess():
+    """Queue an Incoming Document for reprocessing."""
+    from flask import jsonify
+    try:
+        data = request.get_json(force=True) or {}
+        doc_id = (data.get("doc_id") or "").strip()
+        if not doc_id:
+            return jsonify({"ok": False, "error": "doc_id required"}), 400
+        base_id = clean_base_id(config.AIRTABLE_BASE_ID)
+        doc_tbl = _api().table(base_id, "Incoming Documents")
+        rec = doc_tbl.get(doc_id)
+        if not rec:
+            return jsonify({"ok": False, "error": "Record not found"}), 404
+        file_names = (rec["fields"].get("File Names") or "").strip()
+        doc_tbl.update(doc_id, {"Status": "New"}, typecast=True)
+        if file_names:
+            target_file = file_names.split(",")[0].strip()
+            py_bin = os.path.join(os.path.dirname(__file__), ".venv", "bin", "python")
+            pipeline_script = os.path.join(os.path.dirname(__file__), "run_pipeline.py")
+            env = dict(os.environ, COI_TARGET_FILE=target_file)
+            def _run():
+                try:
+                    subprocess.run([py_bin, pipeline_script], env=env,
+                                   cwd=os.path.dirname(__file__), timeout=300)
+                except Exception as sub_exc:
+                    app.logger.warning("pulse_reprocess subprocess error: %s", sub_exc)
+            threading.Thread(target=_run, daemon=True).start()
+        _hs.record_event("pipeline", "ok", f"Reprocess triggered for doc {doc_id}",
+                          body=file_names or None, table_name="Incoming Documents")
+        return jsonify({"ok": True, "queued": True})
+    except Exception as exc:
+        app.logger.error("pulse_reprocess error: %s", exc)
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+# ── Audit Workspace ──────────────────────────────────────────────────────────
+#
+# Payments, payee classifications, and audit files are stored in SQLite
+# (audit_store.py) — NOT in Airtable.  Airtable receives only one lightweight
+# record per audit.
+
+import audit_store as _astore
+import audit_parser as _aparser
+
+_AUDIT_UPLOADS_DIR = os.path.join(os.path.dirname(__file__), "audit_uploads")
+os.makedirs(_AUDIT_UPLOADS_DIR, exist_ok=True)
+
+# Keywords that indicate a payee is likely NOT a subcontractor
+_NOT_SUB_SIGNALS = frozenset({
+    "bank", "loan", "mortgage", "leasing", "capital one", "credit union",
+    "duke energy", "piedmont natural gas", "spectrum", "atandt", "at&t",
+    "adp", "paychex", "gusto", "payroll",
+    "erie", "nationwide", "travelers", "insurance", "allstate", "liberty mutual",
+    "quickbooks", "intuit", "adobe", "microsoft", "google",
+    "shell", "bp", "circle k", "speedway", "exxon", "chevron", "speedco",
+    "amazon", "home depot", "lowe's", "lowes", "menards", "costco", "walmart",
+    "irs", "ncdor", "tax", "dor",
+    "transfer", "zelle", "venmo", "paypal",
+    "credit card payment", "card payment", "loan payment",
+    "fuel", "gas station",
+})
+
+# Trade keywords that suggest a payee is a subcontractor
+_SUB_TRADE_SIGNALS = frozenset({
+    "construction", "remodeling", "renovations", "renovating",
+    "electric", "electrical", "plumbing", "hvac", "mechanical",
+    "drywall", "roofing", "framing", "grading", "excavating", "masonry",
+    "tile", "flooring", "painting", "insulation", "siding",
+    "windows", "doors", "concrete", "foundation", "landscaping",
+    "excavation", "cleanup", "cleanout", "demo", "demolition",
+    "carpentry", "general", "contracting", "contractor",
+    "installation", "installing",
+})
+
+
+def _norm_payee(name: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", "", (name or "").lower())).strip()
+
+
+def _payee_looks_like_not_sub(name: str) -> bool:
+    nl = (name or "").lower()
+    return any(sig in nl for sig in _NOT_SUB_SIGNALS)
+
+
+def _payee_looks_like_sub(name: str) -> bool:
+    nl = (name or "").lower()
+    return any(sig in nl for sig in _SUB_TRADE_SIGNALS)
+
+
+def _fuzzy_match_vendors(
+    payee_raw: str,
+    vendor_list: list[dict],
+    client_id: str,
+) -> tuple[str, str, str, str]:
+    """Return (vendor_id, vendor_name, match_type, payee_group).
+
+    match_type: 'exact' | 'likely' | 'possible' | ''
+    payee_group: 'ccs_vendor' | 'likely_sub' | 'unclear' | 'not_sub'
+    """
+    from rapidfuzz import fuzz as _fuzz
+
+    # 1. Check saved aliases first
+    alias = _astore.get_alias(client_id, payee_raw)
+    if alias:
+        return alias["vendor_id"], alias["vendor_name"], "exact", "ccs_vendor"
+
+    pnorm = _norm_payee(payee_raw)
+
+    best_id    = ""
+    best_name  = ""
+    best_score = 0
+
+    for v in vendor_list:
+        vnorm = _norm_payee(v["name"])
+        if not vnorm:
+            continue
+        score = _fuzz.token_set_ratio(pnorm, vnorm)
+        if score > best_score:
+            best_score = score
+            best_id    = v["id"]
+            best_name  = v["name"]
+
+    if best_score >= 90:
+        return best_id, best_name, "exact", "ccs_vendor"
+    if best_score >= 70:
+        return best_id, best_name, "likely", "ccs_vendor"
+    if best_score >= 50:
+        return best_id, best_name, "possible", "unclear"
+
+    # No match — classify by payee name signals
+    if _payee_looks_like_not_sub(payee_raw):
+        return "", "", "", "not_sub"
+    if _payee_looks_like_sub(payee_raw):
+        return "", "", "", "likely_sub"
+    return "", "", "", "unclear"
+
+
+def _classify_all_payees(audit_id: str, client_id: str, vendor_list: list[dict]) -> None:
+    """Run fuzzy match on all unique payees and upsert classifications."""
+    with _astore._conn() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT payee_raw FROM payments WHERE audit_id = ? AND excluded = 0",
+            (audit_id,),
+        ).fetchall()
+    payees = [r[0] for r in rows]
+
+    for payee_raw in payees:
+        existing = _astore.get_payee_classification(audit_id, payee_raw)
+        if existing and existing.get("confirmed"):
+            continue  # never overwrite confirmed decisions
+
+        vendor_id, vendor_name, match_type, payee_group = _fuzzy_match_vendors(
+            payee_raw, vendor_list, client_id,
+        )
+        _astore.upsert_payee_classification(
+            audit_id=audit_id,
+            client_id=client_id,
+            payee_raw=payee_raw,
+            vendor_id=vendor_id,
+            vendor_name=vendor_name,
+            match_type=match_type,
+            payee_group=payee_group,
+            confirmed=0,
+        )
+
+
+def _get_vendor_list_for_client(client_id: str) -> list[dict]:
+    """Return [{id, name}] for all vendors linked to this client, plus all vendors."""
+    base_id = clean_base_id(config.AIRTABLE_BASE_ID)
+    api = _api()
+    try:
+        recs = api.table(base_id, VENDORS_TABLE_ID).all(fields=["Vendor Name"])
+        return [
+            {"id": r["id"], "name": r["fields"].get("Vendor Name") or ""}
+            for r in recs if r["fields"].get("Vendor Name")
+        ]
+    except Exception:
+        return []
+
+
+def _compute_audit_analysis(audit: dict) -> dict:
+    """Full analysis for an audit: payments + coverage per payee.
+
+    Returns:
+        {
+          "subs": [{payee_raw, vendor_id, vendor_name, match_type, payee_group,
+                    txn_count, total_paid, first_date, last_date,
+                    terms, status, days_not_on_file, gap_segments,
+                    paid_in_gaps, wc_on_file (GL audits only),
+                    cert_received_date, remediation}],
+          "headline": {subs_count, total_paid, full_count, full_dollars,
+                       partial_count, partial_dollars, missing_count, missing_dollars,
+                       not_in_ccs_count, not_in_ccs_dollars, paid_in_gaps_total},
+        }
+    """
+    audit_id    = audit["id"]
+    client_id   = audit["client_id"]
+    coverage    = audit["coverage"]
+    start_date  = _parse_date(audit["start_date"])
+    end_date    = _parse_date(audit["end_date"])
+
+    if not start_date or not end_date:
+        return {"subs": [], "headline": {}}
+
+    # Get payee summaries within audit period
+    pay_summary = _astore.get_payee_summary(
+        audit_id, audit["start_date"], audit["end_date"]
+    )
+    pay_by_payee = {p["payee_raw"]: p for p in pay_summary}
+
+    # Get classifications
+    classifications = {
+        c["payee_raw"]: c
+        for c in _astore.get_payee_classifications(audit_id)
+    }
+
+    # Get remediation notes
+    remediation = _astore.get_remediation(audit_id)
+
+    # GL audit: also pull WC terms per vendor
+    is_gl = "general" in coverage.lower() or coverage.upper() == "GL"
+
+    subs = []
+    base_id = clean_base_id(config.AIRTABLE_BASE_ID)
+    api = _api()
+
+    for payee_raw, ps in pay_by_payee.items():
+        cls = classifications.get(payee_raw, {})
+        pg  = cls.get("payee_group", "unclear")
+
+        # Only include subs and unclear (skip confirmed not_sub)
+        if pg == "not_sub" and cls.get("confirmed"):
+            continue
+
+        vendor_id   = cls.get("vendor_id", "")
+        vendor_name = cls.get("vendor_name", "") or payee_raw
+        match_type  = cls.get("match_type", "")
+
+        # Fetch coverage terms from Airtable
+        terms_data: list[dict] = []
+        days_not_on_file = (end_date - start_date).days + 1
+        gap_segs: list[dict] = []
+        status = "not_in_ccs"
+        cert_received = ""
+        wc_on_file = False
+
+        if vendor_id:
+            try:
+                terms_raw, has_any = _terms_for_vendor_audit(
+                    vendor_id, coverage, start_date, end_date
+                )
+                status_str, days_not_on_file, gap_runs = _compute_vendor_audit_status(
+                    terms_raw, start_date, end_date, has_any
+                )
+                status = status_str
+
+                for t in terms_raw:
+                    terms_data.append({
+                        "policy_number": t["policy_number"],
+                        "carrier":       t["carrier"],
+                        "effective":     t["effective"],
+                        "expiration":    t["expiration"],
+                    })
+
+                for gs, ge in gap_runs:
+                    gap_segs.append({
+                        "start": gs.isoformat(),
+                        "end":   ge.isoformat(),
+                        "days":  (ge - gs).days + 1,
+                    })
+
+                # Certificate received date — latest extraction timestamp
+                try:
+                    pol_ids = _get_vendor_policy_ids(vendor_id)
+                    if pol_ids:
+                        pol_formula = "OR(" + ",".join(
+                            f"RECORD_ID()='{p}'" for p in pol_ids
+                        ) + ")"
+                        pols = api.table(base_id, INSURANCE_POLICIES_TABLE_ID).all(
+                            formula=pol_formula,
+                            fields=["Policy Type", "Received At"],
+                        )
+                        kws = _audit_coverage_keywords(coverage)
+                        for pol in pols:
+                            pf = pol["fields"]
+                            if _pol_matches_audit_type((pf.get("Policy Type") or "").lower(), kws):
+                                ra = pf.get("Received At") or ""
+                                if ra and (not cert_received or ra > cert_received):
+                                    cert_received = ra[:10]
+                except Exception:
+                    pass
+
+                # WC on file (informational, for GL audits)
+                if is_gl:
+                    try:
+                        wc_terms, wc_has = _terms_for_vendor_audit(
+                            vendor_id, "Workers' Comp", start_date, end_date
+                        )
+                        wc_on_file = bool(wc_terms) or wc_has
+                    except Exception:
+                        wc_on_file = False
+
+            except Exception:
+                status = "not_in_ccs"
+
+        # Compute "paid in gaps" — payments that fall in a gap period
+        paid_in_gaps = 0.0
+        if gap_segs and vendor_id:
+            payments_detail = _astore.get_payments(
+                audit_id, payee_raw=payee_raw,
+                in_period_only=True,
+                start_date=audit["start_date"], end_date=audit["end_date"],
+            )
+            gap_date_ranges = [
+                (_parse_date(g["start"]), _parse_date(g["end"]))
+                for g in gap_segs
+            ]
+            for pmt in payments_detail:
+                pd = _parse_date(pmt["txn_date"])
+                if pd and any(gs <= pd <= ge for gs, ge in gap_date_ranges if gs and ge):
+                    paid_in_gaps += pmt["amount"]
+        elif status in ("no_policy", "none_in_window", "not_in_ccs"):
+            # Entire period is a gap
+            paid_in_gaps = float(ps["total_amount"] or 0)
+
+        rem = remediation.get(payee_raw, {})
+
+        # Human-readable status label
+        status_labels = {
+            "full":          "On file for the whole period",
+            "short_gap":     "On file for part of the period",
+            "gap":           "On file for part of the period",
+            "none_in_window": "Not on file",
+            "no_policy":     "Not on file",
+            "not_in_ccs":    "Not in CCS yet",
+        }
+
+        subs.append({
+            "payee_raw":      payee_raw,
+            "vendor_id":      vendor_id,
+            "vendor_name":    vendor_name,
+            "match_type":     match_type,
+            "payee_group":    pg,
+            "trade":          cls.get("trade", ""),
+            "confirmed":      bool(cls.get("confirmed")),
+            "txn_count":      ps["txn_count"],
+            "total_paid":     round(float(ps["total_amount"] or 0), 2),
+            "first_date":     ps["first_date"],
+            "last_date":      ps["last_date"],
+            "terms":          terms_data,
+            "status":         status,
+            "status_label":   status_labels.get(status, status),
+            "days_not_on_file": days_not_on_file,
+            "gap_segments":   gap_segs,
+            "paid_in_gaps":   round(paid_in_gaps, 2),
+            "wc_on_file":     wc_on_file if is_gl else None,
+            "cert_received":  cert_received,
+            "remediation":    rem.get("status", ""),
+            "remediation_note": rem.get("note", ""),
+        })
+
+    # Sort by paid_in_gaps descending (biggest risk first)
+    subs.sort(key=lambda s: (-s["paid_in_gaps"], -s["total_paid"]))
+
+    # Headline
+    total_paid    = sum(s["total_paid"] for s in subs)
+    full_subs     = [s for s in subs if s["status"] == "full"]
+    partial_subs  = [s for s in subs if s["status"] in ("short_gap", "gap")]
+    missing_subs  = [s for s in subs if s["status"] in ("no_policy", "none_in_window")]
+    not_ccs_subs  = [s for s in subs if s["status"] == "not_in_ccs"]
+    paid_in_gaps_total = sum(s["paid_in_gaps"] for s in subs)
+
+    headline = {
+        "subs_count":       len(subs),
+        "total_paid":       round(total_paid, 2),
+        "full_count":       len(full_subs),
+        "full_dollars":     round(sum(s["total_paid"] for s in full_subs), 2),
+        "partial_count":    len(partial_subs),
+        "partial_dollars":  round(sum(s["total_paid"] for s in partial_subs), 2),
+        "missing_count":    len(missing_subs),
+        "missing_dollars":  round(sum(s["total_paid"] for s in missing_subs), 2),
+        "not_in_ccs_count": len(not_ccs_subs),
+        "not_in_ccs_dollars": round(sum(s["total_paid"] for s in not_ccs_subs), 2),
+        "paid_in_gaps_total": round(paid_in_gaps_total, 2),
+    }
+
+    return {"subs": subs, "headline": headline}
+
+
+def _build_audit_cert_request_body(
+    contact: dict,
+    client_name: str,
+    cert_holder: str,
+    subs: list,
+    audit_start: str,
+    audit_end: str,
+    coverage: str,
+) -> str:
+    """Build a batched certificate request email body for an audit."""
+    greeting   = contact.get("name") or "Insurance Agent"
+    agency_str = f" at {contact['agency']}" if contact.get("agency") else ""
+
+    def _fd(s):
+        d = _parse_date(s)
+        return d.strftime("%m/%d/%Y") if d else s
+
+    lines = [
+        f"Hello {greeting}{agency_str},",
+        "",
+        f"I am writing on behalf of {client_name} to request certificates of insurance "
+        f"for a {coverage} audit covering the period {_fd(audit_start)} to {_fd(audit_end)}.",
+        "",
+        "Please reply with updated certificates for the following subcontractors:",
+        "",
+    ]
+    for sub in subs:
+        lines.append(f"  {sub['vendor_name']}")
+        gaps = sub.get("gap_segments") or []
+        if gaps:
+            for g in gaps:
+                lines.append(
+                    f"    Period not on file: {_fd(g['start'])} to {_fd(g['end'])} "
+                    f"({g['days']} days)"
+                )
+        else:
+            lines.append(f"    No certificate on file for the audit period")
+        lines.append("")
+
+    lines += [
+        "Please issue certificates with the following certificate holder:",
+        f"  {cert_holder}",
+        "",
+        "Certificates should be sent to coi-intake@carolinacompliancesolutions.com "
+        "and will be processed automatically.",
+        "",
+        "Thank you,",
+        "Carolina Compliance Solutions",
+        f"On behalf of {client_name}",
+    ]
+    return "\n".join(lines)
+
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+@app.route("/audits")
+@login_required
+def audits_list():
+    """List all audits (new Audit Workspace entry point)."""
+    from flask import jsonify
+    client_filter = request.args.get("client_id", "").strip()
+
+    base_id = clean_base_id(config.AIRTABLE_BASE_ID)
+    api = _api()
+    clients_raw = api.table(base_id, CLIENTS_TABLE_ID).all(fields=["Client Name"])
+    clients = sorted(
+        [{"id": r["id"], "name": r["fields"].get("Client Name") or r["id"]} for r in clients_raw],
+        key=lambda c: c["name"],
+    )
+    client_map = {c["id"]: c["name"] for c in clients}
+
+    all_audits = _astore.list_audits(client_id=client_filter or None)
+    # Enrich with client name from live map (in case it changed)
+    for a in all_audits:
+        if a["client_id"] in client_map:
+            a["client_name"] = client_map[a["client_id"]]
+
+    return render_template(
+        "audits.html",
+        audits=all_audits,
+        clients=clients,
+        client_filter=client_filter,
+        rtr_client_id=RTR_CLIENT_ID,
+    )
+
+
+@app.route("/audits/new", methods=["GET", "POST"])
+@login_required
+@csrf_protect
+def audits_new():
+    """Create a new audit and redirect to workspace."""
+    from flask import jsonify
+    base_id = clean_base_id(config.AIRTABLE_BASE_ID)
+    api = _api()
+
+    if request.method == "GET":
+        clients_raw = api.table(base_id, CLIENTS_TABLE_ID).all(fields=["Client Name"])
+        clients = sorted(
+            [{"id": r["id"], "name": r["fields"].get("Client Name") or r["id"]} for r in clients_raw],
+            key=lambda c: c["name"],
+        )
+        return render_template("audits.html", audits=[], clients=clients,
+                               client_filter="", rtr_client_id=RTR_CLIENT_ID, show_new_form=True)
+
+    # POST
+    client_id    = (request.form.get("client_id") or RTR_CLIENT_ID).strip()
+    coverage     = (request.form.get("coverage") or "General Liability").strip()
+    start_date   = (request.form.get("start_date") or "").strip()
+    end_date     = (request.form.get("end_date") or "").strip()
+    auditor_name = (request.form.get("auditor_name") or "").strip()
+    policy_num   = (request.form.get("policy_number") or "").strip()
+    notes        = (request.form.get("notes") or "").strip()
+    due_date     = (request.form.get("due_date") or "").strip()
+
+    if not start_date or not end_date:
+        flash("Start date and end date are required.", "danger")
+        return redirect(url_for("audits_list"))
+
+    try:
+        crec = api.table(base_id, CLIENTS_TABLE_ID).get(client_id)
+        client_name = crec["fields"].get("Client Name") or client_id
+    except Exception:
+        client_name = client_id
+
+    audit = _astore.create_audit(
+        client_id=client_id,
+        client_name=client_name,
+        coverage=coverage,
+        start_date=start_date,
+        end_date=end_date,
+        auditor_name=auditor_name,
+        policy_number=policy_num,
+        notes=notes,
+        due_date=due_date,
+    )
+
+    # Create lightweight Airtable record
+    try:
+        abbrev = "GL" if "general" in coverage.lower() else "WC"
+        audit_name = f"{client_name} {abbrev} {start_date[:7]} to {end_date[:7]}"
+        at_rec = api.table(base_id, AUDITS_TABLE_ID).create({
+            "Audit Name":  audit_name,
+            "Client":      [client_id],
+            "Audit Type":  coverage,
+            "Start Date":  start_date,
+            "End Date":    end_date,
+            "Created At":  datetime.now(timezone.utc).isoformat(),
+        })
+        _astore.update_audit(audit["id"], airtable_id=at_rec["id"])
+    except Exception as exc:
+        app.logger.warning("audits_new: Airtable record creation failed: %s", exc)
+
+    return redirect(url_for("audit_workspace", audit_id=audit["id"]))
+
+
+@app.route("/audits/<audit_id>")
+@login_required
+def audit_workspace(audit_id):
+    """Main audit workspace page."""
+    audit = _astore.get_audit(audit_id)
+    if not audit:
+        abort(404)
+
+    base_id = clean_base_id(config.AIRTABLE_BASE_ID)
+    api = _api()
+
+    # Client info
+    try:
+        crec = api.table(base_id, CLIENTS_TABLE_ID).get(audit["client_id"])
+        cf = crec["fields"]
+        client_name   = cf.get("Client Name") or audit["client_name"]
+        cert_holder   = cf.get("Certificate Holder") or client_name
+    except Exception:
+        client_name = audit["client_name"]
+        cert_holder = client_name
+
+    files = _astore.get_audit_files(audit_id)
+    packs = _astore.get_audit_packs(audit_id)
+
+    # Count pending decisions for checklist badge
+    cls_all = _astore.get_payee_classifications(audit_id)
+    unconfirmed_count = sum(
+        1 for c in cls_all
+        if not c.get("confirmed") and c.get("payee_group") not in ("not_sub",)
+    )
+    possible_count = sum(1 for c in cls_all if c.get("match_type") == "possible")
+    unclear_count  = sum(1 for c in cls_all if c.get("payee_group") == "unclear")
+
+    return render_template(
+        "audit_workspace.html",
+        audit=audit,
+        client_name=client_name,
+        cert_holder=cert_holder,
+        files=files,
+        packs=packs,
+        unconfirmed_count=unconfirmed_count,
+        possible_count=possible_count,
+        unclear_count=unclear_count,
+        rtr_client_id=RTR_CLIENT_ID,
+    )
+
+
+@app.route("/audits/<audit_id>/upload", methods=["POST"])
+@login_required
+@csrf_protect
+def audit_upload(audit_id):
+    """Upload and parse a payment file. Returns JSON."""
+    from flask import jsonify
+    audit = _astore.get_audit(audit_id)
+    if not audit:
+        return jsonify({"ok": False, "error": "Audit not found"}), 404
+
+    if "file" not in request.files:
+        return jsonify({"ok": False, "error": "No file uploaded"}), 400
+
+    f = request.files["file"]
+    if not f.filename:
+        return jsonify({"ok": False, "error": "No filename"}), 400
+
+    file_bytes = f.read()
+    original_filename = f.filename
+
+    # Save file to disk
+    safe_name = re.sub(r"[^a-zA-Z0-9._\-]", "_", original_filename)
+    import uuid as _uuid_mod
+    file_id_prefix = str(_uuid_mod.uuid4())[:8]
+    stored_name = f"{file_id_prefix}_{safe_name}"
+    file_path = os.path.join(_AUDIT_UPLOADS_DIR, stored_name)
+    with open(file_path, "wb") as fh:
+        fh.write(file_bytes)
+
+    # Parse
+    result = _aparser.parse_payment_file(original_filename, file_bytes)
+    warnings = result.get("warnings", [])
+
+    # Check date coverage
+    cov_warnings = _aparser.check_file_covers_period(
+        result.get("date_min", ""),
+        result.get("date_max", ""),
+        audit["start_date"],
+        audit["end_date"],
+    )
+    warnings = cov_warnings + warnings
+
+    file_id = _astore.create_audit_file(
+        audit_id=audit_id,
+        original_filename=original_filename,
+        file_path=file_path,
+        file_format=result["format"],
+    )
+    _astore.update_audit_file(
+        file_id,
+        file_format=result["format"],
+        row_count=result["row_count"],
+        total_amount=result["total_amount"],
+        date_min=result["date_min"],
+        date_max=result["date_max"],
+        parse_status="ok" if result["row_count"] > 0 else "error",
+        parse_notes="\n".join(warnings),
+    )
+
+    if result["row_count"] > 0:
+        # Insert payments into SQLite
+        pay_rows = []
+        for t in result["transactions"]:
+            pay_rows.append({
+                "audit_id":       audit_id,
+                "file_id":        file_id,
+                "txn_date":       t["txn_date"],
+                "txn_id":         t.get("txn_id", ""),
+                "txn_num":        t.get("txn_num", ""),
+                "txn_type":       t.get("txn_type", ""),
+                "account":        t.get("account", ""),
+                "payee_raw":      t["payee_raw"],
+                "amount":         t["amount"],
+                "is_card":        t.get("is_card", 0),
+                "payment_method": t.get("payment_method", ""),
+                "excluded":       0,
+                "exclude_reason": "",
+            })
+        inserted = _astore.insert_payments(pay_rows)
+
+        # Auto-classify payees
+        vendor_list = _get_vendor_list_for_client(audit["client_id"])
+        _classify_all_payees(audit_id, audit["client_id"], vendor_list)
+
+        # Update audit status
+        _astore.update_audit(audit_id, status="Gathering certificates")
+
+    # Format summary for display
+    fmt_summary = _format_file_summary(result, original_filename)
+
+    # Preview of first few rows
+    preview_rows = result["transactions"][:8] if result["transactions"] else []
+
+    return jsonify({
+        "ok":          True,
+        "file_id":     file_id,
+        "format":      result["format"],
+        "summary":     fmt_summary,
+        "row_count":   result["row_count"],
+        "total_amount": result["total_amount"],
+        "date_min":    result["date_min"],
+        "date_max":    result["date_max"],
+        "warnings":    warnings,
+        "preview_rows": preview_rows[:8],
+        "account_counts": result.get("account_counts", {}),
+    })
+
+
+def _format_file_summary(result: dict, filename: str) -> str:
+    fmt_map = {
+        "qb_transaction_list": "QuickBooks Transaction List",
+        "qb_expense_summary_pdf": "QuickBooks Expenses by Vendor Summary (PDF)",
+        "generic_csv": "CSV (generic)",
+        "generic_xlsx": "Excel spreadsheet",
+    }
+    fmt_label = fmt_map.get(result["format"], result["format"])
+    count = result["row_count"]
+    date_min = result["date_min"]
+    date_max = result["date_max"]
+
+    def _fd(s):
+        d = _parse_date(s)
+        return d.strftime("%-m/%-d/%Y") if d else s
+
+    return (
+        f"I read this as: {fmt_label}, {count:,} payments, "
+        f"{_fd(date_min)} to {_fd(date_max)}"
+    )
+
+
+@app.route("/audits/<audit_id>/payees")
+@login_required
+def audit_payees(audit_id):
+    """Return payee classifications as JSON."""
+    from flask import jsonify
+    audit = _astore.get_audit(audit_id)
+    if not audit:
+        return jsonify({"ok": False, "error": "Not found"}), 404
+
+    classifications = _astore.get_payee_classifications(audit_id)
+    pay_summary = _astore.get_payee_summary(
+        audit_id, audit["start_date"], audit["end_date"]
+    )
+    pay_by_payee = {p["payee_raw"]: p for p in pay_summary}
+
+    result = []
+    for cls in classifications:
+        ps = pay_by_payee.get(cls["payee_raw"], {})
+        result.append({
+            **cls,
+            "txn_count":   ps.get("txn_count", 0),
+            "total_amount": round(float(ps.get("total_amount") or 0), 2),
+            "first_date":  ps.get("first_date", ""),
+            "last_date":   ps.get("last_date", ""),
+        })
+
+    result.sort(key=lambda r: (-float(r.get("total_amount") or 0), r["payee_raw"].lower()))
+
+    # Group counts for display
+    groups = {
+        "ccs_vendor": 0, "likely_sub": 0, "unclear": 0, "not_sub": 0,
+        "needs_confirm": 0,
+    }
+    for r in result:
+        g = r.get("payee_group", "unclear")
+        groups[g] = groups.get(g, 0) + 1
+        if not r.get("confirmed") and r.get("match_type") in ("likely", "possible"):
+            groups["needs_confirm"] += 1
+
+    return jsonify({"ok": True, "payees": result, "groups": groups})
+
+
+@app.route("/audits/<audit_id>/payees/update-one", methods=["POST"])
+@login_required
+@csrf_protect
+def audit_payees_update_one(audit_id):
+    """Update one payee classification."""
+    from flask import jsonify
+    audit = _astore.get_audit(audit_id)
+    if not audit:
+        return jsonify({"ok": False, "error": "Not found"}), 404
+
+    data = request.get_json(force=True) or {}
+    payee_raw  = (data.get("payee_raw") or "").strip()
+    if not payee_raw:
+        return jsonify({"ok": False, "error": "payee_raw required"}), 400
+
+    # Fields that can be updated
+    allowed = {
+        "vendor_id", "vendor_name", "match_type", "payee_group",
+        "trade", "is_supplier_only", "exclude_reason", "confirmed",
+    }
+    kwargs = {k: v for k, v in data.items() if k in allowed}
+    kwargs["confirmed"] = 1  # any explicit update from Haley = confirmed
+
+    _astore.upsert_payee_classification(
+        audit_id=audit_id,
+        client_id=audit["client_id"],
+        payee_raw=payee_raw,
+        **kwargs,
+    )
+
+    # If this is a vendor match, save as a confirmed alias for future uploads
+    vendor_id   = kwargs.get("vendor_id", "")
+    vendor_name = kwargs.get("vendor_name", "")
+    if vendor_id and vendor_name and kwargs.get("payee_group") == "ccs_vendor":
+        _astore.upsert_alias(
+            client_id=audit["client_id"],
+            payee_raw=payee_raw,
+            vendor_id=vendor_id,
+            vendor_name=vendor_name,
+            confirmed=1,
+        )
+
+    return jsonify({"ok": True})
+
+
+@app.route("/audits/<audit_id>/analysis")
+@login_required
+def audit_analysis(audit_id):
+    """Return full coverage analysis as JSON."""
+    from flask import jsonify
+    audit = _astore.get_audit(audit_id)
+    if not audit:
+        return jsonify({"ok": False, "error": "Not found"}), 404
+
+    try:
+        result = _compute_audit_analysis(audit)
+    except Exception as exc:
+        app.logger.error("audit_analysis error for %s: %s", audit_id, exc)
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    return jsonify({"ok": True, **result})
+
+
+@app.route("/audits/<audit_id>/payments")
+@login_required
+def audit_payments_detail(audit_id):
+    """Return individual payments for a payee. Query: ?payee=<name>"""
+    from flask import jsonify
+    audit = _astore.get_audit(audit_id)
+    if not audit:
+        return jsonify({"ok": False, "error": "Not found"}), 404
+
+    payee = request.args.get("payee", "").strip()
+    rows = _astore.get_payments(
+        audit_id, payee_raw=payee or None,
+        in_period_only=True,
+        start_date=audit["start_date"], end_date=audit["end_date"],
+    )
+    return jsonify({"ok": True, "payments": [dict(r) for r in rows]})
+
+
+@app.route("/audits/<audit_id>/create-drafts", methods=["POST"])
+@login_required
+@csrf_protect
+def audit_create_drafts(audit_id):
+    """Create batched email drafts for an audit. Returns count of drafts created."""
+    from flask import jsonify
+    audit = _astore.get_audit(audit_id)
+    if not audit:
+        return jsonify({"ok": False, "error": "Not found"}), 404
+
+    base_id = clean_base_id(config.AIRTABLE_BASE_ID)
+    api = _api()
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    try:
+        crec = api.table(base_id, CLIENTS_TABLE_ID).get(audit["client_id"])
+        cf = crec["fields"]
+        client_name = cf.get("Client Name") or audit["client_name"]
+        cert_holder = cf.get("Certificate Holder") or client_name
+    except Exception:
+        client_name = audit["client_name"]
+        cert_holder = client_name
+
+    if not cert_holder or cert_holder == client_name:
+        cert_holder_missing = True
+    else:
+        cert_holder_missing = False
+
+    # Run analysis to get current sub status
+    analysis = _compute_audit_analysis(audit)
+    subs = analysis.get("subs", [])
+
+    # Only request certs for subs that are NOT on file for the whole period
+    # and that have a vendor_id (we know who they are)
+    needs_cert = [
+        s for s in subs
+        if s["status"] != "full"
+        and s["vendor_id"]
+    ]
+
+    no_contact: list[str] = []
+    agent_groups: dict[str, dict] = {}  # agent_email → {contact, subs[]}
+    direct_subs: list[dict] = []
+
+    vendors_tbl = api.table(base_id, VENDORS_TABLE_ID)
+
+    for sub in needs_cert:
+        try:
+            vrec = vendors_tbl.get(sub["vendor_id"])
+            vf   = vrec["fields"]
+        except Exception:
+            no_contact.append(sub["payee_raw"])
+            continue
+
+        contact = _get_vendor_contact(vf)
+
+        if contact["type"] == "none":
+            no_contact.append(sub["payee_raw"])
+            continue
+
+        if contact["type"] == "agent":
+            ce = contact["email"]
+            if ce not in agent_groups:
+                agent_groups[ce] = {"contact": contact, "subs": [], "vendor_ids": []}
+            agent_groups[ce]["subs"].append(sub)
+            agent_groups[ce]["vendor_ids"].append(sub["vendor_id"])
+        else:
+            direct_subs.append({"sub": sub, "contact": contact})
+
+    drafts_created = 0
+
+    # Create batched agent drafts
+    for ce, grp in agent_groups.items():
+        contact = grp["contact"]
+        body = _build_audit_cert_request_body(
+            contact=contact,
+            client_name=client_name,
+            cert_holder=cert_holder,
+            subs=grp["subs"],
+            audit_start=audit["start_date"],
+            audit_end=audit["end_date"],
+            coverage=audit["coverage"],
+        )
+        sub_names = ", ".join(s["vendor_name"] for s in grp["subs"][:3])
+        if len(grp["subs"]) > 3:
+            sub_names += f" + {len(grp['subs']) - 3} more"
+        subject = (
+            f"Certificate request — {client_name} — {audit['coverage']} audit — "
+            f"{sub_names}"
+        )
+        em_rec = _create_email_message(
+            subject=subject, body=body,
+            to_email=ce,
+            to_source="agent",
+            items_covered=f"{len(grp['subs'])} subcontractors — {audit['coverage']} audit",
+            vendor_ids=grp["vendor_ids"],
+            client_ids=[audit["client_id"]],
+            now_iso=now_iso,
+        )
+        if em_rec.get("id"):
+            _astore.record_audit_email(audit_id, em_rec["id"], "cert_request_agent")
+            drafts_created += 1
+
+    # Direct-to-vendor drafts (no agent)
+    for item in direct_subs:
+        sub = item["sub"]
+        contact = item["contact"]
+        body = _build_audit_cert_request_body(
+            contact=contact,
+            client_name=client_name,
+            cert_holder=cert_holder,
+            subs=[sub],
+            audit_start=audit["start_date"],
+            audit_end=audit["end_date"],
+            coverage=audit["coverage"],
+        )
+        subject = (
+            f"Certificate request — {sub['vendor_name']} — {audit['coverage']} audit"
+        )
+        em_rec = _create_email_message(
+            subject=subject, body=body,
+            to_email=contact["email"],
+            to_source="vendor",
+            items_covered=f"{sub['vendor_name']} — {audit['coverage']}",
+            vendor_ids=[sub["vendor_id"]],
+            client_ids=[audit["client_id"]],
+            now_iso=now_iso,
+        )
+        if em_rec.get("id"):
+            _astore.record_audit_email(audit_id, em_rec["id"], "cert_request_vendor")
+            drafts_created += 1
+
+    # Draft to client for vendors with no contact
+    no_contact_subs = [
+        s for s in needs_cert if s["payee_raw"] in no_contact
+    ] + [
+        s for s in subs
+        if s["status"] == "not_in_ccs"
+    ]
+
+    if no_contact_subs:
+        lines = [
+            "Hi,",
+            "",
+            f"As we work through the {audit['coverage']} audit for the period "
+            f"{audit['start_date']} to {audit['end_date']}, I need help "
+            f"reaching the following subcontractors. Could you send me their phone "
+            f"number or email address?",
+            "",
+        ]
+        for sub in no_contact_subs:
+            paid_str = f"${sub['total_paid']:,.2f}" if sub.get("total_paid") else ""
+            lines.append(
+                f"  {sub['payee_raw']}"
+                + (f" (paid {paid_str} in the period)" if paid_str else "")
+            )
+        lines += [
+            "",
+            "Thank you,",
+            "Carolina Compliance Solutions",
+        ]
+        try:
+            crec2 = api.table(base_id, CLIENTS_TABLE_ID).get(audit["client_id"])
+            client_email = crec2["fields"].get("Client Email") or ""
+        except Exception:
+            client_email = ""
+
+        subject_client = (
+            f"Contact info needed — {audit['coverage']} audit subcontractors"
+        )
+        em_rec2 = _create_email_message(
+            subject=subject_client, body="\n".join(lines),
+            to_email=client_email,
+            to_source="client",
+            items_covered=f"{len(no_contact_subs)} subcontractors",
+            client_ids=[audit["client_id"]],
+            now_iso=now_iso,
+        )
+        if em_rec2.get("id"):
+            _astore.record_audit_email(audit_id, em_rec2["id"], "contact_request_client")
+            drafts_created += 1
+
+    return jsonify({
+        "ok": True,
+        "drafts_created": drafts_created,
+        "agent_count":    len(agent_groups),
+        "direct_count":   len(direct_subs),
+        "no_contact":     no_contact,
+        "cert_holder_missing": cert_holder_missing,
+        "emails_url": url_for("emails_page"),
+    })
+
+
+@app.route("/audits/<audit_id>/remediation", methods=["POST"])
+@login_required
+@csrf_protect
+def audit_remediation(audit_id):
+    """Save remediation note for a payee."""
+    from flask import jsonify
+    data = request.get_json(force=True) or {}
+    payee_raw = (data.get("payee_raw") or "").strip()
+    status    = (data.get("status") or "").strip()
+    note      = (data.get("note") or "").strip()
+    if not payee_raw:
+        return jsonify({"ok": False, "error": "payee_raw required"}), 400
+    _astore.upsert_remediation(audit_id, payee_raw, status, note)
+    return jsonify({"ok": True})
+
+
+@app.route("/audits/<audit_id>/update", methods=["POST"])
+@login_required
+@csrf_protect
+def audit_update(audit_id):
+    """Update audit metadata."""
+    from flask import jsonify
+    data = request.get_json(force=True) or {}
+    allowed = {
+        "status", "auditor_name", "policy_number", "notes", "due_date",
+        "start_date", "end_date", "coverage",
+    }
+    updates = {k: v for k, v in data.items() if k in allowed}
+    _astore.update_audit(audit_id, **updates)
+    return jsonify({"ok": True})
+
+
+@app.route("/audits/<audit_id>/build-pack", methods=["POST"])
+@login_required
+@csrf_protect
+def audit_build_pack(audit_id):
+    """Build an audit pack ZIP (Excel + PDF summary + cert PDFs)."""
+    audit = _astore.get_audit(audit_id)
+    if not audit:
+        abort(404)
+
+    base_id = clean_base_id(config.AIRTABLE_BASE_ID)
+    api = _api()
+
+    try:
+        crec = api.table(base_id, CLIENTS_TABLE_ID).get(audit["client_id"])
+        client_name = crec["fields"].get("Client Name") or audit["client_name"]
+    except Exception:
+        client_name = audit["client_name"]
+
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+        HAS_OPENPYXL = True
+    except ImportError:
+        HAS_OPENPYXL = False
+
+    analysis = _compute_audit_analysis(audit)
+    subs      = analysis.get("subs", [])
+    headline  = analysis.get("headline", {})
+    all_packs = _astore.get_audit_packs(audit_id)
+    version   = len(all_packs) + 1
+
+    # Count open items for draft watermark
+    open_items = [s for s in subs if s["status"] != "full"]
+    has_open   = bool(open_items)
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+
+        if HAS_OPENPYXL:
+            wb = openpyxl.Workbook()
+
+            # ── Sheet 1: Summary ──
+            ws_sum = wb.active
+            ws_sum.title = "Summary"
+            _xl_bold = Font(bold=True)
+            _xl_header_fill = PatternFill("solid", fgColor="102042")
+            _xl_header_font = Font(bold=True, color="FFFFFF")
+
+            sum_rows = [
+                ("Audit", f"{client_name} — {audit['coverage']}"),
+                ("Period", f"{audit['start_date']} to {audit['end_date']}"),
+                ("Auditor / Insurer", audit.get("auditor_name") or ""),
+                ("Policy Number", audit.get("policy_number") or ""),
+                ("Generated", datetime.now().strftime("%m/%d/%Y")),
+                ("Version", f"v{version}"),
+                ("", ""),
+                ("Subcontractor payees", headline.get("subs_count", 0)),
+                ("Total paid to subs", f"${headline.get('total_paid', 0):,.2f}"),
+                ("On file — whole period", headline.get("full_count", 0)),
+                ("On file — part of period", headline.get("partial_count", 0)),
+                ("Not on file", headline.get("missing_count", 0)),
+                ("Not in CCS yet", headline.get("not_in_ccs_count", 0)),
+                ("Paid during periods not on file", f"${headline.get('paid_in_gaps_total', 0):,.2f}"),
+                ("", ""),
+                ("", "Prepared by Carolina Compliance Solutions from certificates received. "
+                    "This is a record of what is on file, not a statement about coverage "
+                    "or an opinion on any insurer's or auditor's requirements."),
+            ]
+            if has_open:
+                ws_sum.cell(row=1, column=1, value="DRAFT — OPEN ITEMS REMAIN").font = Font(
+                    bold=True, color="FF0000", size=14
+                )
+
+            for i, (label, value) in enumerate(sum_rows, start=2 if has_open else 1):
+                ws_sum.cell(row=i, column=1, value=label).font = _xl_bold
+                ws_sum.cell(row=i, column=2, value=value)
+
+            ws_sum.column_dimensions["A"].width = 32
+            ws_sum.column_dimensions["B"].width = 50
+
+            # ── Sheet 2: Subcontractors ──
+            ws_subs = wb.create_sheet("Subcontractors")
+            sub_headers = [
+                "Payee Name", "Trade / Work Type", "CCS Vendor Match",
+                "Total Paid", "Txn Count", "First Payment", "Last Payment",
+                "Terms on File (Effective – Expiration)", "Days Not on File",
+                "Paid During Periods Not on File", "Status", "Notes",
+            ]
+            for col, h in enumerate(sub_headers, 1):
+                cell = ws_subs.cell(row=1, column=col, value=h)
+                cell.font = _xl_header_font
+                cell.fill = _xl_header_fill
+                cell.alignment = Alignment(wrap_text=True)
+
+            for row_i, s in enumerate(subs, 2):
+                terms_str = "; ".join(
+                    f"{t['effective']} to {t['expiration']}"
+                    for t in s.get("terms", [])
+                ) or "None on file"
+                rem_note = s.get("remediation_note", "")
+                if s.get("remediation"):
+                    rem_note = f"[{s['remediation']}] {rem_note}".strip()
+
+                ws_subs.cell(row=row_i, column=1,  value=s["payee_raw"])
+                ws_subs.cell(row=row_i, column=2,  value=s.get("trade") or "")
+                ws_subs.cell(row=row_i, column=3,  value=s["vendor_name"] if s.get("vendor_id") else "Not matched")
+                ws_subs.cell(row=row_i, column=4,  value=s["total_paid"])
+                ws_subs.cell(row=row_i, column=5,  value=s["txn_count"])
+                ws_subs.cell(row=row_i, column=6,  value=s.get("first_date") or "")
+                ws_subs.cell(row=row_i, column=7,  value=s.get("last_date") or "")
+                ws_subs.cell(row=row_i, column=8,  value=terms_str)
+                ws_subs.cell(row=row_i, column=9,  value=s["days_not_on_file"])
+                ws_subs.cell(row=row_i, column=10, value=s["paid_in_gaps"])
+                ws_subs.cell(row=row_i, column=11, value=s["status_label"])
+                ws_subs.cell(row=row_i, column=12, value=rem_note)
+
+            for col in range(1, len(sub_headers) + 1):
+                ws_subs.column_dimensions[get_column_letter(col)].width = 18
+            ws_subs.column_dimensions["A"].width = 28
+            ws_subs.column_dimensions["H"].width = 40
+
+            # ── Sheet 3: Payments ──
+            ws_pay = wb.create_sheet("Payments")
+            pay_headers = ["Date", "Payee", "Account", "Type", "Amount", "Card/Bank", "Included"]
+            for col, h in enumerate(pay_headers, 1):
+                cell = ws_pay.cell(row=1, column=col, value=h)
+                cell.font = _xl_header_font
+                cell.fill = _xl_header_fill
+
+            all_payments = _astore.get_payments(
+                audit_id, in_period_only=True,
+                start_date=audit["start_date"], end_date=audit["end_date"],
+            )
+            # Build a set of sub payees (confirmed + unclear)
+            sub_payees = {s["payee_raw"] for s in subs}
+            for row_i, p in enumerate(all_payments, 2):
+                ws_pay.cell(row=row_i, column=1, value=p["txn_date"])
+                ws_pay.cell(row=row_i, column=2, value=p["payee_raw"])
+                ws_pay.cell(row=row_i, column=3, value=p.get("account") or "")
+                ws_pay.cell(row=row_i, column=4, value=p.get("txn_type") or "")
+                ws_pay.cell(row=row_i, column=5, value=p["amount"])
+                ws_pay.cell(row=row_i, column=6, value="Card" if p.get("is_card") else "Bank")
+                ws_pay.cell(row=row_i, column=7, value="Yes" if p["payee_raw"] in sub_payees else "No (excluded)")
+
+            # ── Sheet 4: Terms on File ──
+            ws_terms = wb.create_sheet("Terms on File")
+            term_headers = [
+                "Payee", "CCS Vendor", "Coverage", "Policy Number",
+                "Carrier", "Effective", "Expiration", "Received",
+            ]
+            for col, h in enumerate(term_headers, 1):
+                cell = ws_terms.cell(row=1, column=col, value=h)
+                cell.font = _xl_header_font
+                cell.fill = _xl_header_fill
+
+            trow = 2
+            for s in subs:
+                for t in s.get("terms", []):
+                    ws_terms.cell(row=trow, column=1, value=s["payee_raw"])
+                    ws_terms.cell(row=trow, column=2, value=s["vendor_name"])
+                    ws_terms.cell(row=trow, column=3, value=audit["coverage"])
+                    ws_terms.cell(row=trow, column=4, value=t.get("policy_number") or "")
+                    ws_terms.cell(row=trow, column=5, value=t.get("carrier") or "")
+                    ws_terms.cell(row=trow, column=6, value=t.get("effective") or "")
+                    ws_terms.cell(row=trow, column=7, value=t.get("expiration") or "")
+                    ws_terms.cell(row=trow, column=8, value=s.get("cert_received") or "")
+                    trow += 1
+
+            # Save workbook to ZIP
+            xl_buf = io.BytesIO()
+            wb.save(xl_buf)
+            xl_buf.seek(0)
+            zf.writestr("audit_workbook.xlsx", xl_buf.read())
+
+        # ── PDF Summary (plain text for now) ──
+        def _fd(s):
+            d = _parse_date(s)
+            return d.strftime("%m/%d/%Y") if d else s
+
+        pdf_lines = [
+            "AUDIT CERTIFICATE SUMMARY",
+            "=" * 50,
+            f"Client:    {client_name}",
+            f"Coverage:  {audit['coverage']}",
+            f"Period:    {_fd(audit['start_date'])} to {_fd(audit['end_date'])}",
+            f"Auditor:   {audit.get('auditor_name') or '—'}",
+            f"Generated: {datetime.now().strftime('%m/%d/%Y')}",
+            f"Version:   v{version}",
+            "",
+        ]
+        if has_open:
+            pdf_lines.append("*** DRAFT — OPEN ITEMS REMAIN ***")
+            pdf_lines.append("")
+
+        pdf_lines += [
+            "HEADLINE",
+            f"  Subcontractor payees:               {headline.get('subs_count', 0)}",
+            f"  Total paid to subs:                 ${headline.get('total_paid', 0):>12,.2f}",
+            f"  On file — whole period:             {headline.get('full_count', 0)} (${headline.get('full_dollars', 0):,.2f})",
+            f"  On file — part of period:           {headline.get('partial_count', 0)} (${headline.get('partial_dollars', 0):,.2f})",
+            f"  Not on file:                        {headline.get('missing_count', 0)} (${headline.get('missing_dollars', 0):,.2f})",
+            f"  Not in CCS yet:                     {headline.get('not_in_ccs_count', 0)} (${headline.get('not_in_ccs_dollars', 0):,.2f})",
+            f"  Paid during periods not on file:    ${headline.get('paid_in_gaps_total', 0):>12,.2f}",
+            "",
+            "SUBCONTRACTORS",
+            "-" * 50,
+        ]
+        for s in subs:
+            status_lbl = s.get("status_label", s["status"])
+            pdf_lines.append(f"  {s['payee_raw']}")
+            pdf_lines.append(f"    Paid: ${s['total_paid']:,.2f}  |  {status_lbl}")
+            if s.get("remediation"):
+                pdf_lines.append(f"    Note: [{s['remediation']}] {s.get('remediation_note', '')}")
+            pdf_lines.append("")
+
+        pdf_lines += [
+            "",
+            "Prepared by Carolina Compliance Solutions from certificates received.",
+            "This is a record of what is on file, not a statement about coverage",
+            "or an opinion on any insurer's or auditor's requirements.",
+        ]
+        zf.writestr("audit_summary.txt", "\n".join(pdf_lines))
+
+        # ── Cert PDFs (from Airtable attachments) ──
+        cert_added = 0
+        for s in subs:
+            if not s.get("vendor_id") or not s.get("terms"):
+                continue
+            for t in s["terms"]:
+                # Try to fetch source-page attachment from policy record
+                pol_ids = _get_vendor_policy_ids(s["vendor_id"])
+                if not pol_ids:
+                    continue
+                try:
+                    pol_formula = "OR(" + ",".join(f"RECORD_ID()='{p}'" for p in pol_ids) + ")"
+                    pols = api.table(base_id, INSURANCE_POLICIES_TABLE_ID).all(
+                        formula=pol_formula,
+                        fields=["Policy Number", SOURCE_PAGE_FIELD, "Policy Type",
+                                "Effective Date", "Expiration Date"],
+                    )
+                    kws = _audit_coverage_keywords(audit["coverage"])
+                    for pol in pols:
+                        pf = pol["fields"]
+                        if not _pol_matches_audit_type((pf.get("Policy Type") or "").lower(), kws):
+                            continue
+                        pnum = (pf.get("Policy Number") or "").strip()
+                        if pnum and t.get("policy_number") and pnum != t["policy_number"]:
+                            continue
+                        attachments = pf.get(SOURCE_PAGE_FIELD) or []
+                        for att in attachments:
+                            att_url  = att.get("url") or ""
+                            att_name = att.get("filename") or "cert.pdf"
+                            if not att_url:
+                                continue
+                            try:
+                                with urllib.request.urlopen(att_url, timeout=15) as resp:
+                                    pdf_data = resp.read()
+                                safe_vendor = re.sub(r"[^A-Za-z0-9 _-]", "", s["payee_raw"])[:30]
+                                eff  = t.get("effective", "")[:10]
+                                exp  = t.get("expiration", "")[:10]
+                                covt = _audit_type_abbrev(audit["coverage"])
+                                zip_name = f"certs/{safe_vendor} - {covt} - {eff} to {exp}.pdf"
+                                zf.writestr(zip_name, pdf_data)
+                                cert_added += 1
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
+    zip_buf.seek(0)
+    pack_path = os.path.join(_AUDIT_UPLOADS_DIR, f"pack_{audit_id}_v{version}.zip")
+    with open(pack_path, "wb") as fh:
+        fh.write(zip_buf.getvalue())
+
+    pack = _astore.create_audit_pack(audit_id, pack_path, has_open_items=has_open)
+    _astore.update_audit(audit_id, status="Pack built")
+
+    # Update Airtable record
+    if audit.get("airtable_id"):
+        try:
+            api.table(base_id, AUDITS_TABLE_ID).update(audit["airtable_id"], {
+                "Audit Type": audit["coverage"],
+            })
+            _hs.record_write("Audits", 1)
+        except Exception:
+            pass
+
+    zip_buf.seek(0)
+    safe_client = re.sub(r'[\\/:*?"<>|]', "_", client_name)
+    safe_cov    = re.sub(r'[\\/:*?"<>|]', "_", audit["coverage"])
+    start_s     = (audit["start_date"] or "")[:10].replace("-", "")
+    end_s       = (audit["end_date"] or "")[:10].replace("-", "")
+    dl_name     = f"{safe_client} - {safe_cov} - {start_s} to {end_s} - v{version}.zip"
+
+    from flask import send_file
+    return send_file(
+        zip_buf,
+        as_attachment=True,
+        download_name=dl_name,
+        mimetype="application/zip",
+    )
+
+
+@app.route("/audits/<audit_id>/checklist")
+@login_required
+def audit_checklist(audit_id):
+    """Return checklist JSON for the audit workspace progress bar."""
+    from flask import jsonify
+    audit = _astore.get_audit(audit_id)
+    if not audit:
+        return jsonify({"ok": False, "error": "Not found"}), 404
+
+    files = _astore.get_audit_files(audit_id)
+    cls_all = _astore.get_payee_classifications(audit_id)
+    packs = _astore.get_audit_packs(audit_id)
+
+    has_file = any(f["parse_status"] == "ok" for f in files)
+    unconfirmed = [
+        c for c in cls_all
+        if not c.get("confirmed") and c.get("payee_group") not in ("not_sub",)
+    ]
+    unclear = [c for c in cls_all if c.get("payee_group") == "unclear"]
+    no_trade = [
+        c for c in cls_all
+        if c.get("payee_group") in ("ccs_vendor", "likely_sub")
+        and not c.get("trade")
+    ]
+
+    email_ids = _astore.get_audit_email_ids(audit_id)
+    drafts_exist = bool(email_ids)
+
+    checks = [
+        {
+            "step": 1,
+            "title": "Upload payments file",
+            "done": has_file,
+            "detail": (
+                f"{files[0]['row_count']:,} payments, "
+                f"{files[0]['date_min']} to {files[0]['date_max']}"
+                if has_file and files else "Drop a QuickBooks Transaction List CSV"
+            ),
+        },
+        {
+            "step": 2,
+            "title": "Confirm payees",
+            "done": has_file and not unconfirmed,
+            "detail": (
+                f"{len(unconfirmed)} payees need a decision"
+                if unconfirmed else "All payees confirmed"
+            ),
+            "count": len(unconfirmed),
+        },
+        {
+            "step": 3,
+            "title": "Confirm work types",
+            "done": has_file and not no_trade,
+            "detail": (
+                f"{len(no_trade)} subcontractors missing a trade / work type"
+                if no_trade else "All work types set"
+            ),
+            "count": len(no_trade),
+        },
+        {
+            "step": 4,
+            "title": "Review queue",
+            "done": True,  # Always available
+            "detail": "Check for certificates pending approval",
+            "link": url_for("queue"),
+        },
+        {
+            "step": 5,
+            "title": "Request missing certificates",
+            "done": drafts_exist,
+            "detail": (
+                f"{len(email_ids)} drafts created"
+                if drafts_exist else "No drafts yet"
+            ),
+            "link": url_for("emails_page"),
+        },
+        {
+            "step": 6,
+            "title": "Follow up on requests",
+            "done": False,
+            "detail": "Check cadence — view Emails page for outstanding requests",
+            "link": url_for("emails_page"),
+        },
+        {
+            "step": 7,
+            "title": "Handle the remainder",
+            "done": False,
+            "detail": "Mark payees as requested/no response, not a sub, or other",
+        },
+        {
+            "step": 8,
+            "title": "Build audit pack",
+            "done": bool(packs),
+            "detail": (
+                f"v{packs[0]['version']} built {datetime.fromtimestamp(packs[0]['created_at']).strftime('%m/%d/%Y')}"
+                if packs else "Not built yet"
+            ),
+        },
+    ]
+
+    done_count  = sum(1 for c in checks if c["done"])
+    total_count = len(checks)
+    next_step   = next((c for c in checks if not c["done"]), checks[-1])
+
+    return jsonify({
+        "ok":          True,
+        "steps":       checks,
+        "done_count":  done_count,
+        "total_count": total_count,
+        "next_step":   next_step,
+    })
+
+
 if __name__ == "__main__":
     app.run(debug=True, port=5050)
+

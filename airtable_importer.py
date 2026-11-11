@@ -411,6 +411,13 @@ def run():
         except Exception as exc:
             failed += 1
             logger.error("Failed to import %s: %s", json_path.name, exc)
+            try:
+                import health_store as _hs
+                _hs.record_event("write_error", "error",
+                                  f"Import failed: {json_path.name}",
+                                  body=str(exc), table_name="Incoming Extractions")
+            except ImportError:
+                pass
 
     logger.info(
         "Batch complete: %d succeeded, %d failed out of %d",
