@@ -617,6 +617,105 @@
 
   </div>{# /pulse-grid #}
 
+  {# ── Settings ──────────────────────────────────────────────────────── #}
+  <details style="margin-top:24px;" id="pulse-settings-details">
+    <summary style="list-style:none;cursor:pointer;user-select:none;" class="btn btn-secondary btn-sm">
+      Settings &amp; Notifications
+    </summary>
+    <div class="card" style="margin-top:8px;padding:20px 24px;">
+      <form id="pulse-settings-form">
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px 24px;">
+
+          <label style="display:flex;flex-direction:column;gap:4px;font-size:.85rem;">
+            Airtable warn % of limit
+            <input type="number" name="airtable_warn_pct" min="1" max="99"
+                   value="{{ pulse_settings.airtable_warn_pct }}"
+                   style="padding:5px 8px;border:1px solid var(--border);border-radius:4px;font-size:.9rem;">
+          </label>
+          <label style="display:flex;flex-direction:column;gap:4px;font-size:.85rem;">
+            Airtable error % of limit
+            <input type="number" name="airtable_error_pct" min="1" max="100"
+                   value="{{ pulse_settings.airtable_error_pct }}"
+                   style="padding:5px 8px;border:1px solid var(--border);border-radius:4px;font-size:.9rem;">
+          </label>
+          <label style="display:flex;flex-direction:column;gap:4px;font-size:.85rem;">
+            Circuit breaker max writes
+            <input type="number" name="cb_max_writes" min="10"
+                   value="{{ pulse_settings.cb_max_writes }}"
+                   style="padding:5px 8px;border:1px solid var(--border);border-radius:4px;font-size:.9rem;">
+          </label>
+          <label style="display:flex;flex-direction:column;gap:4px;font-size:.85rem;">
+            Circuit breaker window (min)
+            <input type="number" name="cb_window_minutes" min="1"
+                   value="{{ pulse_settings.cb_window_minutes }}"
+                   style="padding:5px 8px;border:1px solid var(--border);border-radius:4px;font-size:.9rem;">
+          </label>
+          <label style="display:flex;flex-direction:column;gap:4px;font-size:.85rem;">
+            Oldest pending warn (days)
+            <input type="number" name="oldest_pending_warn_days" min="1"
+                   value="{{ pulse_settings.oldest_pending_warn_days }}"
+                   style="padding:5px 8px;border:1px solid var(--border);border-radius:4px;font-size:.9rem;">
+          </label>
+          <label style="display:flex;flex-direction:column;gap:4px;font-size:.85rem;">
+            Oldest pending error (days)
+            <input type="number" name="oldest_pending_error_days" min="1"
+                   value="{{ pulse_settings.oldest_pending_error_days }}"
+                   style="padding:5px 8px;border:1px solid var(--border);border-radius:4px;font-size:.9rem;">
+          </label>
+          <label style="display:flex;flex-direction:column;gap:4px;font-size:.85rem;">
+            Skipped emails warn threshold
+            <input type="number" name="skipped_emails_warn" min="0"
+                   value="{{ pulse_settings.skipped_emails_warn }}"
+                   style="padding:5px 8px;border:1px solid var(--border);border-radius:4px;font-size:.9rem;">
+          </label>
+          <label style="display:flex;flex-direction:column;gap:4px;font-size:.85rem;">
+            Skipped emails error threshold
+            <input type="number" name="skipped_emails_error" min="1"
+                   value="{{ pulse_settings.skipped_emails_error }}"
+                   style="padding:5px 8px;border:1px solid var(--border);border-radius:4px;font-size:.9rem;">
+          </label>
+
+        </div>
+
+        <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border);">
+          <p style="font-size:.88rem;font-weight:600;margin-bottom:12px;">Email Notifications</p>
+          <label style="display:flex;align-items:center;gap:10px;font-size:.85rem;cursor:pointer;">
+            <input type="checkbox" name="summary_email_enabled"
+                   {% if pulse_settings.summary_email_enabled %}checked{% endif %}
+                   style="width:16px;height:16px;">
+            Send me a daily health summary email
+          </label>
+          <div style="display:flex;gap:16px;margin-top:12px;flex-wrap:wrap;">
+            <label style="display:flex;flex-direction:column;gap:4px;font-size:.85rem;">
+              Send at (UTC hour)
+              <input type="number" name="summary_email_hour_utc" min="0" max="23"
+                     value="{{ pulse_settings.summary_email_hour_utc }}"
+                     style="padding:5px 8px;border:1px solid var(--border);border-radius:4px;font-size:.9rem;width:100px;">
+            </label>
+            <label style="display:flex;flex-direction:column;gap:4px;font-size:.85rem;">
+              Quiet hours start (UTC)
+              <input type="number" name="quiet_hours_start_utc" min="0" max="23"
+                     value="{{ pulse_settings.quiet_hours_start_utc }}"
+                     style="padding:5px 8px;border:1px solid var(--border);border-radius:4px;font-size:.9rem;width:100px;">
+            </label>
+            <label style="display:flex;flex-direction:column;gap:4px;font-size:.85rem;">
+              Quiet hours end (UTC)
+              <input type="number" name="quiet_hours_end_utc" min="0" max="23"
+                     value="{{ pulse_settings.quiet_hours_end_utc }}"
+                     style="padding:5px 8px;border:1px solid var(--border);border-radius:4px;font-size:.9rem;width:100px;">
+            </label>
+          </div>
+        </div>
+
+        <div style="margin-top:20px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+          <button type="submit" class="btn btn-primary btn-sm" id="save-settings-btn">Save settings</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="test-email-btn">Send me a test email</button>
+          <span id="settings-status" style="font-size:.82rem;color:var(--secondary);"></span>
+        </div>
+      </form>
+    </div>
+  </details>
+
   {# ── Recent events log (collapsible) ──────────────────────────────── #}
   {% if pulse_data.recent_events %}
   <details style="margin-top:24px;">
@@ -720,6 +819,60 @@ function markNotNeeded(docId) {
     btn.forEach(function(b) { b.disabled = false; });
   });
 }
+
+/* ── Settings form ──────────────────────────────────────────────────── */
+document.getElementById('pulse-settings-form').addEventListener('submit', function(e) {
+  e.preventDefault();
+  var btn = document.getElementById('save-settings-btn');
+  var status = document.getElementById('settings-status');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  var fd = new FormData(this);
+  var data = {};
+  for (var [k, v] of fd.entries()) {
+    if (k === 'summary_email_enabled') { data[k] = true; continue; }
+    var n = Number(v);
+    data[k] = isNaN(n) ? v : n;
+  }
+  if (!fd.has('summary_email_enabled')) data['summary_email_enabled'] = false;
+  fetch('/pulse/settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', 'X-CSRFToken': getCsrf()},
+    body: JSON.stringify(data),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    btn.disabled = false; btn.textContent = 'Save settings';
+    status.textContent = d.ok ? 'Saved.' : ('Error: ' + (d.error || '?'));
+    status.style.color = d.ok ? '#15803d' : '#b03a2e';
+    setTimeout(function() { status.textContent = ''; }, 3000);
+  })
+  .catch(function() {
+    btn.disabled = false; btn.textContent = 'Save settings';
+    status.textContent = 'Network error'; status.style.color = '#b03a2e';
+  });
+});
+
+document.getElementById('test-email-btn').addEventListener('click', function() {
+  var btn = this;
+  var status = document.getElementById('settings-status');
+  btn.disabled = true; btn.textContent = 'Sending…';
+  fetch('/pulse/test-email', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', 'X-CSRFToken': getCsrf()},
+    body: '{}',
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    btn.disabled = false; btn.textContent = 'Send me a test email';
+    status.textContent = d.ok ? ('Test sent to ' + d.sent_to) : ('Error: ' + (d.error || '?'));
+    status.style.color = d.ok ? '#15803d' : '#b03a2e';
+    setTimeout(function() { status.textContent = ''; }, 5000);
+  })
+  .catch(function() {
+    btn.disabled = false; btn.textContent = 'Send me a test email';
+    status.textContent = 'Network error'; status.style.color = '#b03a2e';
+  });
+});
 </script>
 
 </body>

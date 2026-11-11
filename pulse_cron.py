@@ -493,6 +493,115 @@ def check_outside_services() -> list:
 
 
 # ---------------------------------------------------------------------------
+# Settings helpers
+# ---------------------------------------------------------------------------
+
+def _load_settings() -> dict:
+    """Load pulse_settings.json; returns defaults on any error."""
+    defaults = {
+        "summary_email_enabled": False,
+        "summary_email_hour_utc": 14,
+        "quiet_hours_start_utc": 2,
+        "quiet_hours_end_utc": 11,
+    }
+    try:
+        import json
+        from pathlib import Path
+        path = Path(__file__).parent / "pulse_settings.json"
+        return {**defaults, **json.loads(path.read_text())}
+    except Exception:
+        return defaults
+
+
+def _already_sent_summary_today() -> bool:
+    """Return True if a daily_summary_sent event was recorded today (UTC)."""
+    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    try:
+        events = health_store.get_recent_events(limit=50, since_hours=25)
+        return any(
+            e["category"] == "heartbeat"
+            and e["title"] == "daily_summary_sent"
+            and datetime.fromtimestamp(e["ts"], tz=timezone.utc).strftime("%Y-%m-%d") == today
+            for e in events
+        )
+    except Exception:
+        return False
+
+
+def _send_daily_summary(results: dict, overall_level: str) -> None:
+    """Send a plain-text daily health summary email to haley@ if settings allow."""
+    settings = _load_settings()
+    if not settings.get("summary_email_enabled"):
+        return
+
+    now_utc = datetime.now(tz=timezone.utc)
+    if now_utc.hour != settings.get("summary_email_hour_utc", 14):
+        return
+
+    if _already_sent_summary_today():
+        return
+
+    sg_key = (os.environ.get("SENDGRID_API_KEY") or "").strip()
+    if not sg_key:
+        print("[pulse_cron] Daily summary: SENDGRID_API_KEY not set — skipping")
+        return
+
+    from_email = (os.environ.get("SENDGRID_FROM_EMAIL") or "compliance@carolinacompliancesolutions.com").strip()
+    to_email   = "haley@carolinacompliancesolutions.com"
+    subject    = f"[CCS Pulse] Daily health — {overall_level.upper()} — {now_utc.strftime('%Y-%m-%d')}"
+
+    lines = [f"CCS Pulse Daily Summary  {now_utc.strftime('%Y-%m-%d %H:%M UTC')}", ""]
+    lines.append(f"Overall: {overall_level.upper()}")
+    lines.append("")
+
+    s = results.get("airtable_space", {})
+    if s.get("total_records") is not None:
+        pct = s["total_records"] / s.get("limit", 50_000) * 100
+        lines.append(f"Airtable space: {s['total_records']:,} / {s.get('limit', 50000):,} ({pct:.1f}%) — {s.get('level','?')}")
+    else:
+        lines.append("Airtable space: ERROR")
+
+    ei = results.get("email_intake", {})
+    lines.append(f"Email intake: {ei.get('today_received',0)} received, "
+                 f"{ei.get('today_processed',0)} processed, "
+                 f"{ei.get('today_skipped',0)} skipped — {ei.get('level','?')}")
+
+    p = results.get("pipeline", {})
+    lines.append(f"Pipeline: {p.get('level','?')}")
+
+    wr = results.get("write_rate", {})
+    lines.append(f"Write rate: {wr.get('level','?')}")
+
+    lines.append("")
+    for svc in results.get("services", []):
+        lines.append(f"{svc.get('name','')}: {svc.get('status','')} — {svc.get('level','?')}")
+
+    lines.append("")
+    lines.append("— Carolina Compliance Solutions automated pulse check")
+
+    body = "\n".join(lines)
+
+    try:
+        from sendgrid import SendGridAPIClient
+        from sendgrid.helpers.mail import Mail, Email
+        sg = SendGridAPIClient(api_key=sg_key)
+        message = Mail(
+            from_email=Email(from_email, "CCS Pulse"),
+            to_emails=to_email,
+            subject=subject,
+            plain_text_content=body,
+        )
+        sg.send(message)
+        health_store.record_event(
+            "heartbeat", "ok", "daily_summary_sent",
+            body=f"sent at {now_utc.isoformat()}, level={overall_level}",
+        )
+        print(f"[pulse_cron] Daily summary email sent ({overall_level.upper()})")
+    except Exception as exc:
+        print(f"[pulse_cron] Daily summary email failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -568,10 +677,13 @@ def main():
         results["write_rate"]["level"],
     ] + [s["level"] for s in results["services"]]
 
-    if "error" in all_levels:
+    overall_level = "error" if "error" in all_levels else ("warn" if "warn" in all_levels else "ok")
+    _send_daily_summary(results, overall_level)
+
+    if overall_level == "error":
         print("\n[pulse_cron] OVERALL: ERROR")
         sys.exit(1)
-    elif "warn" in all_levels:
+    elif overall_level == "warn":
         print("\n[pulse_cron] OVERALL: WARN")
     else:
         print("\n[pulse_cron] OVERALL: OK")

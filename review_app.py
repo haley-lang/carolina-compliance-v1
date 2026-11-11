@@ -5117,8 +5117,24 @@ def pulse():
     )
     overall_level = _level_max(*section_levels) if section_levels else "ok"
 
+    _pulse_settings_defaults = {
+        "airtable_warn_pct": 60, "airtable_error_pct": 80,
+        "cb_max_writes": 200, "cb_window_minutes": 10,
+        "oldest_pending_warn_days": 3, "oldest_pending_error_days": 7,
+        "skipped_emails_warn": 1, "skipped_emails_error": 5,
+        "summary_email_enabled": False, "summary_email_hour_utc": 14,
+        "quiet_hours_start_utc": 2, "quiet_hours_end_utc": 11,
+    }
+    try:
+        _sp = os.path.join(os.path.dirname(__file__), "pulse_settings.json")
+        with open(_sp) as _f:
+            pulse_settings_data = {**_pulse_settings_defaults, **json.load(_f)}
+    except Exception:
+        pulse_settings_data = _pulse_settings_defaults
+
     return render_template("pulse.html", pulse_data=pulse_data,
-                            overall_level=overall_level, last_check=_now_iso())
+                            overall_level=overall_level, last_check=_now_iso(),
+                            pulse_settings=pulse_settings_data)
 
 
 @app.route("/pulse/settings", methods=["POST"])
@@ -5198,6 +5214,38 @@ def pulse_reprocess():
         return jsonify({"ok": True, "queued": True})
     except Exception as exc:
         app.logger.error("pulse_reprocess error: %s", exc)
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/pulse/test-email", methods=["POST"])
+@login_required
+def pulse_test_email():
+    """Send a test Pulse summary email to haley@."""
+    from flask import jsonify
+    try:
+        sg_key = (os.environ.get("SENDGRID_API_KEY") or "").strip()
+        if not sg_key:
+            return jsonify({"ok": False, "error": "SENDGRID_API_KEY not set"}), 500
+        from_email_addr = (os.environ.get("SENDGRID_FROM_EMAIL") or config.FROM_EMAIL).strip()
+        to_email = config.OWNER_EMAIL
+        from sendgrid import SendGridAPIClient
+        from sendgrid.helpers.mail import Mail, Email
+        message = Mail(
+            from_email=Email(from_email_addr, "CCS Pulse"),
+            to_emails=to_email,
+            subject="[CCS Pulse] Test alert — system is healthy",
+            plain_text_content=(
+                "This is a test message from the CCS Pulse health dashboard.\n\n"
+                "If you received this, your Pulse email notifications are working.\n\n"
+                "— Carolina Compliance Solutions"
+            ),
+        )
+        sg = SendGridAPIClient(api_key=sg_key)
+        sg.send(message)
+        _hs.record_event("heartbeat", "ok", "test_email_sent", body=f"sent to {to_email}")
+        return jsonify({"ok": True, "sent_to": to_email})
+    except Exception as exc:
+        app.logger.error("pulse_test_email error: %s", exc)
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
@@ -5397,7 +5445,7 @@ def _compute_audit_analysis(audit: dict) -> dict:
         pg  = cls.get("payee_group", "unclear")
 
         # Only include subs and unclear (skip confirmed not_sub)
-        if pg == "not_sub" and cls.get("confirmed"):
+        if pg == "not_sub":
             continue
 
         vendor_id   = cls.get("vendor_id", "")
