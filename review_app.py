@@ -105,6 +105,16 @@ _GL_KEYWORDS = ("general", "liability", "cgl", "commercial general")
 _WC_KEYWORDS = ("workers", "work comp", "w/c", "wc", "workers'", "employers liability")
 
 
+def _now_eastern() -> datetime:
+    """Return the current datetime in US/Eastern timezone."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(tz=ZoneInfo("America/New_York"))
+    except ImportError:
+        import pytz
+        return datetime.now(tz=pytz.timezone("America/New_York"))
+
+
 def _pol_matches_audit_type(pol_type: str, kws: tuple) -> bool:
     """True if pol_type matches the keywords.
 
@@ -3108,8 +3118,11 @@ def _build_gap_request_email_body(
         gs = sub.get("gap_start") or ""
         ge = sub.get("gap_end") or ""
         if gs or ge:
+            # gap_start is the expiration of the prior policy; gap starts the next day
+            gs_d = _parse_date(gs)
+            gs_disp = (gs_d + timedelta(days=1)).strftime("%m/%d/%Y") if gs_d else _fmt_d(gs)
             lines.append(
-                f"    Period not on file: {_fmt_d(gs) or 'an earlier date'} "
+                f"    Period not on file: {gs_disp or 'an earlier date'} "
                 f"through {_fmt_d(ge) or 'the present'}"
             )
         if sub.get("policy_number"):
@@ -3434,8 +3447,15 @@ def gaps_draft_email(vendor_id):
         d = _parse_date(s)
         return d.strftime("%m/%d/%Y") if d else s
 
-    gap_start_disp = _fmt(gap_start) if gap_start else "an earlier date"
-    gap_end_disp   = _fmt(gap_end) if gap_end else "the present"
+    # gap_start from _compute_date_gaps is the expiration of the prior policy
+    # (last covered day). The gap actually starts the following day.
+    gap_start_d = _parse_date(gap_start)
+    if gap_start_d:
+        gap_start_d = gap_start_d + timedelta(days=1)
+        gap_start_disp = gap_start_d.strftime("%m/%d/%Y")
+    else:
+        gap_start_disp = "an earlier date"
+    gap_end_disp = _fmt(gap_end) if gap_end else "the present"
 
     email_body = (
         f"Hello,\n\n"
@@ -5503,7 +5523,7 @@ def pulse():
             if r.get("due_date"):
                 try:
                     dd = date.fromisoformat(r["due_date"])
-                    days_until_due = (dd - date.today()).days
+                    days_until_due = (dd - _now_eastern().date()).days
                 except Exception:
                     pass
             active_audits.append({

@@ -336,6 +336,7 @@
             {% endif %}
           </td>
           <td>
+            {% if v.has_usable_contact %}
             <button class="btn btn-sm btn-secondary btn-draft-email"
                     data-vendor-id="{{ v.vendor_id }}"
                     data-coverage-type="{{ g.type }}"
@@ -344,6 +345,13 @@
                     data-client-id="{{ client_id }}">
               Draft email
             </button>
+            {% else %}
+            <a href="#" class="btn btn-sm btn-secondary"
+               onclick="toggleFixContact('{{ v.vendor_id }}'); return false;"
+               title="Add contact to enable drafting">
+              No contact on file. Add one.
+            </a>
+            {% endif %}
           </td>
         </tr>
         {% endfor %}
@@ -357,6 +365,7 @@
         {% for es in v.expiring_soon %}
         <div style="font-size:0.85rem; padding:4px 0">
           {{ es.type }}: {{ es.policy_number }} — expires {{ es.expiration_date | fmt_date }}
+          {% if v.has_usable_contact %}
           <button class="btn btn-sm btn-secondary btn-draft-email"
                   data-vendor-id="{{ v.vendor_id }}"
                   data-coverage-type="{{ es.type }}"
@@ -366,6 +375,14 @@
                   style="margin-left:8px">
             Draft email
           </button>
+          {% else %}
+          <a href="#" class="btn btn-sm btn-secondary"
+             onclick="toggleFixContact('{{ v.vendor_id }}'); return false;"
+             title="Add contact to enable drafting"
+             style="margin-left:8px">
+            No contact on file. Add one.
+          </a>
+          {% endif %}
         </div>
         {% endfor %}
       </div>
