@@ -3097,50 +3097,91 @@ def _build_gap_request_email_body(
     reply_to: str = "coi-intake@carolinacompliancesolutions.com",
 ) -> str:
     """Build a batched certificate request email covering multiple subs for one agent."""
-    greeting = contact.get("name") or "Insurance Agent"
-    agency_str = f" at {contact['agency']}" if contact.get("agency") else ""
+    greeting = contact.get("name") or "there"
+    is_agent = contact.get("type") == "agent"
 
-    def _fmt_d(s):
+    def _fmt_long(s):
+        """Format date as 'Month D, YYYY'."""
         d = _parse_date(s)
-        return d.strftime("%m/%d/%Y") if d else (s or "")
+        return d.strftime("%B %-d, %Y") if d else (s or "")
 
-    lines = [
-        f"Hello {greeting}{agency_str},",
-        "",
-        f"I am writing on behalf of {client_name} to request updated certificates of "
-        f"insurance for the following subcontractors. Please reply to this email with "
-        f"the updated certificates attached.",
-        "",
-    ]
-    for sub in subs:
-        lines.append(f"  {sub['vendor_name']}")
-        lines.append(f"    Coverage needed: {sub['coverage_type']}")
-        gs = sub.get("gap_start") or ""
-        ge = sub.get("gap_end") or ""
-        if gs or ge:
-            # gap_start is the expiration of the prior policy; gap starts the next day
-            gs_d = _parse_date(gs)
-            gs_disp = (gs_d + timedelta(days=1)).strftime("%m/%d/%Y") if gs_d else _fmt_d(gs)
-            lines.append(
-                f"    Period not on file: {gs_disp or 'an earlier date'} "
-                f"through {_fmt_d(ge) or 'the present'}"
-            )
-        if sub.get("policy_number"):
-            lines.append(f"    Known policy number: {sub['policy_number']}")
-        if sub.get("vendor_email"):
-            lines.append(f"    Subcontractor contact: {sub['vendor_email']}")
-        lines.append("")
+    def _period_str(gs, ge):
+        """Build 'between X and Y' period string; gs is last covered day."""
+        gs_d = _parse_date(gs)
+        ps = (gs_d + timedelta(days=1)).strftime("%B %-d, %Y") if gs_d else ""
+        pe = _fmt_long(ge) if ge else ""
+        if ps and pe:
+            return f"{ps} and {pe}"
+        if ps:
+            return f"{ps}"
+        if pe:
+            return f"through {pe}"
+        return "the period in question"
 
-    lines += [
-        f"Please issue the certificate with the following certificate holder:",
-        f"  {cert_holder}",
-        "",
-        f"Certificates should be sent to {reply_to} and will be processed automatically.",
-        "",
-        "Thank you,",
-        "Carolina Compliance Solutions",
-        f"On behalf of {client_name}",
-    ]
+    if is_agent:
+        # Agent-facing: list each sub with their gap period
+        lines = [
+            f"Hi {greeting},",
+            "",
+            f"I'm Haley with Carolina Compliance Solutions, working with {client_name} on certificate compliance.",
+            "",
+            f"We don't have certificates on file for the following subcontractors for work performed:",
+            "",
+        ]
+        for sub in subs:
+            gs = sub.get("gap_start") or ""
+            ge = sub.get("gap_end") or ""
+            period = _period_str(gs, ge)
+            lines.append(f"  {sub['vendor_name']}")
+            lines.append(f"    Coverage needed: {sub['coverage_type']}")
+            lines.append(f"    Period not on file: {period}")
+            if sub.get("policy_number"):
+                lines.append(f"    Known policy number: {sub['policy_number']}")
+            lines.append("")
+        lines += [
+            f"Could you please send updated certificates with the certificate holder listed as:",
+            "",
+            f"    {cert_holder}",
+            "",
+            f"Please send to: {reply_to}",
+            "",
+            "Thank you,",
+            "Haley",
+            "Carolina Compliance Solutions",
+            f"On behalf of {client_name}",
+        ]
+    else:
+        # Vendor-facing: same structure but addressed to vendor/company
+        lines = [
+            f"Hi {greeting},",
+            "",
+            f"This is Haley with Carolina Compliance Solutions. I'm reaching out on behalf of {client_name}.",
+            "",
+            f"{client_name} doesn't have certificates on file for work performed:",
+            "",
+        ]
+        for sub in subs:
+            gs = sub.get("gap_start") or ""
+            ge = sub.get("gap_end") or ""
+            period = _period_str(gs, ge)
+            lines.append(f"  {sub['vendor_name']}")
+            lines.append(f"    Coverage needed: {sub['coverage_type']}")
+            lines.append(f"    Period not on file: {period}")
+            lines.append("")
+        lines += [
+            f"To keep your account current, please send updated certificates of insurance with the certificate holder listed as:",
+            "",
+            f"    {cert_holder}",
+            "",
+            f"Please send your certificates to: {reply_to}",
+            "",
+            "If you have any questions, reply to this email or call the office.",
+            "",
+            "Thank you,",
+            "Haley",
+            "Carolina Compliance Solutions",
+            f"On behalf of {client_name}",
+        ]
     return "\n".join(lines)
 
 
@@ -3433,40 +3474,84 @@ def gaps_draft_email(vendor_id):
     gap_start     = (request.form.get("gap_start") or "").strip()
     gap_end       = (request.form.get("gap_end") or "").strip()
 
-    # Look up vendor name
+    # Look up vendor + contact info
     base_id = clean_base_id(config.AIRTABLE_BASE_ID)
     api = _api()
     try:
         vrec = api.table(base_id, VENDORS_TABLE_ID).get(vendor_id)
-        vendor_name = vrec["fields"].get("Vendor Name") or vendor_id
+        vf_full = vrec["fields"]
+        vendor_name = vf_full.get("Vendor Name") or vendor_id
     except Exception:
+        vf_full = {}
         vendor_name = vendor_id
 
-    # Format dates for display
-    def _fmt(s):
-        d = _parse_date(s)
-        return d.strftime("%m/%d/%Y") if d else s
+    contact_info = _get_vendor_contact(vf_full)
+    to_email = contact_info["email"] or vf_full.get("Vendor Email") or ""
+    to_source = contact_info["type"]
+    agent_name_val = vf_full.get("Agent Name") or ""
+    primary_contact_pref = vf_full.get("Primary Contact") or "Agent"
+    use_agent_template = (
+        to_source == "agent" and to_email
+        and not bool(vf_full.get("Agent Bounced"))
+    )
 
-    # gap_start from _compute_date_gaps is the expiration of the prior policy
-    # (last covered day). The gap actually starts the following day.
+    # Format dates: gap_start is the last covered day — gap starts next day
+    def _fmt_long(s):
+        """Format date as 'Month D, YYYY'."""
+        d = _parse_date(s)
+        return d.strftime("%B %-d, %Y") if d else (s or "")
+
     gap_start_d = _parse_date(gap_start)
     if gap_start_d:
-        gap_start_d = gap_start_d + timedelta(days=1)
-        gap_start_disp = gap_start_d.strftime("%m/%d/%Y")
+        period_start_d = gap_start_d + timedelta(days=1)
+        period_start = period_start_d.strftime("%B %-d, %Y")
     else:
-        gap_start_disp = "an earlier date"
-    gap_end_disp = _fmt(gap_end) if gap_end else "the present"
+        period_start = ""
+    period_end = _fmt_long(gap_end) if gap_end else ""
 
-    email_body = (
-        f"Hello,\n\n"
-        f"We are reaching out on behalf of RTR Construction LLC regarding the "
-        f"{coverage_type} insurance certificate for {vendor_name}.\n\n"
-        f"Our records show that a {coverage_type} certificate is not on file for the period "
-        f"{gap_start_disp} through {gap_end_disp}. Could you please provide an updated "
-        f"certificate of insurance covering this period?\n\n"
-        f"Please send the certificate to coi-intake@carolinacompliancesolutions.com at your earliest convenience.\n\n"
-        f"Thank you,\nCarolina Compliance Solutions"
-    )
+    period_str = ""
+    if period_start and period_end:
+        period_str = f"{period_start} and {period_end}"
+    elif period_start:
+        period_str = f"{period_start}"
+    elif period_end:
+        period_str = f"through {period_end}"
+    else:
+        period_str = "the period in question"
+
+    # Short ID for subject line (last 6 chars of gap record — created below)
+    req_id_short_placeholder = "——"  # will be filled after gap record created
+
+    if use_agent_template:
+        greeting = agent_name_val or "there"
+        subject_em = f"COI request for {vendor_name} — RTR Construction"
+        email_body = (
+            f"Hi {greeting},\n\n"
+            f"I'm Haley with Carolina Compliance Solutions, working with RTR Construction on certificate compliance.\n\n"
+            f"We don't have a {coverage_type} certificate on file for {vendor_name} for work performed between {period_str}.\n\n"
+            f"Could you please send an updated certificate with the certificate holder listed as:\n\n"
+            f"    RTR Construction LLC\n\n"
+            f"Please send to: coi-intake@carolinacompliancesolutions.com\n\n"
+            f"Thank you,\n"
+            f"Haley\n"
+            f"Carolina Compliance Solutions\n"
+            f"On behalf of RTR Construction"
+        )
+    else:
+        subject_em = f"Certificate of insurance needed for RTR Construction"
+        email_body = (
+            f"Hi {vendor_name},\n\n"
+            f"This is Haley with Carolina Compliance Solutions. I'm reaching out on behalf of RTR Construction.\n\n"
+            f"RTR doesn't have a {coverage_type} certificate on file for work performed between {period_str}.\n\n"
+            f"To keep your account current, please send an updated certificate of insurance with the certificate holder listed as:\n\n"
+            f"    RTR Construction LLC\n\n"
+            f"Please send your certificate to: coi-intake@carolinacompliancesolutions.com\n\n"
+            f"If you have any questions, reply to this email or call RTR's office.\n\n"
+            f"Thank you,\n"
+            f"Haley\n"
+            f"Carolina Compliance Solutions\n"
+            f"On behalf of RTR Construction"
+        )
 
     # Create Gap Request record
     gap_tbl = api.table(base_id, GAP_REQUESTS_TABLE_ID)
@@ -3484,17 +3569,10 @@ def gaps_draft_email(vendor_id):
     })
     gap_id = new_rec["id"]
 
-    # Determine contact for the Email Messages record
-    try:
-        vf_full = api.table(base_id, VENDORS_TABLE_ID).get(vendor_id)["fields"]
-        contact_info = _get_vendor_contact(vf_full)
-        to_email = contact_info["email"] or vf_full.get("Vendor Email") or ""
-        to_source = contact_info["type"]
-    except Exception:
-        to_email = ""
-        to_source = "vendor"
+    # Append short request ID to subject
+    req_id_short = gap_id[-6:] if len(gap_id) >= 6 else gap_id
+    subject_em = f"{subject_em} [CCS-{req_id_short}]"
 
-    subject_em = f"Certificate update needed — {vendor_name} — {coverage_type}"
     em_rec = _create_email_message(
         subject=subject_em, body=email_body,
         to_email=to_email, to_source=to_source,
@@ -3619,10 +3697,14 @@ def gaps_draft_batch_requests():
         subs    = grp["subs"]
         n       = len(subs)
 
-        subject = (
-            f"Certificate request for {client_name} subcontractors — "
-            f"{n} item{'s' if n != 1 else ''}"
-        )
+        contact_type = contact.get("type") or "agent"
+        if contact_type == "agent":
+            vendor_names_str = ", ".join(dict.fromkeys(s["vendor_name"] for s in subs))
+            subject = f"COI request for {vendor_names_str} — {client_name}"
+            if len(subject) > 90:
+                subject = f"COI request for {n} subcontractor{'s' if n != 1 else ''} — {client_name}"
+        else:
+            subject = f"Certificate of insurance needed for {client_name}"
         body = _build_gap_request_email_body(
             contact=contact, client_name=client_name,
             cert_holder=cert_holder, subs=subs,
