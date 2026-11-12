@@ -754,7 +754,7 @@ function renderAnalysis(subs, headline) {
     var open_items = (h.subs_count||0) - (h.full_count||0);
     ready_text = (h.full_count||0) + ' of ' + (h.subs_count||0) +
       ' subcontractor payees have a certificate on file for the whole period. ' +
-      (open_items > 0 ? open_items + ' items left.' : 'All covered.');
+      (open_items > 0 ? open_items + ' items left.' : 'No open items.');
   }
 
   var statusColors = {

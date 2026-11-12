@@ -392,3 +392,29 @@ def sample_record_with_id(sample_extraction_fields):
         'fields': sample_extraction_fields,
         'createdTime': datetime.now().isoformat(),
     }
+
+
+# ============================================================================
+# FLASK TEST CLIENT FIXTURES
+# ============================================================================
+
+@pytest.fixture
+def app():
+    """Flask app instance configured for testing."""
+    import os as _os
+    _os.environ.setdefault("REVIEW_PASSWORD", "test_review_pass")
+    import review_app
+    review_app.app.config["TESTING"] = True
+    return review_app.app
+
+
+@pytest.fixture
+def client(app):
+    """Flask test client with an authenticated session."""
+    import time as _time
+    _client = app.test_client()
+    with _client.session_transaction() as sess:
+        sess["authenticated"] = True
+        sess["logged_in_at"] = _time.time()
+        sess["csrf_token"] = "test_csrf_token_32chars_padding_00"
+    return _client

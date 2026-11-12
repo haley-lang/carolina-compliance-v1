@@ -161,7 +161,7 @@ def parse_qb_transaction_list_csv(content: str) -> dict:
     txnid_col   = _col("transaction id", "txn id", "num")
     num_col     = _col("num", "ref no")
     type_col    = _col("transaction type", "type", "txn type")
-    account_col = _col("account", "bank account", "credit card account")
+    account_col = _col("account", "account name", "bank account", "credit card account")
     payee_col   = _col("vendor", "payee", "name", "payee name", "vendor name")
     method_col  = _col("payment method")
 
@@ -182,13 +182,16 @@ def parse_qb_transaction_list_csv(content: str) -> dict:
         txn_num      = (row.get(num_col) or "").strip() if num_col else ""
         pay_method   = (row.get(method_col) or "").strip() if method_col else ""
 
-        # Skip blank or summary rows
-        if not payee_raw and not amount_raw:
+        # Skip truly blank rows and summary-only rows
+        if not txn_date_raw and not amount_raw:
             skipped += 1
             continue
-        if payee_raw.lower() in ("total", "", "grand total"):
+        if payee_raw.lower() in ("total", "grand total"):
             skipped += 1
             continue
+        # Empty vendor (no payee assigned in QB) → treat as Unknown
+        if not payee_raw:
+            payee_raw = "Unknown"
 
         txn_date = _parse_date(txn_date_raw)
         if not txn_date:
@@ -333,6 +336,113 @@ def parse_generic_csv(content: str, col_map: dict | None = None) -> dict:
     }
 
 
+def parse_qb_vendor_summary_xlsx(file_bytes: bytes) -> dict:
+    """Parse a QuickBooks Expenses by Vendor Summary XLSX (vendor | total columns).
+
+    This format has no per-transaction dates — each vendor gets one synthetic
+    row using a placeholder date so the rest of the pipeline can aggregate by payee.
+    """
+    try:
+        import openpyxl
+    except ImportError:
+        return {"format": "qb_vendor_summary_xlsx", "row_count": 0, "total_amount": 0,
+                "date_min": "", "date_max": "", "transactions": [],
+                "account_counts": {}, "warnings": ["openpyxl not installed"]}
+
+    try:
+        import io as _io
+        wb = openpyxl.load_workbook(_io.BytesIO(file_bytes), read_only=True, data_only=True)
+        ws = wb.active
+        rows = list(ws.iter_rows(values_only=True))
+    except Exception as exc:
+        return {"format": "qb_vendor_summary_xlsx", "row_count": 0, "total_amount": 0,
+                "date_min": "", "date_max": "", "transactions": [],
+                "account_counts": {}, "warnings": [f"Could not open XLSX: {exc}"]}
+
+    # Extract date range from title rows (row index 2 typically)
+    file_date_min = ""
+    file_date_max = ""
+    for row in rows[:5]:
+        cell_text = str(row[0] or "").strip()
+        # e.g. "September 30, 2025-September 30, 2026"
+        if "-" in cell_text:
+            parts = cell_text.split("-", 1)
+            d1 = _parse_date(parts[0].strip())
+            d2 = _parse_date(parts[1].strip())
+            if d1:
+                file_date_min = d1.isoformat()
+            if d2:
+                file_date_max = d2.isoformat()
+            if d1 and d2:
+                break
+
+    # Find the data rows: skip title rows until we see ("", "Total") header
+    data_start = None
+    for i, row in enumerate(rows):
+        if len(row) >= 2 and str(row[1] or "").strip().lower() == "total":
+            data_start = i + 1
+            break
+
+    if data_start is None:
+        # Fallback: scan for first row with numeric second column
+        for i, row in enumerate(rows):
+            if len(row) >= 2 and row[0] and row[1]:
+                try:
+                    float(str(row[1]).replace(",", ""))
+                    data_start = i
+                    break
+                except (ValueError, TypeError):
+                    pass
+
+    if data_start is None:
+        return {"format": "qb_vendor_summary_xlsx", "row_count": 0, "total_amount": 0,
+                "date_min": "", "date_max": "", "transactions": [],
+                "account_counts": {}, "warnings": ["Could not find data rows in XLSX"]}
+
+    # Use audit-period start date as synthetic date, or today if not available
+    synthetic_date = file_date_min or date.today().isoformat()
+
+    transactions = []
+    for row in rows[data_start:]:
+        if not row or len(row) < 2:
+            continue
+        vendor = str(row[0] or "").strip()
+        if not vendor or vendor.lower() in ("total", "grand total", ""):
+            continue
+        amt_raw = str(row[1] or "").strip()
+        amt = _parse_amount(amt_raw)
+        if amt is None or amt == 0:
+            continue
+        transactions.append({
+            "txn_date":     synthetic_date,
+            "txn_id":       "",
+            "txn_num":      "",
+            "txn_type":     "Expense",
+            "account":      "Expense Summary",
+            "payee_raw":    vendor,
+            "amount":       abs(amt),
+            "is_card":      0,
+            "payment_method": "",
+        })
+
+    if not transactions:
+        return {"format": "qb_vendor_summary_xlsx", "row_count": 0, "total_amount": 0,
+                "date_min": "", "date_max": "", "transactions": [],
+                "account_counts": {}, "warnings": ["No data rows found in vendor summary"]}
+
+    total = sum(t["amount"] for t in transactions)
+    return {
+        "format":        "qb_vendor_summary_xlsx",
+        "row_count":     len(transactions),
+        "total_amount":  round(total, 2),
+        "date_min":      file_date_min,
+        "date_max":      file_date_max,
+        "transactions":  transactions,
+        "account_counts": {},
+        "warnings":      ["This is a vendor totals summary — no per-transaction dates. For gap analysis, upload the Transaction List CSV instead."],
+    }
+
+
 def parse_generic_xlsx(file_bytes: bytes, col_map: dict | None = None) -> dict:
     """Parse an XLSX file using openpyxl."""
     try:
@@ -464,8 +574,18 @@ def parse_payment_file(filename: str, file_bytes: bytes,
     ext = (filename or "").lower().rsplit(".", 1)[-1]
 
     if ext in ("xlsx", "xls"):
-        result = parse_generic_xlsx(file_bytes, col_map=col_map)
-        return result
+        # Check for QB Expenses by Vendor Summary XLSX (2-column: vendor | total)
+        try:
+            import openpyxl as _openpyxl, io as _io
+            _wb = _openpyxl.load_workbook(_io.BytesIO(file_bytes), read_only=True, data_only=True)
+            _ws = _wb.active
+            _rows = list(_ws.iter_rows(values_only=True, max_row=5))
+            _texts = [str(_rows[i][0] or "").lower() for i in range(len(_rows))]
+            if any("expenses by vendor" in t or "vendor summary" in t for t in _texts):
+                return parse_qb_vendor_summary_xlsx(file_bytes)
+        except Exception:
+            pass
+        return parse_generic_xlsx(file_bytes, col_map=col_map)
 
     # CSV / PDF path
     try:

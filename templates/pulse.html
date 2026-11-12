@@ -79,6 +79,7 @@
     .pulse-job-result--ok{color:#15803d}.pulse-job-result--warn{color:#92600a}.pulse-job-result--error{color:#b03a2e}
     .pulse-last-check{font-size:.78rem;color:var(--secondary);margin-top:6px}
     .pulse-empty{font-size:.84rem;color:var(--secondary);font-style:italic;padding:8px 0}
+    .pulse-error-banner{background:#fef9c3;border:1px solid #d97706;border-radius:4px;padding:8px 12px;font-size:.85rem;color:#92600a;margin-bottom:12px;}
     .pulse-degraded{display:flex;align-items:center;gap:6px;font-size:.82rem;color:#92600a;background:#fffaed;border:1px solid #fce08a;border-radius:6px;padding:7px 12px;margin-bottom:10px}
     .pulse-client-row-warn td{background:#fffaed!important}
     .pulse-client-row-error td{background:#fff5f5!important}
@@ -156,6 +157,7 @@
         </span>
       </div>
       <div class="pulse-section-body">
+        {% if sec.error_msg %}<div class="pulse-error-banner">⚠ Could not check: {{ sec.error_msg }}</div>{% endif %}
         {% if sec.total_records is not none %}
           {% set pct = ((sec.total_records / sec.limit) * 100) | round(1) %}
           {% set bar_level = 'error' if pct >= 80 else ('warn' if pct >= 60 else 'ok') %}
@@ -187,7 +189,7 @@
               <tr>
                 <td>{{ t.name }}</td>
                 <td class="num">{{ "{:,}".format(t.count) }}</td>
-                <td class="num" style="color:{% if t.growth_7d > 50 %}#92600a{% else %}var(--secondary){% endif %};">
+                <td class="num" style="color:{% if (t.growth_7d or 0) > 50 %}#92600a{% else %}var(--secondary){% endif %};">
                   {{ t.growth_7d if t.growth_7d is not none else '—' }}
                 </td>
               </tr>
@@ -214,6 +216,7 @@
         </span>
       </div>
       <div class="pulse-section-body">
+        {% if sec.error_msg %}<div class="pulse-error-banner">⚠ Could not check: {{ sec.error_msg }}</div>{% endif %}
         <div class="pulse-metric-row">
           <div class="pulse-metric">
             <span class="pulse-metric-num">{{ sec.today_received }}</span>
@@ -284,6 +287,7 @@
         </span>
       </div>
       <div class="pulse-section-body">
+        {% if sec.error_msg %}<div class="pulse-error-banner">⚠ Could not check: {{ sec.error_msg }}</div>{% endif %}
         {# Stage counts #}
         <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px;">
           {% for stage_key, stage_label in [
@@ -305,7 +309,7 @@
 
         <div class="status-row">
           <span class="status-row-label">Oldest pending (days)</span>
-          <span class="status-row-value {% if sec.oldest_pending_days and sec.oldest_pending_days > 7 %}" style="color:#b03a2e;font-weight:600"{% endif %}">
+          <span class="status-row-value" {% if sec.oldest_pending_days and sec.oldest_pending_days > 7 %}style="color:#b03a2e;font-weight:600"{% endif %}>
             {{ sec.oldest_pending_days if sec.oldest_pending_days is not none else '—' }}
           </span>
         </div>
@@ -344,6 +348,7 @@
         </span>
       </div>
       <div class="pulse-section-body">
+        {% if sec.error_msg %}<div class="pulse-error-banner">⚠ Could not check: {{ sec.error_msg }}</div>{% endif %}
         {# Airtable write failures #}
         <p class="section-label" style="margin-bottom:6px;">Airtable write failures (24h)</p>
         {% if sec.write_failures_24h %}
@@ -429,6 +434,7 @@
         </span>
       </div>
       <div class="pulse-section-body">
+        {% if sec.error_msg %}<div class="pulse-error-banner">⚠ Could not check: {{ sec.error_msg }}</div>{% endif %}
         {% if sec.writes_per_hour %}
         <table class="pulse-table">
           <thead>
@@ -487,6 +493,15 @@
         {% else %}
           <p class="pulse-empty">Service status not available.</p>
         {% endif %}
+        {% if pulse_data.schema_mismatches %}
+          {% for m in pulse_data.schema_mismatches %}
+          <div class="status-row">
+            <span class="status-dot status-dot--red"></span>
+            <span class="status-row-label">Schema mismatch</span>
+            <span class="status-row-value" style="color:#b03a2e;">{{ m.table }}.{{ m.field }} not found</span>
+          </div>
+          {% endfor %}
+        {% endif %}
       </div>
     </div>
 
@@ -510,6 +525,7 @@
         </span>
       </div>
       <div class="pulse-section-body">
+        {% if sec.error_msg %}<div class="pulse-error-banner">⚠ Could not check: {{ sec.error_msg }}</div>{% endif %}
         <div class="pulse-action-items">
           <div class="pulse-action-item">
             <span class="pulse-action-count {% if sec.queue_count == 0 %}pulse-action-count--zero{% elif sec.queue_count > 5 %}pulse-action-count--warn{% endif %}">
@@ -553,7 +569,61 @@
     </div>
 
     {# ══════════════════════════════════════════════════════════════════
-       9. BUSINESS SNAPSHOT
+       9. AUDITS IN PROGRESS
+       ══════════════════════════════════════════════════════════════════ #}
+    {% set sec = pulse_data.audits %}
+    {% if sec %}
+    <div class="pulse-section">
+      <div class="pulse-section-header">
+        <h2 class="pulse-section-title">Audits</h2>
+        {% set audit_level = 'ok' %}
+        {% if sec.nearest_due_days is not none and sec.nearest_due_days <= 7 %}{% set audit_level = 'error' %}
+        {% elif sec.nearest_due_days is not none and sec.nearest_due_days <= 14 %}{% set audit_level = 'warn' %}
+        {% elif sec.in_progress > 0 %}{% set audit_level = 'warn' %}{% endif %}
+        <span class="pulse-section-status pulse-section-status--{{ audit_level }}">
+          <span class="status-dot status-dot--{% if audit_level == 'ok' %}green{% elif audit_level == 'warn' %}amber{% else %}red{% endif %}"></span>
+          {% if sec.in_progress == 0 %}No active audits
+          {% elif sec.nearest_due_days is not none and sec.nearest_due_days <= 7 %}Due in {{ sec.nearest_due_days }}d
+          {% else %}{{ sec.in_progress }} in progress{% endif %}
+        </span>
+      </div>
+      <div class="pulse-section-body">
+        {% if sec.error_msg %}<div class="pulse-error-banner">⚠ Could not check: {{ sec.error_msg }}</div>{% endif %}
+        {% if not sec.active_audits %}
+          <p class="pulse-empty">No active audits.</p>
+        {% else %}
+          <table class="pulse-client-table" style="width:100%">
+            <thead><tr>
+              <th>Client</th><th>Coverage</th><th>Period</th>
+              <th class="num">Payments</th><th class="num">Payees</th>
+              <th>Status</th><th class="num">Due</th>
+            </tr></thead>
+            <tbody>
+            {% for a in sec.active_audits %}
+              <tr class="{% if a.days_until_due is not none and a.days_until_due <= 7 %}pulse-client-row-error{% elif a.days_until_due is not none and a.days_until_due <= 14 %}pulse-client-row-warn{% endif %}">
+                <td><a href="/audits/{{ a.id }}" style="color:var(--blue);">{{ a.client_name }}</a></td>
+                <td>{{ a.coverage[:2] }}</td>
+                <td style="font-size:.82rem;">{{ a.period }}</td>
+                <td class="num">{{ "{:,}".format(a.payment_count) if a.payment_count else '—' }}</td>
+                <td class="num">{{ a.payee_count if a.payee_count else '—' }}</td>
+                <td><span style="font-size:.8rem;text-transform:capitalize;">{{ a.status.replace('_',' ') }}</span></td>
+                <td class="num" style="font-size:.82rem;{% if a.days_until_due is not none and a.days_until_due <= 7 %}color:#b03a2e;font-weight:600{% endif %}">
+                  {% if a.due_date %}{{ a.due_date }}{% if a.days_until_due is not none %} ({{ a.days_until_due }}d){% endif %}{% else %}—{% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        {% endif %}
+        <div style="margin-top:12px;">
+          <a href="/audits" class="btn btn-secondary btn-sm">Open Audits</a>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
+    {# ══════════════════════════════════════════════════════════════════
+       10. BUSINESS SNAPSHOT
        ══════════════════════════════════════════════════════════════════ #}
     {% set sec = pulse_data.business %}
     <div class="pulse-section pulse-section--full">
@@ -561,6 +631,7 @@
         <h2 class="pulse-section-title">Business Snapshot</h2>
       </div>
       <div class="pulse-section-body">
+        {% if sec.error_msg %}<div class="pulse-error-banner">⚠ Could not check: {{ sec.error_msg }}</div>{% endif %}
         {# Top-level metrics #}
         <div class="pulse-metric-row" style="margin-bottom:20px;">
           <div class="pulse-metric">

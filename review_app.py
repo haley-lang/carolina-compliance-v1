@@ -4793,6 +4793,53 @@ def payments_import():
         )
 
 
+# ── Pulse schema self-check ───────────────────────────────────────────────────
+_PULSE_SCHEMA_CACHE: dict | None = None
+_PULSE_SCHEMA_CACHE_TS: float = 0.0
+_PULSE_FIELDS_USED: list = [
+    ("Incoming Documents",        ["Subject", "Sender Email", "Date Received", "Status", "Skip Reason"]),
+    ("Incoming Extractions",      ["Processing Status", "Review Status", "Source Filename"]),
+    ("Insurance Certificates",    ["Certificate Name"]),
+    ("Insurance Policies",        ["Policy Record"]),
+    ("Vendors",                   ["Vendor Name", "Vendor Email"]),
+    ("Clients",                   ["Client Name"]),
+    ("Client Requirements",       ["Client Link"]),
+    ("Vendor Client Assignments", ["Client Link"]),
+    ("Gap Requests",              ["Request ID"]),
+]
+
+def _pulse_schema_mismatches(base_id: str, api_key: str) -> list:
+    """Check fields used by Pulse against live schema; cached 1hr."""
+    global _PULSE_SCHEMA_CACHE, _PULSE_SCHEMA_CACHE_TS
+    import time as _t
+    now = _t.time()
+    if _PULSE_SCHEMA_CACHE is None or now - _PULSE_SCHEMA_CACHE_TS > 3600:
+        try:
+            import requests as _req
+            resp = _req.get(
+                f"https://api.airtable.com/v0/meta/bases/{base_id}/tables",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=8,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            _PULSE_SCHEMA_CACHE = {
+                t["name"]: {f["name"] for f in t.get("fields", [])}
+                for t in data.get("tables", [])
+            }
+            _PULSE_SCHEMA_CACHE_TS = now
+        except Exception:
+            return []
+    mismatches = []
+    for tname, fields in _PULSE_FIELDS_USED:
+        tbl_fields = _PULSE_SCHEMA_CACHE.get(tname) if _PULSE_SCHEMA_CACHE else None
+        if tbl_fields is not None:
+            for fname in fields:
+                if fname not in tbl_fields:
+                    mismatches.append({"table": tname, "field": fname})
+    return mismatches
+
+
 # ── Pulse page ────────────────────────────────────────────────────────────────
 
 @app.route("/pulse")
@@ -4810,7 +4857,19 @@ def pulse():
         return max(levels, key=lambda l: order.get(l, 0))
 
     # 1. Airtable space
-    airtable_space = {"total_records": None, "limit": 50_000, "level": "ok", "tables": [], "fastest_growing": None}
+    TABLE_PRIMARY_FIELDS = {
+        "Incoming Documents": "Sender Email",
+        "Incoming Extractions": "Source Filename",
+        "Insurance Policies": "Policy Record",
+        "Insurance Certificates": "Certificate Name",
+        "Vendors": "Vendor Name",
+        "Clients": "Client Name",
+        "Email Queue": "Primary Email",
+        "Compliance Log": "Log Entry",
+        "Vendor Client Assignments": "Vendor Client Assignment",
+        "Client Requirements": "Id",
+    }
+    airtable_space = {"total_records": None, "limit": 50_000, "level": "ok", "tables": [], "fastest_growing": None, "error_msg": None}
     try:
         table_names = [
             "Incoming Documents", "Incoming Extractions", "Insurance Policies",
@@ -4822,11 +4881,11 @@ def pulse():
         for tname in table_names:
             try:
                 tbl = api.table(base_id, tname)
-                count = len(tbl.all(fields=["Name"]))
+                count = len(tbl.all(fields=[TABLE_PRIMARY_FIELDS.get(tname, "Vendor Name")]))
                 total += count
-                rows.append({"name": tname, "count": count})
+                rows.append({"name": tname, "count": count, "growth_7d": 0})
             except Exception:
-                rows.append({"name": tname, "count": 0})
+                rows.append({"name": tname, "count": 0, "growth_7d": 0})
         rows.sort(key=lambda r: r["count"], reverse=True)
         airtable_space["total_records"] = total
         airtable_space["tables"] = rows[:5]
@@ -4840,17 +4899,18 @@ def pulse():
     except Exception as exc:
         app.logger.warning("pulse airtable_space error: %s", exc)
         airtable_space["level"] = "error"
+        airtable_space["error_msg"] = str(exc)[:120]
 
     # 2. Email intake
     today_str = date.today().isoformat()
     email_intake = {
         "last_check": None, "last_received": None,
         "today_received": 0, "today_processed": 0, "today_skipped": 0,
-        "skipped_items": [], "level": "ok",
+        "skipped_items": [], "level": "ok", "error_msg": None,
     }
     try:
         doc_tbl = api.table(base_id, "Incoming Documents")
-        all_docs = doc_tbl.all(fields=["Subject", "From", "Date Received", "Status", "Skip Reason"])
+        all_docs = doc_tbl.all(fields=["Subject", "Sender Email", "Date Received", "Status", "Skip Reason"])
         last_recv_ts = None
         skipped = []
         for rec in all_docs:
@@ -4871,7 +4931,7 @@ def pulse():
             if status in ("Skipped", "Not needed", "Not a COI"):
                 email_intake["today_skipped"] += 1
                 skipped.append({"id": rec["id"], "subject": f.get("Subject") or "(no subject)",
-                                 "sender": f.get("From") or "", "received_at": received_raw,
+                                 "sender": f.get("Sender Email") or "", "received_at": received_raw,
                                  "reason": f.get("Skip Reason") or status})
             elif status:
                 email_intake["today_processed"] += 1
@@ -4888,16 +4948,17 @@ def pulse():
     except Exception as exc:
         app.logger.warning("pulse email_intake error: %s", exc)
         email_intake["level"] = "error"
+        email_intake["error_msg"] = str(exc)[:120]
 
     # 3. Pipeline stage counts
     pipeline = {
         "by_stage": {"received": 0, "extracted": 0, "pending_review": 0, "confirmed": 0},
         "oldest_pending_days": None, "avg_days_received_to_confirmed": None,
-        "stuck": [], "level": "ok",
+        "stuck": [], "level": "ok", "error_msg": None,
     }
     try:
         ie_tbl = api.table(base_id, INCOMING_EXTRACTIONS_TABLE)
-        recs = ie_tbl.all(fields=["Processing Status", "Review Status", "Created", "Error Message", "Source Filename"])
+        recs = ie_tbl.all(fields=["Processing Status", "Review Status", "Source Filename"])
         now_utc = datetime.now(tz=timezone.utc)
         oldest_pending = None
         stuck = []
@@ -4910,7 +4971,7 @@ def pulse():
                 pipeline["by_stage"]["extracted"] += 1
             elif "pending" in status or "review" in status:
                 pipeline["by_stage"]["pending_review"] += 1
-                created_raw = (f.get("Created") or "").strip()
+                created_raw = (rec.get("createdTime") or "").strip()
                 if created_raw:
                     try:
                         created_dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
@@ -4921,21 +4982,19 @@ def pulse():
                         pass
             elif status in ("confirmed", "approved", "processed"):
                 pipeline["by_stage"]["confirmed"] += 1
-            err = (f.get("Error Message") or "").strip()
-            if err:
-                stuck.append({"filename": f.get("Source Filename") or rec["id"], "stage": status, "error": err[:120]})
         pipeline["oldest_pending_days"] = oldest_pending
         pipeline["stuck"] = stuck[:5]
         if oldest_pending is not None and oldest_pending > 7:
             pipeline["level"] = "error"
-        elif (oldest_pending is not None and oldest_pending > 3) or stuck:
+        elif oldest_pending is not None and oldest_pending > 3:
             pipeline["level"] = "warn"
     except Exception as exc:
         app.logger.warning("pulse pipeline error: %s", exc)
         pipeline["level"] = "error"
+        pipeline["error_msg"] = str(exc)[:120]
 
     # 4. Writes & errors
-    writes_errors = {"write_failures_24h": [], "ai_errors_24h": [], "level": "ok"}
+    writes_errors = {"write_failures_24h": [], "ai_errors_24h": [], "level": "ok", "error_msg": None}
     try:
         all_events = _hs.get_recent_events(limit=200, since_hours=24)
         write_failures = [
@@ -4953,6 +5012,7 @@ def pulse():
     except Exception as exc:
         app.logger.warning("pulse writes_errors error: %s", exc)
         writes_errors["level"] = "error"
+        writes_errors["error_msg"] = str(exc)[:120]
 
     # 5. Scheduled jobs
     scheduled_jobs = []
@@ -4987,7 +5047,7 @@ def pulse():
         scheduled_jobs = [{"name": "Error", "last_run": None, "result": str(exc)[:60], "next_expected": None, "level": "error"}]
 
     # 6. Runaway detector
-    runaway = {"writes_per_hour": [], "level": "ok"}
+    runaway = {"writes_per_hour": [], "level": "ok", "error_msg": None}
     try:
         tables_to_watch = [("Compliance Log", 50), ("Insurance Policies", 30), ("Incoming Extractions", 40)]
         any_over = False
@@ -5001,6 +5061,7 @@ def pulse():
     except Exception as exc:
         app.logger.warning("pulse runaway error: %s", exc)
         runaway["level"] = "error"
+        runaway["error_msg"] = str(exc)[:120]
 
     # 7. Outside services
     services = []
@@ -5030,15 +5091,16 @@ def pulse():
     waiting_on_haley = {
         "queue_count": 0, "oldest_queue_days": None, "unsent_drafts": 0,
         "followups_due_today": 0, "skipped_emails": email_intake["today_skipped"], "no_contact": 0,
+        "error_msg": None,
     }
     try:
         now_utc2 = datetime.now(tz=timezone.utc)
         ie_tbl2 = api.table(base_id, INCOMING_EXTRACTIONS_TABLE)
-        pending_recs = ie_tbl2.all(formula="{Review Status}='Pending Review'", fields=["Created"])
+        pending_recs = ie_tbl2.all(formula="{Review Status}='Pending Review'", fields=["Review Status"])
         waiting_on_haley["queue_count"] = len(pending_recs)
         oldest_days = None
         for rec in pending_recs:
-            created_raw = (rec["fields"].get("Created") or "").strip()
+            created_raw = (rec.get("createdTime") or "").strip()
             if created_raw:
                 try:
                     dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
@@ -5063,16 +5125,16 @@ def pulse():
         app.logger.warning("pulse waiting_on_haley error: %s", exc)
 
     # 9. Business snapshot
-    business = {"clients": 0, "vendors_tracked": 0, "certs_on_file": 0, "open_gaps": 0, "per_client": []}
+    business = {"clients": 0, "vendors_tracked": 0, "certs_on_file": 0, "open_gaps": 0, "per_client": [], "error_msg": None}
     try:
         clients_recs = api.table(base_id, "Clients").all(fields=["Client Name"])
         business["clients"] = len(clients_recs)
         client_list = [{"id": r["id"], "name": r["fields"].get("Client Name") or r["id"]} for r in clients_recs]
         business["vendors_tracked"] = len(api.table(base_id, "Vendors").all(fields=["Vendor Name"]))
-        business["certs_on_file"] = len(api.table(base_id, "Insurance Certificates").all(fields=["Name"]))
+        business["certs_on_file"] = len(api.table(base_id, "Insurance Certificates").all(fields=["Certificate Name"]))
         try:
-            comp_recs = api.table(base_id, "Compliance Log").all(formula="NOT({Resolved})", fields=["Resolved"])
-            business["open_gaps"] = len(comp_recs)
+            gap_recs = api.table(base_id, "Gap Requests").all(fields=["Request ID"])
+            business["open_gaps"] = len(gap_recs)
         except Exception:
             pass
         try:
@@ -5094,6 +5156,7 @@ def pulse():
             pass
     except Exception as exc:
         app.logger.warning("pulse business error: %s", exc)
+        business["error_msg"] = str(exc)[:120]
 
     # Recent events
     try:
@@ -5101,12 +5164,75 @@ def pulse():
     except Exception:
         recent_events = []
 
+    # Schema check (cached 1hr)
+    try:
+        _api_key = (os.environ.get("AIRTABLE_API_KEY") or "").strip()
+        schema_mismatches = _pulse_schema_mismatches(base_id, _api_key)
+    except Exception:
+        schema_mismatches = []
+
+    # ── Audits section ────────────────────────────────────────────────────────
+    try:
+        from audit_store import _conn as _audit_conn
+        with _audit_conn() as _aconn:
+            _audit_rows = _aconn.execute(
+                """SELECT a.id, a.client_name, a.coverage, a.start_date, a.end_date,
+                          a.status, a.due_date,
+                          COUNT(DISTINCT p.id) as payment_count,
+                          COUNT(DISTINCT pc.id) as payee_count
+                   FROM audits a
+                   LEFT JOIN payments p ON p.audit_id = a.id AND p.excluded = 0
+                   LEFT JOIN payee_classifications pc ON pc.audit_id = a.id
+                   WHERE a.status NOT IN ('submitted', 'archived')
+                   GROUP BY a.id
+                   ORDER BY a.created_at DESC
+                   LIMIT 10"""
+            ).fetchall()
+        active_audits = []
+        today_iso = date.today().isoformat()
+        for row in _audit_rows:
+            r = dict(row)
+            days_until_due = None
+            if r.get("due_date"):
+                try:
+                    dd = date.fromisoformat(r["due_date"])
+                    days_until_due = (dd - date.today()).days
+                except Exception:
+                    pass
+            active_audits.append({
+                "id":           r["id"],
+                "client_name":  r["client_name"],
+                "coverage":     r["coverage"],
+                "period":       f"{r['start_date']} – {r['end_date']}",
+                "status":       r["status"],
+                "payment_count": r.get("payment_count", 0),
+                "payee_count":  r.get("payee_count", 0),
+                "due_date":     r.get("due_date", ""),
+                "days_until_due": days_until_due,
+            })
+        audits_section = {
+            "active_audits": active_audits,
+            "in_progress": len([a for a in active_audits if a["status"] in ("draft", "gathering_certs")]),
+            "nearest_due_days": min(
+                (a["days_until_due"] for a in active_audits if a["days_until_due"] is not None),
+                default=None
+            ),
+            "error_msg": None,
+        }
+    except Exception as _exc:
+        audits_section = {
+            "active_audits": [], "in_progress": 0,
+            "nearest_due_days": None, "error_msg": str(_exc)[:120],
+        }
+
     pulse_data = {
         "airtable_space": airtable_space, "email_intake": email_intake,
         "pipeline": pipeline, "writes_errors": writes_errors,
         "scheduled_jobs": scheduled_jobs, "runaway": runaway,
         "services": services, "waiting_on_haley": waiting_on_haley,
         "business": business, "recent_events": recent_events,
+        "schema_mismatches": schema_mismatches,
+        "audits": audits_section,
     }
 
     section_levels = (
@@ -5440,11 +5566,100 @@ def _compute_audit_analysis(audit: dict) -> dict:
     base_id = clean_base_id(config.AIRTABLE_BASE_ID)
     api = _api()
 
+    # ── Batch prefetch all vendor → policies in 2 Airtable calls ──────────────
+    # Collect all vendor_ids for ccs_vendor payees
+    ccs_vendor_ids = [
+        classifications[pr]["vendor_id"]
+        for pr in pay_by_payee
+        if classifications.get(pr, {}).get("payee_group") == "ccs_vendor"
+        and classifications.get(pr, {}).get("vendor_id")
+    ]
+    # vendor_id → list of policy records
+    _vendor_policies_cache: dict[str, list] = {}
+    if ccs_vendor_ids:
+        try:
+            # 1 call: fetch all vendor records to get linked policy IDs
+            vend_formula = "OR(" + ", ".join(f"RECORD_ID()='{v}'" for v in ccs_vendor_ids) + ")"
+            vend_records = api.table(base_id, VENDORS_TABLE_ID).all(
+                formula=vend_formula,
+                fields=["Insurance Policies"],
+            )
+            all_policy_ids: list[str] = []
+            vendor_to_policy_ids: dict[str, list[str]] = {}
+            for vrec in vend_records:
+                pol_ids = vrec["fields"].get("Insurance Policies") or []
+                vendor_to_policy_ids[vrec["id"]] = pol_ids
+                all_policy_ids.extend(pol_ids)
+            # 1 call: fetch all policy records
+            if all_policy_ids:
+                pol_formula = "OR(" + ", ".join(f"RECORD_ID()='{p}'" for p in all_policy_ids) + ")"
+                pol_records = api.table(base_id, INSURANCE_POLICIES_TABLE_ID).all(
+                    formula=pol_formula,
+                    fields=["Policy Type", "Policy Number", "Carrier",
+                            "Effective Date", "Expiration Date",
+                            "Last Updated From Extraction"],
+                )
+                pol_by_id = {r["id"]: r for r in pol_records}
+                for vid, pol_ids in vendor_to_policy_ids.items():
+                    _vendor_policies_cache[vid] = [
+                        pol_by_id[pid] for pid in pol_ids if pid in pol_by_id
+                    ]
+        except Exception as exc:
+            app.logger.warning("audit batch policy prefetch failed: %s", exc)
+
+    def _terms_from_cache(vendor_id: str, audit_type: str) -> tuple[list, bool]:
+        """Like _terms_for_vendor_audit but uses prefetched policy cache."""
+        kws = _audit_coverage_keywords(audit_type)
+        pols = _vendor_policies_cache.get(vendor_id, [])
+        if vendor_id not in _vendor_policies_cache:
+            # Fallback to live call if cache miss
+            return _terms_for_vendor_audit(vendor_id, audit_type, start_date, end_date)
+        terms = []
+        has_any = False
+        for rec in pols:
+            pf = rec["fields"]
+            pt = (pf.get("Policy Type") or "").lower()
+            if not _pol_matches_audit_type(pt, kws):
+                continue
+            has_any = True
+            eff = _parse_date(pf.get("Effective Date"))
+            exp = _parse_date(pf.get("Expiration Date"))
+            if not eff or not exp:
+                continue
+            if eff <= end_date and exp >= start_date:
+                terms.append({
+                    "record_id":      rec["id"],
+                    "policy_number":  pf.get("Policy Number") or "",
+                    "carrier":        pf.get("Carrier") or "",
+                    "effective":      eff.isoformat(),
+                    "expiration":     exp.isoformat(),
+                    "extraction_ids": pf.get("Last Updated From Extraction") or [],
+                })
+        terms.sort(key=lambda t: t["effective"])
+        return terms, has_any
+
+    def _cert_received_from_cache(vendor_id: str, audit_type: str) -> str:
+        kws = _audit_coverage_keywords(audit_type)
+        pols = _vendor_policies_cache.get(vendor_id, [])
+        best = ""
+        for rec in pols:
+            pf = rec["fields"]
+            pt = (pf.get("Policy Type") or "").lower()
+            if not _pol_matches_audit_type(pt, kws):
+                continue
+            ra = pf.get("Received At") or pf.get("Last Updated From Extraction") or ""
+            if isinstance(ra, list):
+                ra = ra[0] if ra else ""
+            if ra and (not best or ra > best):
+                best = ra[:10]
+        return best
+    # ── End batch prefetch ─────────────────────────────────────────────────────
+
     for payee_raw, ps in pay_by_payee.items():
         cls = classifications.get(payee_raw, {})
         pg  = cls.get("payee_group", "unclear")
 
-        # Only include subs and unclear (skip confirmed not_sub)
+        # Skip confirmed not-subs; skip payees with no meaningful amount
         if pg == "not_sub":
             continue
 
@@ -5460,11 +5675,11 @@ def _compute_audit_analysis(audit: dict) -> dict:
         cert_received = ""
         wc_on_file = False
 
-        if vendor_id:
+        # Only look up Airtable data for confirmed CCS vendors; unclear payees
+        # show as "Not in CCS" without burning API calls for unconfirmed matches.
+        if vendor_id and pg == "ccs_vendor":
             try:
-                terms_raw, has_any = _terms_for_vendor_audit(
-                    vendor_id, coverage, start_date, end_date
-                )
+                terms_raw, has_any = _terms_from_cache(vendor_id, coverage)
                 status_str, days_not_on_file, gap_runs = _compute_vendor_audit_status(
                     terms_raw, start_date, end_date, has_any
                 )
@@ -5485,33 +5700,12 @@ def _compute_audit_analysis(audit: dict) -> dict:
                         "days":  (ge - gs).days + 1,
                     })
 
-                # Certificate received date — latest extraction timestamp
-                try:
-                    pol_ids = _get_vendor_policy_ids(vendor_id)
-                    if pol_ids:
-                        pol_formula = "OR(" + ",".join(
-                            f"RECORD_ID()='{p}'" for p in pol_ids
-                        ) + ")"
-                        pols = api.table(base_id, INSURANCE_POLICIES_TABLE_ID).all(
-                            formula=pol_formula,
-                            fields=["Policy Type", "Received At"],
-                        )
-                        kws = _audit_coverage_keywords(coverage)
-                        for pol in pols:
-                            pf = pol["fields"]
-                            if _pol_matches_audit_type((pf.get("Policy Type") or "").lower(), kws):
-                                ra = pf.get("Received At") or ""
-                                if ra and (not cert_received or ra > cert_received):
-                                    cert_received = ra[:10]
-                except Exception:
-                    pass
+                cert_received = _cert_received_from_cache(vendor_id, coverage)
 
                 # WC on file (informational, for GL audits)
                 if is_gl:
                     try:
-                        wc_terms, wc_has = _terms_for_vendor_audit(
-                            vendor_id, "Workers' Comp", start_date, end_date
-                        )
+                        wc_terms, wc_has = _terms_from_cache(vendor_id, "Workers' Comp")
                         wc_on_file = bool(wc_terms) or wc_has
                     except Exception:
                         wc_on_file = False

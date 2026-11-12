@@ -49,7 +49,7 @@ ALL_FIELDS = [
 ]
 
 BATCH_SIZE   = 10
-BATCH_SLEEP  = 0.5  # seconds between delete batches
+BATCH_SLEEP  = 0.1  # seconds between delete batches
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
