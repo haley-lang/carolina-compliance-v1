@@ -313,7 +313,7 @@
   </div>
 
   <!-- SECTION 3: Analysis -->
-  <div class="ws-section" id="sec-analysis">
+  <div class="ws-section open" id="sec-analysis">
     <div class="ws-section-header" onclick="toggleSection('sec-analysis', loadAnalysis)">
       <div class="ws-step-num" id="step-num-3">3</div>
       <span class="ws-section-title">Coverage analysis</span>
@@ -1048,6 +1048,10 @@ function apiPost(url, data) {
     body: JSON.stringify({...data, csrf_token: CSRF_TOKEN}),
   }).then(function(r){ return r.json(); });
 }
+
+document.addEventListener('DOMContentLoaded', function () {
+  loadAnalysis();
+});
 
 })();
 </script>

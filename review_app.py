@@ -3123,7 +3123,7 @@ def _build_gap_request_email_body(
         lines = [
             f"Hi {greeting},",
             "",
-            f"I'm Haley with Carolina Compliance Solutions, working with {client_name} on certificate compliance.",
+            f"I'm Haley with Carolina Compliance Solutions, working with {client_name} on certificate collection.",
             "",
             f"We don't have certificates on file for the following subcontractors for work performed:",
             "",
@@ -3148,14 +3148,13 @@ def _build_gap_request_email_body(
             "Thank you,",
             "Haley",
             "Carolina Compliance Solutions",
-            f"On behalf of {client_name}",
         ]
     else:
         # Vendor-facing: same structure but addressed to vendor/company
         lines = [
             f"Hi {greeting},",
             "",
-            f"This is Haley with Carolina Compliance Solutions. I'm reaching out on behalf of {client_name}.",
+            f"This is Haley with Carolina Compliance Solutions. I'm reaching out for {client_name}.",
             "",
             f"{client_name} doesn't have certificates on file for work performed:",
             "",
@@ -3180,7 +3179,6 @@ def _build_gap_request_email_body(
             "Thank you,",
             "Haley",
             "Carolina Compliance Solutions",
-            f"On behalf of {client_name}",
         ]
     return "\n".join(lines)
 
@@ -3527,21 +3525,20 @@ def gaps_draft_email(vendor_id):
         subject_em = f"COI request for {vendor_name} — RTR Construction"
         email_body = (
             f"Hi {greeting},\n\n"
-            f"I'm Haley with Carolina Compliance Solutions, working with RTR Construction on certificate compliance.\n\n"
+            f"I'm Haley with Carolina Compliance Solutions, working with RTR Construction on certificate collection.\n\n"
             f"We don't have a {coverage_type} certificate on file for {vendor_name} for work performed between {period_str}.\n\n"
             f"Could you please send an updated certificate with the certificate holder listed as:\n\n"
             f"    RTR Construction LLC\n\n"
             f"Please send to: coi-intake@carolinacompliancesolutions.com\n\n"
             f"Thank you,\n"
             f"Haley\n"
-            f"Carolina Compliance Solutions\n"
-            f"On behalf of RTR Construction"
+            f"Carolina Compliance Solutions"
         )
     else:
         subject_em = f"Certificate of insurance needed for RTR Construction"
         email_body = (
             f"Hi {vendor_name},\n\n"
-            f"This is Haley with Carolina Compliance Solutions. I'm reaching out on behalf of RTR Construction.\n\n"
+            f"This is Haley with Carolina Compliance Solutions. I'm reaching out for RTR Construction.\n\n"
             f"RTR doesn't have a {coverage_type} certificate on file for work performed between {period_str}.\n\n"
             f"To keep your account current, please send an updated certificate of insurance with the certificate holder listed as:\n\n"
             f"    RTR Construction LLC\n\n"
@@ -3549,8 +3546,7 @@ def gaps_draft_email(vendor_id):
             f"If you have any questions, reply to this email or call RTR's office.\n\n"
             f"Thank you,\n"
             f"Haley\n"
-            f"Carolina Compliance Solutions\n"
-            f"On behalf of RTR Construction"
+            f"Carolina Compliance Solutions"
         )
 
     # Create Gap Request record
@@ -3584,6 +3580,7 @@ def gaps_draft_email(vendor_id):
     return jsonify({
         "ok": True,
         "draft": email_body,
+        "subject": subject_em,
         "request_id": gap_id,
         "em_id": em_rec.get("id") or "",
     })
