@@ -3413,6 +3413,8 @@ def gaps():
 @csrf_protect
 def gaps_draft_email(vendor_id):
     from flask import jsonify
+    if _is_test_vendor(vendor_id):
+        return jsonify({"ok": False, "error": "Test vendor — email drafts disabled"})
     client_id     = (request.form.get("client_id") or RTR_CLIENT_ID).strip()
     coverage_type = (request.form.get("coverage_type") or "").strip()
     gap_start     = (request.form.get("gap_start") or "").strip()
@@ -3521,6 +3523,8 @@ def gaps_draft_batch_requests():
     no_contact_vendors: list = []
 
     for vendor_id in vendor_ids:
+        if _is_test_vendor(vendor_id):
+            continue
         try:
             vrec  = vendors_tbl.get(vendor_id)
             vf    = vrec["fields"]
@@ -4290,7 +4294,7 @@ def vendor_update_contact(vendor_id):
 
 # ── Audit ─────────────────────────────────────────────────────────────────────
 
-_TEST_VENDOR_KEYWORDS = ("piedmont", "apex", "smith")
+_TEST_VENDOR_KEYWORDS = ("piedmont", "apex", "smith", "jones", "acme")
 
 
 def _is_test_vendor(name: str) -> bool:
