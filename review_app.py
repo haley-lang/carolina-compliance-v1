@@ -105,6 +105,16 @@ _GL_KEYWORDS = ("general", "liability", "cgl", "commercial general")
 _WC_KEYWORDS = ("workers", "work comp", "w/c", "wc", "workers'", "employers liability")
 
 
+def _now_eastern() -> datetime:
+    """Return the current datetime in US/Eastern timezone."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(tz=ZoneInfo("America/New_York"))
+    except ImportError:
+        import pytz
+        return datetime.now(tz=pytz.timezone("America/New_York"))
+
+
 def _pol_matches_audit_type(pol_type: str, kws: tuple) -> bool:
     """True if pol_type matches the keywords.
 
@@ -1655,8 +1665,272 @@ def index():
 @app.route("/follow-ups")
 @login_required
 def follow_ups():
-    """Unified follow-ups page (stub — full page in Stage 2)."""
-    return redirect(url_for("gaps"))
+    """Unified follow-ups page — vendor × coverage pipeline view."""
+    client_id = request.args.get("client_id", RTR_CLIENT_ID)
+    stage_filter = request.args.get("stage", "all")
+    base_id = clean_base_id(config.AIRTABLE_BASE_ID)
+    api = _api()
+    today = date.today()
+
+    # Load clients
+    clients_raw = api.table(base_id, CLIENTS_TABLE_ID).all(fields=["Client Name"])
+    clients = sorted(
+        [{"id": r["id"], "name": r["fields"].get("Client Name") or r["id"]} for r in clients_raw],
+        key=lambda c: c["name"],
+    )
+    client_name = next((c["name"] for c in clients if c["id"] == client_id), client_id)
+
+    # Try to find active audit for window defaulting and payment amounts
+    audit_info = None
+    vendor_amounts: dict = {}
+    try:
+        from audit_store import _conn as _audit_conn
+        with _audit_conn() as aconn:
+            arow = aconn.execute(
+                "SELECT id, start_date, end_date, client_name FROM audits "
+                "WHERE status NOT IN ('submitted', 'archived') ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+            if arow:
+                audit_info = dict(arow)
+                pay_rows = aconn.execute(
+                    """SELECT pc.vendor_id, SUM(p.amount) as total_paid
+                       FROM payments p
+                       JOIN payee_classifications pc ON pc.payee_raw = p.payee_raw AND pc.audit_id = p.audit_id
+                       WHERE p.audit_id = ? AND p.excluded = 0 AND pc.payee_group = 'ccs_vendor' AND pc.vendor_id != ''
+                       GROUP BY pc.vendor_id""",
+                    (audit_info["id"],)
+                ).fetchall()
+                for pr in pay_rows:
+                    vendor_amounts[pr["vendor_id"]] = float(pr["total_paid"])
+    except Exception as exc:
+        app.logger.warning("follow-ups audit load: %s", exc)
+
+    # Window: use audit period as default if no explicit window
+    window_start_str = request.args.get("window_start", "").strip()
+    window_end_str = request.args.get("window_end", "").strip()
+    auto_window = False
+    if not window_start_str and not window_end_str and audit_info:
+        window_start_str = audit_info["start_date"]
+        window_end_str = audit_info["end_date"]
+        auto_window = True
+    window_start = _parse_date(window_start_str)
+    window_end = _parse_date(window_end_str)
+    has_window = bool(window_start and window_end and window_start <= window_end)
+
+    # Load all gap requests for client
+    gap_tbl = api.table(base_id, GAP_REQUESTS_TABLE_ID)
+    try:
+        gap_records = gap_tbl.all(fields=[
+            "Vendor", "Client", "Coverage Type", "Gap Start", "Gap End",
+            "Status", "Cadence Status", "Sent At", "Requested On",
+        ])
+    except Exception:
+        gap_records = []
+
+    # Build best-request lookup: "vendor_id:coverage_type" -> request dict
+    request_by_key: dict = {}
+    for gr in gap_records:
+        gf = gr["fields"]
+        if client_id not in (gf.get("Client") or []):
+            continue
+        cadence = gf.get("Cadence Status") or gf.get("Status") or "Draft"
+        for vid in (gf.get("Vendor") or []):
+            cov = (gf.get("Coverage Type") or "").strip()
+            key = f"{vid}:{cov}"
+            if key not in request_by_key or _stage_rank(cadence) > _stage_rank(request_by_key[key]["cadence_status"]):
+                request_by_key[key] = {
+                    "id": gr["id"],
+                    "cadence_status": cadence,
+                    "gap_start": gf.get("Gap Start") or "",
+                    "gap_end": gf.get("Gap End") or "",
+                    "sent_at": gf.get("Sent At") or "",
+                    "requested_on": gf.get("Requested On") or "",
+                }
+
+    vendor_ids = _get_active_vendor_ids_for_client(client_id)
+    vendors_tbl = api.table(base_id, VENDORS_TABLE_ID)
+    pol_tbl = api.table(base_id, INSURANCE_POLICIES_TABLE_ID)
+
+    vendors_out = []
+    for vendor_id in vendor_ids:
+        try:
+            vrec = vendors_tbl.get(vendor_id)
+            vf = vrec["fields"]
+        except Exception:
+            vrec = {"fields": {}}
+            vf = {}
+        vendor_name = vf.get("Vendor Name") or vendor_id
+        contact_email = vf.get("Vendor Email") or ""
+        agent_email = vf.get("Agent Email") or ""
+        agent_name = vf.get("Agent Name") or ""
+        agent_agency = vf.get("Agent Agency") or ""
+        agent_phone = vf.get("Agent Phone") or ""
+        agent_bounced = bool(vf.get("Agent Bounced"))
+        primary_ct = vf.get("Primary Contact") or "Agent"
+        has_usable_contact = bool((agent_email and not agent_bounced) or contact_email)
+
+        policy_ids = vrec["fields"].get("Insurance Policies") or []
+        if policy_ids:
+            pol_formula = "OR(" + ", ".join(f"RECORD_ID()='{p}'" for p in policy_ids) + ")"
+            pol_records = pol_tbl.all(formula=pol_formula, fields=["Policy Type", "Policy Number", "Effective Date", "Expiration Date", "Carrier"])
+        else:
+            pol_records = []
+
+        policies_by_type: dict = defaultdict(list)
+        for prec in pol_records:
+            pf = prec["fields"]
+            pt = (pf.get("Policy Type") or "").lower()
+            entry = {
+                "policy_number": pf.get("Policy Number") or "",
+                "effective_date": pf.get("Effective Date") or "",
+                "expiration_date": pf.get("Expiration Date") or "",
+                "carrier": pf.get("Carrier") or "",
+            }
+            if _pol_matches_audit_type(pt, _GL_KEYWORDS):
+                policies_by_type["General Liability"].append(entry)
+            elif any(k in pt for k in _WC_KEYWORDS):
+                policies_by_type["Workers' Comp"].append(entry)
+
+        coverage_items = []
+        for kws, label in RTR_REQUIRED_POLICY_TYPES:
+            pols = policies_by_type.get(label) or []
+            req_key = f"{vendor_id}:{label}"
+            existing_req = request_by_key.get(req_key)
+
+            gap_kind = None
+            gap_start_val = ""
+            gap_end_val = ""
+            gap_days = None
+            window_status = None
+
+            if has_window:
+                w_terms = []
+                w_has_any = False
+                for prec in pol_records:
+                    pf = prec["fields"]
+                    pt = (pf.get("Policy Type") or "").lower()
+                    if not _pol_matches_audit_type(pt, kws):
+                        continue
+                    w_has_any = True
+                    eff = _parse_date(pf.get("Effective Date"))
+                    exp = _parse_date(pf.get("Expiration Date"))
+                    if eff and exp and eff <= window_end and exp >= window_start:
+                        w_terms.append({"effective": eff.isoformat(), "expiration": exp.isoformat()})
+                w_terms.sort(key=lambda t: t["effective"])
+                wstatus, wdays, _ = _compute_vendor_audit_status(w_terms, window_start, window_end, w_has_any)
+                window_status = {"status": wstatus, "days_not_on_file": wdays}
+                if wstatus != "full":
+                    gap_kind = "missing" if not w_has_any else "date_gap"
+                    gap_days = wdays
+            else:
+                if not pols:
+                    gap_kind = "missing"
+                else:
+                    dg = _compute_date_gaps(pols, today)
+                    if dg:
+                        g = dg[0]
+                        gap_kind = "expired" if g.get("expired") else "date_gap"
+                        gap_start_val = g["gap_start"] or ""
+                        gap_end_val = g.get("gap_end") or ""
+                        gap_days = g["days"]
+
+            if existing_req:
+                cadence = existing_req["cadence_status"]
+                stage = _cadence_to_stage(cadence)
+                req_gap_start = existing_req.get("gap_start") or gap_start_val
+                req_gap_end = existing_req.get("gap_end") or gap_end_val
+                sent_at = existing_req.get("sent_at") or ""
+                days_until = None
+                next_due = ""
+                if sent_at:
+                    cadence_map = {
+                        "Sent — Awaiting Reply": 4, "Day 4 Due": 4, "Day 4 Drafted": 8,
+                        "Day 8 Due": 8, "Day 8 Drafted": 14, "Day 14 — Call": 14,
+                        "Day 21 — Client Update": 21,
+                    }
+                    d0 = _parse_date(sent_at)
+                    offset = cadence_map.get(cadence)
+                    if d0 and offset is not None:
+                        nd = d0 + timedelta(days=offset)
+                        next_due = nd.isoformat()
+                        days_until = (nd - today).days
+            elif gap_kind is not None:
+                stage = "missing"
+                req_gap_start = gap_start_val
+                req_gap_end = gap_end_val
+                sent_at = ""
+                days_until = None
+                next_due = ""
+            else:
+                continue
+
+            coverage_items.append({
+                "coverage_type": label,
+                "stage": stage,
+                "gap_kind": gap_kind,
+                "gap_start": req_gap_start if existing_req else gap_start_val,
+                "gap_end": req_gap_end if existing_req else gap_end_val,
+                "gap_days": gap_days,
+                "window_status": window_status,
+                "request_id": existing_req["id"] if existing_req else None,
+                "request_cadence": existing_req["cadence_status"] if existing_req else "",
+                "request_sent_at": sent_at,
+                "request_next_due": next_due,
+                "request_days_until": days_until,
+            })
+
+        if not coverage_items:
+            continue
+
+        stage_order_pri = ["waiting", "missing", "drafted", "sent", "received"]
+        stages_present = {ci["stage"] for ci in coverage_items}
+        primary_stage = min(stages_present, key=lambda s: stage_order_pri.index(s) if s in stage_order_pri else 99)
+
+        vendors_out.append({
+            "vendor_id": vendor_id,
+            "vendor_name": vendor_name,
+            "contact_email": contact_email,
+            "agent_email": agent_email,
+            "agent_name": agent_name,
+            "agent_agency": agent_agency,
+            "agent_phone": agent_phone,
+            "agent_bounced": agent_bounced,
+            "primary_contact": primary_ct,
+            "has_usable_contact": has_usable_contact,
+            "amount_paid": vendor_amounts.get(vendor_id),
+            "coverage_items": coverage_items,
+            "primary_stage": primary_stage,
+            "all_stages": " ".join(sorted(stages_present)),
+        })
+
+    if vendor_amounts:
+        vendors_out.sort(key=lambda v: (-(v["amount_paid"] or 0), v["vendor_name"].lower()))
+    else:
+        vendors_out.sort(key=lambda v: v["vendor_name"].lower())
+
+    stage_counts: dict = {s: 0 for s in ["missing", "drafted", "sent", "waiting", "received"]}
+    for v in vendors_out:
+        for ci in v["coverage_items"]:
+            stage_counts[ci["stage"]] = stage_counts.get(ci["stage"], 0) + 1
+    total_items = sum(stage_counts.values())
+
+    return render_template(
+        "follow-ups.html",
+        vendors=vendors_out,
+        client_id=client_id,
+        client_name=client_name,
+        clients=clients,
+        today=today.isoformat(),
+        has_window=has_window,
+        window_start=window_start_str,
+        window_end=window_end_str,
+        auto_window=auto_window,
+        audit_info=audit_info,
+        has_payments=bool(vendor_amounts),
+        stage_counts=stage_counts,
+        total_items=total_items,
+        stage_filter=stage_filter,
+    )
 
 
 @app.route("/queue")
@@ -2724,6 +2998,25 @@ def _parse_date(s):
         return None
 
 
+def _cadence_to_stage(cadence: str) -> str:
+    """Map Gap Request Cadence Status to a Follow-ups pipeline stage."""
+    c = cadence.lower()
+    if "certificate received" in c:
+        return "received"
+    if "no response" in c or "due" in c:
+        return "waiting"
+    if c == "draft":
+        return "drafted"
+    if any(x in c for x in ("sent", "drafted", "call", "client update")):
+        return "sent"
+    return "missing"
+
+
+def _stage_rank(cadence: str) -> int:
+    return {"missing": 0, "drafted": 1, "sent": 2, "waiting": 3, "received": 4}.get(
+        _cadence_to_stage(cadence), 0)
+
+
 def _compute_date_gaps(policies_for_type: list, today: date) -> list:
     """Given a list of policy dicts (all same type) sorted by effective date,
     compute coverage gaps. Returns list of {gap_start, gap_end, days}.
@@ -2804,47 +3097,91 @@ def _build_gap_request_email_body(
     reply_to: str = "coi-intake@carolinacompliancesolutions.com",
 ) -> str:
     """Build a batched certificate request email covering multiple subs for one agent."""
-    greeting = contact.get("name") or "Insurance Agent"
-    agency_str = f" at {contact['agency']}" if contact.get("agency") else ""
+    greeting = contact.get("name") or "there"
+    is_agent = contact.get("type") == "agent"
 
-    def _fmt_d(s):
+    def _fmt_long(s):
+        """Format date as 'Month D, YYYY'."""
         d = _parse_date(s)
-        return d.strftime("%m/%d/%Y") if d else (s or "")
+        return d.strftime("%B %-d, %Y") if d else (s or "")
 
-    lines = [
-        f"Hello {greeting}{agency_str},",
-        "",
-        f"I am writing on behalf of {client_name} to request updated certificates of "
-        f"insurance for the following subcontractors. Please reply to this email with "
-        f"the updated certificates attached.",
-        "",
-    ]
-    for sub in subs:
-        lines.append(f"  {sub['vendor_name']}")
-        lines.append(f"    Coverage needed: {sub['coverage_type']}")
-        gs = sub.get("gap_start") or ""
-        ge = sub.get("gap_end") or ""
-        if gs or ge:
-            lines.append(
-                f"    Period not on file: {_fmt_d(gs) or 'an earlier date'} "
-                f"through {_fmt_d(ge) or 'the present'}"
-            )
-        if sub.get("policy_number"):
-            lines.append(f"    Known policy number: {sub['policy_number']}")
-        if sub.get("vendor_email"):
-            lines.append(f"    Subcontractor contact: {sub['vendor_email']}")
-        lines.append("")
+    def _period_str(gs, ge):
+        """Build 'between X and Y' period string; gs is last covered day."""
+        gs_d = _parse_date(gs)
+        ps = (gs_d + timedelta(days=1)).strftime("%B %-d, %Y") if gs_d else ""
+        pe = _fmt_long(ge) if ge else ""
+        if ps and pe:
+            return f"{ps} and {pe}"
+        if ps:
+            return f"{ps}"
+        if pe:
+            return f"through {pe}"
+        return "the period in question"
 
-    lines += [
-        f"Please issue the certificate with the following certificate holder:",
-        f"  {cert_holder}",
-        "",
-        f"Certificates should be sent to {reply_to} and will be processed automatically.",
-        "",
-        "Thank you,",
-        "Carolina Compliance Solutions",
-        f"On behalf of {client_name}",
-    ]
+    if is_agent:
+        # Agent-facing: list each sub with their gap period
+        lines = [
+            f"Hi {greeting},",
+            "",
+            f"I'm Haley with Carolina Compliance Solutions, working with {client_name} on certificate compliance.",
+            "",
+            f"We don't have certificates on file for the following subcontractors for work performed:",
+            "",
+        ]
+        for sub in subs:
+            gs = sub.get("gap_start") or ""
+            ge = sub.get("gap_end") or ""
+            period = _period_str(gs, ge)
+            lines.append(f"  {sub['vendor_name']}")
+            lines.append(f"    Coverage needed: {sub['coverage_type']}")
+            lines.append(f"    Period not on file: {period}")
+            if sub.get("policy_number"):
+                lines.append(f"    Known policy number: {sub['policy_number']}")
+            lines.append("")
+        lines += [
+            f"Could you please send updated certificates with the certificate holder listed as:",
+            "",
+            f"    {cert_holder}",
+            "",
+            f"Please send to: {reply_to}",
+            "",
+            "Thank you,",
+            "Haley",
+            "Carolina Compliance Solutions",
+            f"On behalf of {client_name}",
+        ]
+    else:
+        # Vendor-facing: same structure but addressed to vendor/company
+        lines = [
+            f"Hi {greeting},",
+            "",
+            f"This is Haley with Carolina Compliance Solutions. I'm reaching out on behalf of {client_name}.",
+            "",
+            f"{client_name} doesn't have certificates on file for work performed:",
+            "",
+        ]
+        for sub in subs:
+            gs = sub.get("gap_start") or ""
+            ge = sub.get("gap_end") or ""
+            period = _period_str(gs, ge)
+            lines.append(f"  {sub['vendor_name']}")
+            lines.append(f"    Coverage needed: {sub['coverage_type']}")
+            lines.append(f"    Period not on file: {period}")
+            lines.append("")
+        lines += [
+            f"To keep your account current, please send updated certificates of insurance with the certificate holder listed as:",
+            "",
+            f"    {cert_holder}",
+            "",
+            f"Please send your certificates to: {reply_to}",
+            "",
+            "If you have any questions, reply to this email or call the office.",
+            "",
+            "Thank you,",
+            "Haley",
+            "Carolina Compliance Solutions",
+            f"On behalf of {client_name}",
+        ]
     return "\n".join(lines)
 
 
@@ -3130,38 +3467,91 @@ def gaps():
 @csrf_protect
 def gaps_draft_email(vendor_id):
     from flask import jsonify
+    if _is_test_vendor(vendor_id):
+        return jsonify({"ok": False, "error": "Test vendor — email drafts disabled"})
     client_id     = (request.form.get("client_id") or RTR_CLIENT_ID).strip()
     coverage_type = (request.form.get("coverage_type") or "").strip()
     gap_start     = (request.form.get("gap_start") or "").strip()
     gap_end       = (request.form.get("gap_end") or "").strip()
 
-    # Look up vendor name
+    # Look up vendor + contact info
     base_id = clean_base_id(config.AIRTABLE_BASE_ID)
     api = _api()
     try:
         vrec = api.table(base_id, VENDORS_TABLE_ID).get(vendor_id)
-        vendor_name = vrec["fields"].get("Vendor Name") or vendor_id
+        vf_full = vrec["fields"]
+        vendor_name = vf_full.get("Vendor Name") or vendor_id
     except Exception:
+        vf_full = {}
         vendor_name = vendor_id
 
-    # Format dates for display
-    def _fmt(s):
-        d = _parse_date(s)
-        return d.strftime("%m/%d/%Y") if d else s
-
-    gap_start_disp = _fmt(gap_start) if gap_start else "an earlier date"
-    gap_end_disp   = _fmt(gap_end) if gap_end else "the present"
-
-    email_body = (
-        f"Hello,\n\n"
-        f"We are reaching out on behalf of RTR Construction LLC regarding the "
-        f"{coverage_type} insurance certificate for {vendor_name}.\n\n"
-        f"Our records show that a {coverage_type} certificate is not on file for the period "
-        f"{gap_start_disp} through {gap_end_disp}. Could you please provide an updated "
-        f"certificate of insurance covering this period?\n\n"
-        f"Please send the certificate to coi-intake@carolinacompliancesolutions.com at your earliest convenience.\n\n"
-        f"Thank you,\nCarolina Compliance Solutions"
+    contact_info = _get_vendor_contact(vf_full)
+    to_email = contact_info["email"] or vf_full.get("Vendor Email") or ""
+    to_source = contact_info["type"]
+    agent_name_val = vf_full.get("Agent Name") or ""
+    primary_contact_pref = vf_full.get("Primary Contact") or "Agent"
+    use_agent_template = (
+        to_source == "agent" and to_email
+        and not bool(vf_full.get("Agent Bounced"))
     )
+
+    # Format dates: gap_start is the last covered day — gap starts next day
+    def _fmt_long(s):
+        """Format date as 'Month D, YYYY'."""
+        d = _parse_date(s)
+        return d.strftime("%B %-d, %Y") if d else (s or "")
+
+    gap_start_d = _parse_date(gap_start)
+    if gap_start_d:
+        period_start_d = gap_start_d + timedelta(days=1)
+        period_start = period_start_d.strftime("%B %-d, %Y")
+    else:
+        period_start = ""
+    period_end = _fmt_long(gap_end) if gap_end else ""
+
+    period_str = ""
+    if period_start and period_end:
+        period_str = f"{period_start} and {period_end}"
+    elif period_start:
+        period_str = f"{period_start}"
+    elif period_end:
+        period_str = f"through {period_end}"
+    else:
+        period_str = "the period in question"
+
+    # Short ID for subject line (last 6 chars of gap record — created below)
+    req_id_short_placeholder = "——"  # will be filled after gap record created
+
+    if use_agent_template:
+        greeting = agent_name_val or "there"
+        subject_em = f"COI request for {vendor_name} — RTR Construction"
+        email_body = (
+            f"Hi {greeting},\n\n"
+            f"I'm Haley with Carolina Compliance Solutions, working with RTR Construction on certificate compliance.\n\n"
+            f"We don't have a {coverage_type} certificate on file for {vendor_name} for work performed between {period_str}.\n\n"
+            f"Could you please send an updated certificate with the certificate holder listed as:\n\n"
+            f"    RTR Construction LLC\n\n"
+            f"Please send to: coi-intake@carolinacompliancesolutions.com\n\n"
+            f"Thank you,\n"
+            f"Haley\n"
+            f"Carolina Compliance Solutions\n"
+            f"On behalf of RTR Construction"
+        )
+    else:
+        subject_em = f"Certificate of insurance needed for RTR Construction"
+        email_body = (
+            f"Hi {vendor_name},\n\n"
+            f"This is Haley with Carolina Compliance Solutions. I'm reaching out on behalf of RTR Construction.\n\n"
+            f"RTR doesn't have a {coverage_type} certificate on file for work performed between {period_str}.\n\n"
+            f"To keep your account current, please send an updated certificate of insurance with the certificate holder listed as:\n\n"
+            f"    RTR Construction LLC\n\n"
+            f"Please send your certificate to: coi-intake@carolinacompliancesolutions.com\n\n"
+            f"If you have any questions, reply to this email or call RTR's office.\n\n"
+            f"Thank you,\n"
+            f"Haley\n"
+            f"Carolina Compliance Solutions\n"
+            f"On behalf of RTR Construction"
+        )
 
     # Create Gap Request record
     gap_tbl = api.table(base_id, GAP_REQUESTS_TABLE_ID)
@@ -3179,17 +3569,10 @@ def gaps_draft_email(vendor_id):
     })
     gap_id = new_rec["id"]
 
-    # Determine contact for the Email Messages record
-    try:
-        vf_full = api.table(base_id, VENDORS_TABLE_ID).get(vendor_id)["fields"]
-        contact_info = _get_vendor_contact(vf_full)
-        to_email = contact_info["email"] or vf_full.get("Vendor Email") or ""
-        to_source = contact_info["type"]
-    except Exception:
-        to_email = ""
-        to_source = "vendor"
+    # Append short request ID to subject
+    req_id_short = gap_id[-6:] if len(gap_id) >= 6 else gap_id
+    subject_em = f"{subject_em} [CCS-{req_id_short}]"
 
-    subject_em = f"Certificate update needed — {vendor_name} — {coverage_type}"
     em_rec = _create_email_message(
         subject=subject_em, body=email_body,
         to_email=to_email, to_source=to_source,
@@ -3238,6 +3621,8 @@ def gaps_draft_batch_requests():
     no_contact_vendors: list = []
 
     for vendor_id in vendor_ids:
+        if _is_test_vendor(vendor_id):
+            continue
         try:
             vrec  = vendors_tbl.get(vendor_id)
             vf    = vrec["fields"]
@@ -3312,10 +3697,14 @@ def gaps_draft_batch_requests():
         subs    = grp["subs"]
         n       = len(subs)
 
-        subject = (
-            f"Certificate request for {client_name} subcontractors — "
-            f"{n} item{'s' if n != 1 else ''}"
-        )
+        contact_type = contact.get("type") or "agent"
+        if contact_type == "agent":
+            vendor_names_str = ", ".join(dict.fromkeys(s["vendor_name"] for s in subs))
+            subject = f"COI request for {vendor_names_str} — {client_name}"
+            if len(subject) > 90:
+                subject = f"COI request for {n} subcontractor{'s' if n != 1 else ''} — {client_name}"
+        else:
+            subject = f"Certificate of insurance needed for {client_name}"
         body = _build_gap_request_email_body(
             contact=contact, client_name=client_name,
             cert_holder=cert_holder, subs=subs,
@@ -4007,7 +4396,7 @@ def vendor_update_contact(vendor_id):
 
 # ── Audit ─────────────────────────────────────────────────────────────────────
 
-_TEST_VENDOR_KEYWORDS = ("piedmont", "apex", "smith")
+_TEST_VENDOR_KEYWORDS = ("piedmont", "apex", "smith", "jones", "acme")
 
 
 def _is_test_vendor(name: str) -> bool:
@@ -5128,6 +5517,19 @@ def pulse():
             waiting_on_haley["no_contact"] = len(no_contact)
         except Exception:
             pass
+        try:
+            em_replies = api.table(base_id, EMAIL_MESSAGES_TABLE_ID).all(
+                formula="{Status}='Sent by Haley'", fields=["Status"])
+            waiting_on_haley["replies_waiting"] = len(em_replies)
+        except Exception:
+            waiting_on_haley["replies_waiting"] = 0
+        try:
+            from marketing_constants import MARKETING_BASE_ID, MARKETING_IDEAS_TABLE_ID, MI_STATUS, MI_STATUS_NEW
+            mkt_tbl = _api().table(MARKETING_BASE_ID, MARKETING_IDEAS_TABLE_ID)
+            mkt_new = mkt_tbl.all(formula=f"{{{MI_STATUS}}}='{MI_STATUS_NEW}'", fields=[MI_STATUS])
+            waiting_on_haley["marketing_new"] = len(mkt_new)
+        except Exception:
+            waiting_on_haley["marketing_new"] = 0
     except Exception as exc:
         app.logger.warning("pulse waiting_on_haley error: %s", exc)
 
@@ -5203,7 +5605,7 @@ def pulse():
             if r.get("due_date"):
                 try:
                     dd = date.fromisoformat(r["due_date"])
-                    days_until_due = (dd - date.today()).days
+                    days_until_due = (dd - _now_eastern().date()).days
                 except Exception:
                     pass
             active_audits.append({

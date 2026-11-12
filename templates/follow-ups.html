@@ -1,0 +1,567 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CCS — Follow-ups — {{ client_name }}</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='ccs_icon.svg') }}">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='review.css') }}">
+  <style>
+    /* ── Stage badges ─────────────────────────────────────────────────── */
+    .badge { display:inline-block; padding:2px 9px; border-radius:20px; font-size:0.75rem; font-weight:700; }
+    .badge-stage-missing  { background:#fdecea; color:#b03a2e; }
+    .badge-stage-drafted  { background:#fff3cd; color:#856404; }
+    .badge-stage-sent     { background:#cff4fc; color:#055160; }
+    .badge-stage-waiting  { background:#f8d7da; color:#842029; }
+    .badge-stage-received { background:#d1e7dd; color:#0f5132; }
+
+    /* ── Layout ───────────────────────────────────────────────────────── */
+    .gap-table { width:100%; border-collapse:collapse; font-size:0.88rem; }
+    .gap-table th { text-align:left; padding:6px 10px; border-bottom:1.5px solid var(--border);
+                    font-size:0.78rem; font-weight:700; color:var(--secondary); text-transform:uppercase; }
+    .gap-table td { padding:7px 10px; border-bottom:1px solid var(--border); vertical-align:middle; }
+    .gap-table tr:last-child td { border-bottom:none; }
+    .vendor-card { margin-bottom:24px; }
+    .vendor-card .card-header { font-weight:700; font-size:1rem; color:var(--navy);
+                                display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; }
+    .contact-label { font-size:0.82rem; color:var(--secondary); font-weight:500; }
+    .contact-email { font-size:0.85rem; }
+    .draft-area { margin-top:10px; display:none; }
+    .draft-area textarea { width:100%; font-size:0.83rem; border:1px solid var(--border);
+                           border-radius:6px; padding:8px; font-family:monospace; line-height:1.5;
+                           min-height:140px; resize:vertical; }
+    .draft-area .draft-note { font-size:0.78rem; color:var(--secondary); margin-top:4px; }
+    .filter-chips { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:20px; }
+    .chip { padding:5px 14px; border-radius:20px; font-size:0.82rem; font-weight:600;
+            border:1.5px solid var(--border); background:#fff; color:var(--navy);
+            cursor:pointer; text-decoration:none; transition:all 0.12s; }
+    .chip:hover { background:var(--navy); color:#fff; border-color:var(--navy); }
+    .chip.active { background:var(--navy); color:#fff; border-color:var(--navy); }
+    .payments-banner { background:#fefce8; border:1px solid #fde68a; border-radius:8px;
+                       padding:10px 16px; font-size:0.85rem; color:#713f12; margin-bottom:20px; }
+    .client-selector { margin-bottom:24px; }
+    .client-selector select { padding:8px 12px; border:1.5px solid var(--border); border-radius:7px;
+                               font-size:0.9rem; font-family:var(--font-sans); cursor:pointer; }
+    .stat-item .stat-num { font-family:var(--font-serif); font-size:2.1rem; color:#fff; }
+    .stat-item .stat-label { font-size:0.78rem; color:rgba(255,255,255,0.65); font-weight:600;
+                              text-transform:uppercase; letter-spacing:0.04em; }
+    .page-title { font-family:var(--font-serif); font-size:1.7rem; margin-bottom:24px; color:var(--navy); }
+    .nav-link.active { color:#fff !important; font-weight:700; }
+    .no-gap-note { font-size:0.85rem; color:var(--secondary); padding:8px 0; }
+    .window-form { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:24px; }
+    .window-form label { font-size:0.82rem; font-weight:600; color:var(--secondary); }
+    .window-form input[type=date] { padding:7px 10px; border:1.5px solid var(--border); border-radius:7px;
+                                    font-size:0.88rem; font-family:var(--font-sans); }
+    .amount-badge { font-size:0.78rem; background:#e9ecef; color:#495057; border-radius:10px;
+                    padding:2px 8px; font-weight:600; margin-left:6px; }
+    /* Contacts */
+    .contact-panel { display:flex; align-items:flex-start; gap:12px; flex-wrap:wrap; }
+    .contact-block { display:flex; flex-direction:column; gap:2px; }
+    .contact-type-label { font-size:0.72rem; font-weight:700; text-transform:uppercase;
+                          color:var(--secondary); letter-spacing:0.05em; }
+    .contact-email-link { font-size:0.85rem; }
+    .contact-phone { font-size:0.82rem; color:var(--secondary); }
+    .contact-agency { font-size:0.82rem; color:var(--secondary); }
+    .no-contact-flag { font-size:0.8rem; color:#dc3545; font-weight:600; }
+    .bounced-flag   { font-size:0.8rem; color:#dc3545; font-weight:600; }
+    .fix-contact-form { display:none; background:#f8f9fa; border:1px solid var(--border);
+                        border-radius:8px; padding:14px; margin-top:10px; }
+    .fix-contact-form label { font-size:0.82rem; font-weight:600; color:var(--secondary);
+                               display:block; margin-bottom:2px; margin-top:8px; }
+    .fix-contact-form input, .fix-contact-form select {
+      width:100%; padding:6px 9px; border:1.5px solid var(--border); border-radius:6px;
+      font-size:0.88rem; font-family:var(--font-sans); box-sizing:border-box; }
+    .fix-contact-form .form-row { display:flex; gap:10px; flex-wrap:wrap; }
+    .fix-contact-form .form-row > * { flex:1; min-width:160px; }
+    /* Draft-all banner */
+    .draft-all-bar { display:flex; align-items:center; gap:12px; background:#fff3cd;
+                     border:1px solid #fde68a; border-radius:8px; padding:10px 16px;
+                     margin-bottom:20px; font-size:0.88rem; color:#664d03; }
+    .drafts-result { margin-top:16px; }
+    .draft-result-card { background:#f8f9fa; border:1px solid var(--border); border-radius:8px;
+                         padding:12px 14px; margin-bottom:10px; font-size:0.85rem; }
+    .draft-result-card .dr-subject { font-weight:700; margin-bottom:4px; }
+    .draft-result-card .dr-subs { color:var(--secondary); font-size:0.82rem; }
+    .draft-result-preview { background:#fff; border:1px solid var(--border); border-radius:6px;
+                             padding:10px; font-family:monospace; font-size:0.78rem; line-height:1.5;
+                             white-space:pre-wrap; max-height:200px; overflow-y:auto; margin-top:8px; display:none; }
+    .next-due-cell { font-size:0.8rem; color:var(--secondary); }
+    .next-due-cell.overdue { color:#dc3545; font-weight:600; }
+    .next-due-cell.soon { color:#92600a; font-weight:600; }
+  </style>
+</head>
+<body>
+
+<nav class="topnav">
+  <a href="/queue" class="topnav-logo" aria-label="Carolina Compliance Solutions">
+    <img src="{{ url_for('static', filename='ccs_logo_dark.svg') }}" alt="CCS">
+  </a>
+  <div class="topnav-links">
+    <a href="/" class="nav-link">Home</a>
+    <a href="/queue" class="nav-link">Review</a>
+    <a href="/follow-ups" class="nav-link nav-link--active">Follow-ups{% set _ec = email_draft_count() %}{% if _ec > 0 %}<span class="nav-badge">{{ _ec }}</span>{% endif %}</a>
+    <a href="/audits" class="nav-link">Audits</a>
+    <a href="/marketing" class="nav-link">Marketing</a>
+    <a href="/logout" class="btn btn-gold btn-sm">Sign out</a>
+  </div>
+</nav>
+
+{% set _pb = pulse_banner() %}{% if _pb.level != 'ok' %}
+<div class="banner-pulse banner-pulse--{{ _pb.level }}">
+  <span class="status-dot status-dot--{{ _pb.level }}"></span>
+  {{ _pb.text }} — <a href="/pulse">View Pulse</a>
+</div>
+{% endif %}
+<div class="page-wrap">
+
+  {% for category, message in get_flashed_messages(with_categories=True) %}
+  <div class="flash flash-{{ category }}">{{ message }}</div>
+  {% endfor %}
+
+  <h1 class="page-title">Follow-ups — {{ client_name }}</h1>
+
+  {% if audit_info %}
+  <div class="payments-banner">
+    Audit period: {{ audit_info.start_date }} – {{ audit_info.end_date }}{% if auto_window %} (auto-applied as window){% endif %}
+  </div>
+  {% elif not has_payments %}
+  <div class="payments-banner">
+    Payments not loaded. Showing all follow-up items for active vendors.
+  </div>
+  {% endif %}
+
+  <!-- Client selector -->
+  <div class="client-selector">
+    <span class="section-label">CLIENT</span>
+    <div class="mt-8">
+      <select id="client-select" onchange="applyFilters()">
+        {% for c in clients %}
+        <option value="{{ c.id }}" {% if c.id == client_id %}selected{% endif %}>{{ c.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+  </div>
+
+  <!-- Audit window selector -->
+  <form class="window-form" id="window-form" onsubmit="event.preventDefault(); applyFilters()">
+    <span class="section-label" style="align-self:center">AUDIT WINDOW</span>
+    <label>From <input type="date" id="window-start" name="window_start" value="{{ window_start }}"></label>
+    <label>To <input type="date" id="window-end" name="window_end" value="{{ window_end }}"></label>
+    <button type="submit" class="btn btn-sm btn-primary">Apply</button>
+    {% if has_window %}
+    <a href="/follow-ups?client_id={{ client_id }}" class="btn btn-sm btn-secondary">Clear window</a>
+    {% endif %}
+  </form>
+  <script>
+  function applyFilters() {
+    var client = document.getElementById('client-select').value;
+    var ws = document.getElementById('window-start').value;
+    var we = document.getElementById('window-end').value;
+    var url = '/follow-ups?client_id=' + encodeURIComponent(client);
+    if (ws) url += '&window_start=' + encodeURIComponent(ws);
+    if (we) url += '&window_end=' + encodeURIComponent(we);
+    window.location = url;
+  }
+  </script>
+
+  <!-- Stats band -->
+  <div class="stats-band" role="region" aria-label="Follow-ups summary">
+    <div class="stat-item">
+      <span class="stat-num">{{ total_items }}</span>
+      <span class="stat-label">active items</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-num">{{ stage_counts.missing }}</span>
+      <span class="stat-label">missing</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-num">{{ stage_counts.drafted }}</span>
+      <span class="stat-label">drafted</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-num">{{ stage_counts.sent }}</span>
+      <span class="stat-label">sent</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-num">{{ stage_counts.waiting }}</span>
+      <span class="stat-label">waiting</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-num">{{ stage_counts.received }}</span>
+      <span class="stat-label">received</span>
+    </div>
+  </div>
+
+  <!-- Draft all requests bar -->
+  <div class="draft-all-bar">
+    <span>Create batched certificate request drafts — one email per agent, covering all open gaps.</span>
+    <button id="btn-draft-all" class="btn btn-sm btn-primary"
+            onclick="draftBatchRequests('{{ client_id }}', '{{ csrf_token() }}')">
+      Draft requests for {{ client_name }}
+    </button>
+    <a href="/requests?client_id={{ client_id }}" class="btn btn-sm btn-secondary">View requests →</a>
+  </div>
+  <div id="draft-all-result" class="drafts-result" style="display:none"></div>
+
+  <!-- Stage filter chips -->
+  <div class="filter-chips" id="filter-chips">
+    <a href="#" class="chip {% if stage_filter == 'all' %}active{% endif %}" data-filter="all">All</a>
+    <a href="#" class="chip {% if stage_filter == 'missing' %}active{% endif %}" data-filter="missing">Missing</a>
+    <a href="#" class="chip {% if stage_filter == 'drafted' %}active{% endif %}" data-filter="drafted">Drafted</a>
+    <a href="#" class="chip {% if stage_filter == 'sent' %}active{% endif %}" data-filter="sent">Sent</a>
+    <a href="#" class="chip {% if stage_filter == 'waiting' %}active{% endif %}" data-filter="waiting">Waiting</a>
+    <a href="#" class="chip {% if stage_filter == 'received' %}active{% endif %}" data-filter="received">Received</a>
+  </div>
+
+  <!-- Vendor follow-up cards -->
+  {% if vendors %}
+  <div id="vendor-cards">
+  {% for v in vendors %}
+  <div class="card vendor-card mb-16"
+       data-stages="{{ v.all_stages }}">
+    <div class="card-header">
+      <div>
+        <span>{{ v.vendor_name }}</span>
+        {% if v.amount_paid is not none %}
+        <span class="amount-badge">${{ "{:,.0f}".format(v.amount_paid) }}</span>
+        {% endif %}
+        <span class="badge badge-stage-{{ v.primary_stage }}" style="margin-left:8px">{{ v.primary_stage | title }}</span>
+      </div>
+      <div class="contact-panel">
+        {% if v.agent_email %}
+        <div class="contact-block">
+          <span class="contact-type-label">
+            Agent{% if v.agent_agency %} · {{ v.agent_agency }}{% endif %}
+            {% if v.agent_bounced %}<span class="bounced-flag" style="margin-left:6px">Bounced</span>{% endif %}
+          </span>
+          {% if v.agent_name %}<span style="font-size:0.85rem;font-weight:600">{{ v.agent_name }}</span>{% endif %}
+          <a href="mailto:{{ v.agent_email }}" class="contact-email-link">{{ v.agent_email }}</a>
+          {% if v.agent_phone %}<span class="contact-phone">{{ v.agent_phone }}</span>{% endif %}
+        </div>
+        {% endif %}
+        {% if v.contact_email %}
+        <div class="contact-block">
+          <span class="contact-type-label">Vendor</span>
+          <a href="mailto:{{ v.contact_email }}" class="contact-email-link">{{ v.contact_email }}</a>
+        </div>
+        {% endif %}
+        {% if not v.has_usable_contact %}
+        <span class="no-contact-flag">No usable contact — add one below</span>
+        {% endif %}
+        <button class="btn btn-sm btn-secondary"
+                onclick="toggleFixContact('{{ v.vendor_id }}')" style="margin-left:auto">
+          Fix contact
+        </button>
+      </div>
+      <!-- Fix contact form -->
+      <div class="fix-contact-form" id="fix-contact-{{ v.vendor_id }}">
+        <div class="form-row">
+          <div>
+            <label>Agent name</label>
+            <input type="text" id="fc-name-{{ v.vendor_id }}" value="{{ v.agent_name | e }}">
+          </div>
+          <div>
+            <label>Agent agency</label>
+            <input type="text" id="fc-agency-{{ v.vendor_id }}" value="{{ v.agent_agency | e }}">
+          </div>
+        </div>
+        <div class="form-row">
+          <div>
+            <label>Agent email</label>
+            <input type="email" id="fc-email-{{ v.vendor_id }}" value="{{ v.agent_email | e }}">
+          </div>
+          <div>
+            <label>Agent phone</label>
+            <input type="text" id="fc-phone-{{ v.vendor_id }}" value="{{ v.agent_phone | e }}">
+          </div>
+        </div>
+        <label>Primary contact</label>
+        <select id="fc-primary-{{ v.vendor_id }}">
+          <option value="Agent" {% if v.primary_contact == 'Agent' %}selected{% endif %}>Agent</option>
+          <option value="Vendor" {% if v.primary_contact == 'Vendor' %}selected{% endif %}>Vendor</option>
+        </select>
+        <div style="margin-top:10px; display:flex; gap:8px">
+          <button class="btn btn-sm btn-primary"
+                  onclick="saveContact('{{ v.vendor_id }}', '{{ csrf_token() }}')">
+            Save
+          </button>
+          <button class="btn btn-sm btn-secondary"
+                  onclick="toggleFixContact('{{ v.vendor_id }}')">
+            Cancel
+          </button>
+        </div>
+        <div id="fc-msg-{{ v.vendor_id }}" style="margin-top:6px;font-size:0.82rem;color:var(--secondary)"></div>
+      </div>
+    </div>
+    <div class="card-body" style="padding:0">
+
+      <table class="gap-table">
+        <thead>
+          <tr>
+            <th>Coverage</th>
+            <th>Gap</th>
+            <th>Stage</th>
+            <th>Cadence</th>
+            <th>Next due</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for ci in v.coverage_items %}
+        <tr>
+          <td>{{ ci.coverage_type }}</td>
+          <td>
+            {% if ci.gap_kind == 'missing' %}
+              Not on file
+            {% elif ci.window_status %}
+              {% if ci.window_status.status == 'full' %}Full coverage{% else %}{{ ci.window_status.days_not_on_file or '—' }}d gap in window{% endif %}
+            {% elif ci.gap_start %}
+              {{ ci.gap_start | fmt_date }}{% if ci.gap_end %} – {{ ci.gap_end | fmt_date }}{% endif %}
+            {% else %}
+              —
+            {% endif %}
+          </td>
+          <td>
+            <span class="badge badge-stage-{{ ci.stage }}">{{ ci.stage | title }}</span>
+          </td>
+          <td style="font-size:0.82rem;color:var(--secondary)">
+            {{ ci.request_cadence or '—' }}
+          </td>
+          <td>
+            {% if ci.request_next_due %}
+            <span class="next-due-cell {% if ci.request_days_until is not none and ci.request_days_until < 0 %}overdue{% elif ci.request_days_until is not none and ci.request_days_until <= 2 %}soon{% endif %}">
+              {{ ci.request_next_due | fmt_date }}
+              {% if ci.request_days_until is not none %}
+                ({% if ci.request_days_until < 0 %}{{ ci.request_days_until | abs }}d overdue{% elif ci.request_days_until == 0 %}today{% else %}{{ ci.request_days_until }}d{% endif %})
+              {% endif %}
+            </span>
+            {% else %}
+            <span class="next-due-cell">—</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if v.has_usable_contact %}
+            <button class="btn btn-sm btn-secondary btn-draft-email"
+                    data-vendor-id="{{ v.vendor_id }}"
+                    data-coverage-type="{{ ci.coverage_type }}"
+                    data-gap-start="{{ ci.gap_start or '' }}"
+                    data-gap-end="{{ ci.gap_end or '' }}"
+                    data-client-id="{{ client_id }}">
+              Draft email
+            </button>
+            {% else %}
+            <a href="#" class="btn btn-sm btn-secondary"
+               onclick="toggleFixContact('{{ v.vendor_id }}'); return false;"
+               title="Add contact to enable drafting">
+              No contact on file. Add one.
+            </a>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+
+      <!-- Draft email reveal area -->
+      <div class="draft-area" id="draft-{{ v.vendor_id }}" style="padding:0 12px 12px">
+        <div class="draft-area-inner">
+          <textarea readonly placeholder="Draft will appear here..."></textarea>
+          <p class="draft-note">This draft is saved in Airtable. Copy and send manually — nothing is sent automatically.</p>
+        </div>
+      </div>
+
+    </div>
+  </div>
+  {% endfor %}
+  </div>
+  {% else %}
+  <div class="card">
+    <div class="card-body">
+      <p class="no-gap-note">No follow-up items found for active vendors under {{ client_name }}.</p>
+    </div>
+  </div>
+  {% endif %}
+
+</div><!-- /page-wrap -->
+
+<script>
+(function () {
+  // Stage filter chips
+  var chips = document.querySelectorAll('.chip[data-filter]');
+  chips.forEach(function (chip) {
+    chip.addEventListener('click', function (e) {
+      e.preventDefault();
+      chips.forEach(function (c) { c.classList.remove('active'); });
+      chip.classList.add('active');
+      var filter = chip.getAttribute('data-filter');
+      var cards = document.querySelectorAll('.vendor-card[data-stages]');
+      cards.forEach(function (card) {
+        if (filter === 'all') {
+          card.style.display = '';
+          return;
+        }
+        var stages = card.getAttribute('data-stages') || '';
+        card.style.display = stages.indexOf(filter) !== -1 ? '' : 'none';
+      });
+    });
+  });
+
+  // Apply initial filter from URL param
+  var urlStage = '{{ stage_filter }}';
+  if (urlStage && urlStage !== 'all') {
+    chips.forEach(function (chip) {
+      if (chip.getAttribute('data-filter') === urlStage) {
+        chip.click();
+      }
+    });
+  }
+
+  // Draft email buttons
+  document.addEventListener('click', function (e) {
+    var btn = e.target.closest('.btn-draft-email');
+    if (!btn) return;
+    btn.disabled = true;
+    btn.textContent = 'Drafting…';
+
+    var vendorId    = btn.getAttribute('data-vendor-id');
+    var covType     = btn.getAttribute('data-coverage-type');
+    var gapStart    = btn.getAttribute('data-gap-start') || '';
+    var gapEnd      = btn.getAttribute('data-gap-end') || '';
+    var clientId    = btn.getAttribute('data-client-id');
+
+    var fd = new FormData();
+    fd.append('csrf_token', '{{ csrf_token() }}');
+    fd.append('client_id', clientId);
+    fd.append('coverage_type', covType);
+    fd.append('gap_start', gapStart);
+    fd.append('gap_end', gapEnd);
+
+    fetch('/gaps/draft-email/' + vendorId, { method: 'POST', body: fd })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.ok) {
+          var draftArea = document.getElementById('draft-' + vendorId);
+          if (draftArea) {
+            draftArea.style.display = 'block';
+            var ta = draftArea.querySelector('textarea');
+            if (ta) ta.value = data.draft;
+          }
+          btn.textContent = 'Draft saved';
+        } else {
+          btn.textContent = 'Error — try again';
+          btn.disabled = false;
+        }
+      })
+      .catch(function () {
+        btn.textContent = 'Error — try again';
+        btn.disabled = false;
+      });
+  });
+}());
+
+/* ── Contact management ─────────────────────────────────────────────── */
+function toggleFixContact(vendorId) {
+  var el = document.getElementById('fix-contact-' + vendorId);
+  if (el) el.style.display = el.style.display === 'block' ? 'none' : 'block';
+}
+
+function saveContact(vendorId, csrf) {
+  var fields = {
+    agent_name:     document.getElementById('fc-name-'   + vendorId).value,
+    agent_agency:   document.getElementById('fc-agency-' + vendorId).value,
+    agent_email:    document.getElementById('fc-email-'  + vendorId).value,
+    agent_phone:    document.getElementById('fc-phone-'  + vendorId).value,
+    primary_contact: document.getElementById('fc-primary-' + vendorId).value,
+  };
+  var fd = new FormData();
+  fd.append('csrf_token', csrf);
+  Object.keys(fields).forEach(function (k) { fd.append(k, fields[k]); });
+  var msg = document.getElementById('fc-msg-' + vendorId);
+  if (msg) msg.textContent = 'Saving…';
+  fetch('/vendor/' + vendorId + '/update-contact', { method: 'POST', body: fd })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (d.ok) {
+        if (msg) msg.textContent = 'Saved.';
+        setTimeout(function () { location.reload(); }, 800);
+      } else {
+        if (msg) msg.textContent = 'Error: ' + (d.error || 'unknown');
+      }
+    })
+    .catch(function () { if (msg) msg.textContent = 'Error saving.'; });
+}
+
+/* ── Batch request drafts ───────────────────────────────────────────── */
+function draftBatchRequests(clientId, csrf) {
+  var btn = document.getElementById('btn-draft-all');
+  var out = document.getElementById('draft-all-result');
+  if (!btn || !out) return;
+  btn.disabled = true;
+  btn.textContent = 'Creating drafts…';
+
+  var fd = new FormData();
+  fd.append('csrf_token', csrf);
+  fd.append('client_id', clientId);
+
+  fetch('/gaps/draft-batch-requests', { method: 'POST', body: fd })
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      btn.textContent = 'Drafts created';
+      out.style.display = 'block';
+      out.innerHTML = '';
+
+      if (data.no_contact && data.no_contact.length) {
+        var warn = document.createElement('div');
+        warn.style.cssText = 'background:#fff3cd;border:1px solid #fde68a;border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:0.85rem;color:#664d03;';
+        warn.textContent = 'No usable contact for: ' + data.no_contact.join(', ') + '. Fix their contacts above.';
+        out.appendChild(warn);
+      }
+
+      if (!data.drafts || !data.drafts.length) {
+        var empty = document.createElement('div');
+        empty.style.cssText = 'font-size:0.88rem;color:var(--secondary);padding:8px 0;';
+        empty.textContent = data.message || 'No open gaps found.';
+        out.appendChild(empty);
+        return;
+      }
+
+      data.drafts.forEach(function (d) {
+        var card = document.createElement('div');
+        card.className = 'draft-result-card';
+        var preId = 'dr-pre-' + Math.random().toString(36).substr(2, 6);
+        card.innerHTML = (
+          '<div class="dr-subject">' + escHtml(d.subject) + '</div>' +
+          '<div class="dr-subs">To: ' + escHtml(d.contact_email) +
+            (d.contact_name ? ' (' + escHtml(d.contact_name) + ')' : '') + '</div>' +
+          '<div class="dr-subs">' + d.n_items + ' item(s): ' + escHtml(d.subs.join(', ')) + '</div>' +
+          '<button class="btn btn-sm btn-secondary" style="margin-top:6px" ' +
+            'onclick="document.getElementById(\'' + preId + '\').style.display==' +
+            '\'block\'?document.getElementById(\'' + preId + '\').style.display=\'none\'' +
+            ':document.getElementById(\'' + preId + '\').style.display=\'block\'">Preview body</button>' +
+          '<div class="draft-result-preview" id="' + preId + '">' + escHtml(d.body) + '</div>'
+        );
+        out.appendChild(card);
+      });
+
+      var link = document.createElement('a');
+      link.href = '/requests?client_id=' + encodeURIComponent(clientId);
+      link.className = 'btn btn-sm btn-primary';
+      link.style.marginTop = '8px';
+      link.textContent = 'Review in Requests page →';
+      out.appendChild(link);
+    })
+    .catch(function () {
+      btn.textContent = 'Error — try again';
+      btn.disabled = false;
+    });
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+</script>
+</body>
+</html>
