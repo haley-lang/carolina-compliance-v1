@@ -176,6 +176,15 @@ def get_last_heartbeat(service: str) -> float | None:
     return row["ts"] if row else None
 
 
+def get_all_heartbeats() -> dict[str, float]:
+    """Return {service: last_ts} for every service that has ever sent a heartbeat."""
+    with _get_conn() as conn:
+        rows = conn.execute(
+            "SELECT service, MAX(ts) AS ts FROM heartbeats GROUP BY service"
+        ).fetchall()
+    return {row["service"]: row["ts"] for row in rows}
+
+
 def prune_old_data(keep_days: int = 7) -> None:
     """Delete rows older than `keep_days` days from all three tables."""
     cutoff = time.time() - keep_days * 86400

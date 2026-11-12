@@ -10,10 +10,12 @@ rest of the pipeline).  Writes results to health_store (SQLite-backed).
 Prints a plain-text summary to stdout so Railway captures it in logs.
 """
 
+import json
 import os
 import sys
 import time
 import traceback
+import urllib.request as _ur
 from datetime import datetime, timezone, date, timedelta
 
 from dotenv import load_dotenv
@@ -23,6 +25,87 @@ load_dotenv()
 # health_store is a sibling module in the same directory.
 # ---------------------------------------------------------------------------
 import health_store
+
+# ---------------------------------------------------------------------------
+# HTTP transport helpers — buffer events locally and POST to web service.
+# Falls back to writing directly to local health_store if not configured.
+# ---------------------------------------------------------------------------
+
+_ev_buf: list[dict] = []
+
+
+def _buf_event(
+    category: str,
+    level: str,
+    title: str,
+    body: str | None = None,
+    table_name: str | None = None,
+) -> None:
+    _ev_buf.append({
+        "category": category,
+        "level": level,
+        "title": title,
+        "body": body or "",
+        "table_name": table_name or "",
+    })
+
+
+def _send_to_web_service(heartbeats: list, events: list, prune: bool = False) -> None:
+    """POST buffered events/heartbeats to web service; fall back to local health_store."""
+    base = (os.environ.get("PULSE_WEB_URL") or "").rstrip("/")
+    token = (os.environ.get("PULSE_SECRET_TOKEN") or "").strip()
+    if base and token:
+        payload = json.dumps({"heartbeats": heartbeats, "events": events, "prune": prune}).encode()
+        req = _ur.Request(
+            f"{base}/internal/pulse-checkin",
+            data=payload,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with _ur.urlopen(req, timeout=15) as resp:
+                resp.read()
+            print(f"[pulse_cron] Sent {len(events)} events + {len(heartbeats)} heartbeats to web service.")
+            return
+        except Exception as exc:
+            print(f"[pulse_cron] web service check-in failed: {exc} — falling back to local store")
+    for svc in heartbeats:
+        health_store.record_heartbeat(svc)
+    for ev in events:
+        health_store.record_event(
+            category=ev.get("category", "pipeline"),
+            level=ev.get("level", "ok"),
+            title=ev.get("title", ""),
+            body=ev.get("body", ""),
+            table_name=ev.get("table_name", ""),
+        )
+    if prune:
+        health_store.prune_old_data(keep_days=7)
+
+
+def _fetch_health_data() -> dict:
+    """GET current health data from web service; fall back to local health_store."""
+    base = (os.environ.get("PULSE_WEB_URL") or "").rstrip("/")
+    token = (os.environ.get("PULSE_SECRET_TOKEN") or "").strip()
+    if base and token:
+        req = _ur.Request(
+            f"{base}/internal/health-data",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        try:
+            with _ur.urlopen(req, timeout=10) as resp:
+                return json.loads(resp.read())
+        except Exception as exc:
+            print(f"[pulse_cron] health-data fetch failed: {exc} — using local fallback")
+    svcs = ["email_monitor", "pipeline", "run_pipeline", "pulse_cron"]
+    return {
+        "heartbeats": {s: health_store.get_last_heartbeat(s) for s in svcs},
+        "write_rates": {
+            t: health_store.get_write_rate(t, window_minutes=60)
+            for t in ["Compliance Log", "Insurance Policies", "Incoming Extractions"]
+        },
+        "recent_events": health_store.get_recent_events(limit=50, since_hours=25),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -109,26 +192,24 @@ def check_airtable_space() -> dict:
         if rows:
             result["fastest_growing"] = rows[0]["name"]
 
-        health_store.record_event(
-            category="airtable_space",
+        _buf_event(
+            category="api_error",
             level=result["level"],
             title=f"Airtable record count: {total:,} / {result['limit']:,}",
             body=f"{pct*100:.1f}% used",
-            table_name=None,
         )
     except Exception as exc:
         result["level"] = "error"
-        health_store.record_event(
-            category="airtable_space",
+        _buf_event(
+            category="api_error",
             level="error",
             title="Failed to check Airtable record count",
             body=traceback.format_exc(limit=4),
-            table_name=None,
         )
     return result
 
 
-def check_email_intake() -> dict:
+def check_email_intake(fetched_data: dict | None = None) -> dict:
     """Count today's Incoming Documents by status."""
     result = {
         "last_check": None,
@@ -145,7 +226,7 @@ def check_email_intake() -> dict:
 
         # Fetch documents from the last 48 hours (Airtable filter by date)
         all_docs = tbl.all(
-            fields=["Subject", "From", "Date Received", "Status", "Skip Reason"],
+            fields=["Subject", "Sender Email", "Date Received", "Status", "Skip Reason"],
             sort=["Date Received"],
         )
 
@@ -177,7 +258,7 @@ def check_email_intake() -> dict:
                 skipped_items.append({
                     "id": rec["id"],
                     "subject": f.get("Subject") or "(no subject)",
-                    "sender": f.get("From") or "",
+                    "sender": f.get("Sender Email") or "",
                     "received_at": received_raw,
                     "reason": f.get("Skip Reason") or status,
                 })
@@ -197,9 +278,10 @@ def check_email_intake() -> dict:
 
         result["skipped_items"] = skipped_items
 
-        # Last check = heartbeat from pulse_cron itself
-        last_hb = health_store.get_last_heartbeat("pulse_cron")
-        if last_hb:
+        # Last check = heartbeat from pulse_cron itself (read from web service data)
+        heartbeats = (fetched_data or {}).get("heartbeats") or {}
+        last_hb = heartbeats.get("pulse_cron")
+        if isinstance(last_hb, (int, float)) and last_hb:
             result["last_check"] = datetime.fromtimestamp(last_hb, tz=timezone.utc).isoformat()
 
         # Level: warn if any skipped, error if many skipped
@@ -208,17 +290,16 @@ def check_email_intake() -> dict:
         elif result["today_skipped"] > 0:
             result["level"] = "warn"
 
-        health_store.record_event(
+        _buf_event(
             category="email_intake",
             level=result["level"],
             title=f"Email intake today: {result['today_received']} received, "
                   f"{result['today_processed']} processed, {result['today_skipped']} skipped",
-            body=None,
             table_name="Incoming Documents",
         )
     except Exception as exc:
         result["level"] = "error"
-        health_store.record_event(
+        _buf_event(
             category="email_intake",
             level="error",
             title="Failed to check email intake stats",
@@ -298,7 +379,7 @@ def check_pipeline_stages() -> dict:
         elif stuck:
             result["level"] = "warn"
 
-        health_store.record_event(
+        _buf_event(
             category="pipeline",
             level=result["level"],
             title="Pipeline stage counts: "
@@ -308,7 +389,7 @@ def check_pipeline_stages() -> dict:
         )
     except Exception as exc:
         result["level"] = "error"
-        health_store.record_event(
+        _buf_event(
             category="pipeline",
             level="error",
             title="Failed to check pipeline stages",
@@ -318,7 +399,7 @@ def check_pipeline_stages() -> dict:
     return result
 
 
-def check_write_rate() -> dict:
+def check_write_rate(fetched_data: dict | None = None) -> dict:
     """Check recent Airtable write rate for the Compliance Log table."""
     result = {
         "writes_per_hour": [],
@@ -331,8 +412,9 @@ def check_write_rate() -> dict:
             ("Incoming Extractions", 40),
         ]
         any_runaway = False
+        write_rates = (fetched_data or {}).get("write_rates") or {}
         for tname, normal_band in tables_to_check:
-            count = health_store.get_write_rate(tname, window_minutes=60)
+            count = write_rates.get(tname, 0)
             over = count > normal_band
             if over:
                 any_runaway = True
@@ -345,21 +427,19 @@ def check_write_rate() -> dict:
         if any_runaway:
             result["level"] = "warn"
 
-        health_store.record_event(
-            category="runaway",
+        _buf_event(
+            category="write_rate",
             level=result["level"],
             title="Write rate check complete",
             body=", ".join(f"{r['table']}:{r['count']}" for r in result["writes_per_hour"]),
-            table_name=None,
         )
     except Exception as exc:
         result["level"] = "error"
-        health_store.record_event(
-            category="runaway",
+        _buf_event(
+            category="write_rate",
             level="error",
             title="Failed to check write rate",
             body=traceback.format_exc(limit=4),
-            table_name=None,
         )
     return result
 
@@ -479,14 +559,12 @@ def check_outside_services() -> list:
     any_error = any(s["level"] == "error" for s in services)
     any_warn  = any(s["level"] == "warn" for s in services)
     level = "error" if any_error else ("warn" if any_warn else "ok")
-    health_store.record_event(
-        category="services",
+    _buf_event(
+        category="api_error",
         level=level,
         title="Outside services check: " + ", ".join(
             f"{s['name']}={s['status']}" for s in services
         ),
-        body=None,
-        table_name=None,
     )
 
     return services
@@ -513,11 +591,11 @@ def _load_settings() -> dict:
         return defaults
 
 
-def _already_sent_summary_today() -> bool:
+def _already_sent_summary_today(fetched_data: dict | None = None) -> bool:
     """Return True if a daily_summary_sent event was recorded today (UTC)."""
     today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
     try:
-        events = health_store.get_recent_events(limit=50, since_hours=25)
+        events = (fetched_data or {}).get("recent_events") or []
         return any(
             e["category"] == "heartbeat"
             and e["title"] == "daily_summary_sent"
@@ -528,7 +606,7 @@ def _already_sent_summary_today() -> bool:
         return False
 
 
-def _send_daily_summary(results: dict, overall_level: str) -> None:
+def _send_daily_summary(results: dict, overall_level: str, fetched_data: dict | None = None) -> None:
     """Send a plain-text daily health summary email to haley@ if settings allow."""
     settings = _load_settings()
     if not settings.get("summary_email_enabled"):
@@ -538,7 +616,7 @@ def _send_daily_summary(results: dict, overall_level: str) -> None:
     if now_utc.hour != settings.get("summary_email_hour_utc", 14):
         return
 
-    if _already_sent_summary_today():
+    if _already_sent_summary_today(fetched_data=fetched_data):
         return
 
     sg_key = (os.environ.get("SENDGRID_API_KEY") or "").strip()
@@ -592,7 +670,7 @@ def _send_daily_summary(results: dict, overall_level: str) -> None:
             plain_text_content=body,
         )
         sg.send(message)
-        health_store.record_event(
+        _buf_event(
             "heartbeat", "ok", "daily_summary_sent",
             body=f"sent at {now_utc.isoformat()}, level={overall_level}",
         )
@@ -609,6 +687,12 @@ def main():
     start = time.time()
     print(f"[pulse_cron] Starting health check — {datetime.now(tz=timezone.utc).isoformat()}")
 
+    _ev_buf.clear()
+
+    # Fetch current health data from web service (or local fallback) for reads.
+    print("[pulse_cron] Fetching health data from web service…")
+    _fetched = _fetch_health_data()
+
     results = {}
     summary_lines = []
 
@@ -620,12 +704,12 @@ def main():
         f"  Airtable space: {s['total_records']:,} records "
         f"({(s['total_records']/s['limit']*100):.1f}%) — {s['level']}"
         if s["total_records"] is not None
-        else f"  Airtable space: ERROR"
+        else "  Airtable space: ERROR"
     )
 
     # 2. Email intake
     print("[pulse_cron] Checking email intake…")
-    results["email_intake"] = check_email_intake()
+    results["email_intake"] = check_email_intake(fetched_data=_fetched)
     ei = results["email_intake"]
     summary_lines.append(
         f"  Email intake: {ei['today_received']} received, "
@@ -642,7 +726,7 @@ def main():
 
     # 4. Write rate
     print("[pulse_cron] Checking write rate…")
-    results["write_rate"] = check_write_rate()
+    results["write_rate"] = check_write_rate(fetched_data=_fetched)
     wr = results["write_rate"]
     summary_lines.append(
         f"  Write rate: {wr['writes_per_hour']} — {wr['level']}"
@@ -654,31 +738,25 @@ def main():
     for svc in results["services"]:
         summary_lines.append(f"  {svc['name']}: {svc['status']} — {svc['level']}")
 
-    # 6. Record heartbeat
-    health_store.record_heartbeat("pulse_cron")
-
-    # 7. Prune old data
-    try:
-        health_store.prune_old_data(keep_days=7)
-        print("[pulse_cron] Pruned events older than 7 days.")
-    except Exception as exc:
-        print(f"[pulse_cron] WARNING: prune_old_data failed: {exc}")
-
-    elapsed = time.time() - start
-    print(f"\n[pulse_cron] Done in {elapsed:.1f}s. Summary:")
-    for line in summary_lines:
-        print(line)
-
-    # Overall level
+    # Overall level (needed before daily summary check)
     all_levels = [
         results["airtable_space"]["level"],
         results["email_intake"]["level"],
         results["pipeline"]["level"],
         results["write_rate"]["level"],
     ] + [s["level"] for s in results["services"]]
-
     overall_level = "error" if "error" in all_levels else ("warn" if "warn" in all_levels else "ok")
-    _send_daily_summary(results, overall_level)
+
+    # 6. Daily summary email (may append to _ev_buf)
+    _send_daily_summary(results, overall_level, fetched_data=_fetched)
+
+    # 7. Flush all buffered events + heartbeat to web service (or local fallback).
+    _send_to_web_service(heartbeats=["pulse_cron"], events=_ev_buf, prune=True)
+
+    elapsed = time.time() - start
+    print(f"\n[pulse_cron] Done in {elapsed:.1f}s. Summary:")
+    for line in summary_lines:
+        print(line)
 
     if overall_level == "error":
         print("\n[pulse_cron] OVERALL: ERROR")

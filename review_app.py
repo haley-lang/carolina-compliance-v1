@@ -1649,7 +1649,14 @@ def _pace_stats(batch_rows: list) -> dict:
 @app.route("/")
 @login_required
 def index():
-    return redirect(url_for("queue"))
+    return redirect(url_for("pulse"))
+
+
+@app.route("/follow-ups")
+@login_required
+def follow_ups():
+    """Unified follow-ups page (stub — full page in Stage 2)."""
+    return redirect(url_for("gaps"))
 
 
 @app.route("/queue")
@@ -6901,7 +6908,36 @@ from marketing_constants import (
     MARKETING_IDEAS_TABLE_ID, MI_IDEA, MI_WHY_STORY, MI_AUDIENCE, MI_TOPIC,
     MI_STATUS, MI_SIGNAL_LINK, MI_STATUS_NEW, MI_STATUS_APPROVED, MI_STATUS_DISMISSED,
     MARKETING_SIGNALS_TABLE_ID, MS_SUMMARY, MS_SOURCE, MS_CREATED_AT,
+    CONTENT_QUEUE_TABLE_ID, CQ_DRAFT_TEXT, CQ_PLATFORM, CQ_HOOKS, CQ_STATUS,
+    CQ_NEEDS_BILLY, CQ_GUARD_RESULT, CQ_TRACKED_LINK, CQ_IDEA_LINK,
 )
+
+
+def _load_content_queue(api) -> dict:
+    """Return a dict mapping idea_id -> list of content queue dicts."""
+    result = {}
+    try:
+        tbl = api.table(MARKETING_BASE_ID, CONTENT_QUEUE_TABLE_ID)
+        records = tbl.all(
+            formula=f"{{{CQ_STATUS}}}='Draft'",
+            fields=[CQ_DRAFT_TEXT, CQ_PLATFORM, CQ_HOOKS, CQ_GUARD_RESULT,
+                    CQ_TRACKED_LINK, CQ_NEEDS_BILLY, CQ_IDEA_LINK],
+        )
+        for rec in records:
+            f = rec.get("fields", {})
+            for idea_id in (f.get(CQ_IDEA_LINK) or []):
+                result.setdefault(idea_id, []).append({
+                    "id":           rec["id"],
+                    "platform":     f.get(CQ_PLATFORM, ""),
+                    "draft_text":   f.get(CQ_DRAFT_TEXT, ""),
+                    "hooks":        f.get(CQ_HOOKS, ""),
+                    "guard_result": f.get(CQ_GUARD_RESULT, "PASS"),
+                    "tracked_link": f.get(CQ_TRACKED_LINK, ""),
+                    "needs_billy":  f.get(CQ_NEEDS_BILLY, False),
+                })
+    except Exception as exc:
+        app.logger.warning("content queue load failed: %s", exc)
+    return result
 
 
 @app.route("/marketing")
@@ -6916,15 +6952,18 @@ def marketing_page():
             formula="OR({Status}='New',{Status}='Approved')",
             sort=[{"field": MI_STATUS, "direction": "asc"}],
         )
+        content_map = _load_content_queue(api)
         for rec in records:
             f = rec.get("fields", {})
+            idea_id = rec["id"]
             ideas.append({
-                "id": rec["id"],
-                "idea": f.get(MI_IDEA, ""),
+                "id":        idea_id,
+                "idea":      f.get(MI_IDEA, ""),
                 "why_story": f.get(MI_WHY_STORY, ""),
-                "audience": f.get(MI_AUDIENCE, ""),
-                "topic": f.get(MI_TOPIC, ""),
-                "status": f.get(MI_STATUS, MI_STATUS_NEW),
+                "audience":  f.get(MI_AUDIENCE, ""),
+                "topic":     f.get(MI_TOPIC, ""),
+                "status":    f.get(MI_STATUS, MI_STATUS_NEW),
+                "content":   content_map.get(idea_id, []),
             })
     except Exception as exc:
         app.logger.warning("marketing_page ideas fetch failed: %s", exc)
@@ -6978,6 +7017,84 @@ def marketing_add_note():
         except Exception as exc:
             app.logger.warning("marketing note save failed: %s", exc)
             flash("Could not save note.", "warning")
+    return redirect(url_for("marketing_page"))
+
+
+# ── Internal pulse endpoints (no login_required — auth via Bearer token) ─────
+
+@app.route("/internal/pulse-checkin", methods=["POST"])
+def internal_pulse_checkin():
+    """Receive health events and heartbeats from the cron-pulse Railway service."""
+    from flask import jsonify
+    token = os.environ.get("PULSE_SECRET_TOKEN", "").strip()
+    if not token or request.headers.get("Authorization", "") != f"Bearer {token}":
+        return jsonify({"ok": False}), 401
+    data = request.get_json(force=True) or {}
+    for svc in (data.get("heartbeats") or []):
+        _hs.record_heartbeat(str(svc))
+    for ev in (data.get("events") or []):
+        _hs.record_event(
+            category=ev.get("category", "pipeline"),
+            level=ev.get("level", "ok"),
+            title=ev.get("title", ""),
+            body=ev.get("body", ""),
+            table_name=ev.get("table_name", ""),
+        )
+    if data.get("prune"):
+        _hs.prune_old_data(keep_days=7)
+    return jsonify({"ok": True})
+
+
+@app.route("/internal/health-data", methods=["GET"])
+def internal_health_data():
+    """Return current health data for the cron-pulse service to read."""
+    from flask import jsonify
+    token = os.environ.get("PULSE_SECRET_TOKEN", "").strip()
+    if not token or request.headers.get("Authorization", "") != f"Bearer {token}":
+        return jsonify({"ok": False}), 401
+    heartbeats = _hs.get_all_heartbeats()
+    tables = ["Compliance Log", "Insurance Policies", "Incoming Extractions"]
+    write_rates = {t: _hs.get_write_rate(t, window_minutes=60) for t in tables}
+    recent_events = _hs.get_recent_events(limit=50, since_hours=25)
+    return jsonify({"heartbeats": heartbeats, "write_rates": write_rates, "recent_events": recent_events})
+
+
+@app.route("/marketing/idea/<record_id>/generate", methods=["POST"])
+@login_required
+def marketing_generate_content(record_id):
+    try:
+        api = _api()
+        idea_tbl = api.table(MARKETING_BASE_ID, MARKETING_IDEAS_TABLE_ID)
+        rec = idea_tbl.get(record_id)
+        if not rec:
+            flash("Idea not found.", "warning")
+            return redirect(url_for("marketing_page"))
+        idea_fields = rec.get("fields", {})
+        if idea_fields.get(MI_STATUS) != MI_STATUS_APPROVED:
+            flash("Only approved ideas can generate a content set.", "warning")
+            return redirect(url_for("marketing_page"))
+        needs_billy = request.form.get("needs_billy") == "1"
+    except Exception as exc:
+        app.logger.warning("marketing generate fetch failed: %s", exc)
+        flash("Could not load idea.", "warning")
+        return redirect(url_for("marketing_page"))
+
+    try:
+        from marketing_content_generator import generate_content_set
+        result = generate_content_set(record_id, idea_fields, needs_billy=needs_billy)
+        created = result.get("created", 0)
+        blocked = result.get("blocked", 0)
+        if created:
+            msg = f"Generated {created} content draft{'s' if created != 1 else ''}."
+            if blocked:
+                msg += f" {blocked} blocked by compliance guard."
+            flash(msg, "success")
+        else:
+            flash("No content generated — check logs.", "warning")
+    except Exception as exc:
+        app.logger.warning("marketing content generation failed: %s", exc)
+        flash("Content generation failed — check logs.", "warning")
+
     return redirect(url_for("marketing_page"))
 
 
