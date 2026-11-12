@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CCS — Marketing</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='ccs_icon.svg') }}">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='review.css') }}">
+  <style>
+    .marketing-hero {
+      background: var(--navy);
+      color: var(--gold);
+      padding: 28px 32px 22px;
+      border-radius: 10px;
+      margin-bottom: 28px;
+    }
+    .marketing-hero h1 {
+      font-family: var(--font-serif);
+      font-size: 1.9rem;
+      margin: 0 0 6px;
+      color: var(--white);
+    }
+    .marketing-hero p {
+      margin: 0;
+      font-size: .9rem;
+      color: rgba(255,255,255,.75);
+      max-width: 560px;
+    }
+    .ideas-feed { display: flex; flex-direction: column; gap: 16px; }
+    .idea-card {
+      background: var(--white);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      box-shadow: 0 1px 4px rgba(16,32,66,.05);
+      padding: 20px 24px 16px;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px 20px;
+    }
+    .idea-card--approved { border-left: 4px solid #22c55e; }
+    .idea-card--new      { border-left: 4px solid var(--blue); }
+    .idea-body { grid-column: 1; }
+    .idea-actions { grid-column: 2; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
+    .idea-title {
+      font-weight: 700;
+      font-size: .97rem;
+      color: var(--navy);
+      margin: 0 0 6px;
+    }
+    .idea-why {
+      font-size: .86rem;
+      color: var(--secondary);
+      margin: 0 0 10px;
+      line-height: 1.55;
+    }
+    .idea-meta { display: flex; gap: 8px; flex-wrap: wrap; }
+    .tag {
+      display: inline-block;
+      padding: 2px 10px;
+      border-radius: 20px;
+      font-size: .74rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+    }
+    .tag-audience { background: #e8f0fe; color: #305EC5; }
+    .tag-topic    { background: #fef9e7; color: #856404; }
+    .tag-approved { background: #dcfce7; color: #15803d; }
+    .tag-new      { background: #dbeafe; color: #1d4ed8; }
+    .btn-approve {
+      background: #22c55e; color: var(--white);
+      border: none; border-radius: 6px;
+      padding: 6px 14px; font-size: .82rem; font-weight: 600;
+      cursor: pointer; white-space: nowrap;
+    }
+    .btn-approve:hover { opacity: .88; }
+    .btn-dismiss {
+      background: transparent; color: var(--secondary);
+      border: 1px solid var(--border); border-radius: 6px;
+      padding: 5px 14px; font-size: .82rem; font-weight: 500;
+      cursor: pointer; white-space: nowrap;
+    }
+    .btn-dismiss:hover { background: var(--bg); }
+    .empty-state {
+      text-align: center;
+      padding: 60px 24px;
+      color: var(--secondary);
+    }
+    .empty-state .empty-icon { font-size: 2.4rem; margin-bottom: 12px; }
+    .empty-state h3 { margin: 0 0 8px; color: var(--navy); font-size: 1.1rem; }
+    .empty-state p  { margin: 0; font-size: .88rem; }
+    .note-box {
+      background: var(--white);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px 24px;
+      margin-top: 28px;
+    }
+    .note-box h3 { margin: 0 0 12px; font-size: .95rem; color: var(--navy); }
+    .note-box textarea {
+      width: 100%; box-sizing: border-box;
+      border: 1px solid var(--border); border-radius: 6px;
+      padding: 10px 12px; font-family: var(--font-sans);
+      font-size: .88rem; line-height: 1.5; resize: vertical;
+      min-height: 72px; color: var(--navy);
+    }
+    .note-box textarea:focus { outline: none; border-color: var(--blue); }
+    .note-submit {
+      margin-top: 10px;
+      background: var(--navy); color: var(--white);
+      border: none; border-radius: 6px;
+      padding: 8px 20px; font-size: .86rem; font-weight: 600;
+      cursor: pointer;
+    }
+    .note-submit:hover { opacity: .88; }
+    .section-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 16px;
+    }
+    .section-header h2 {
+      margin: 0; font-size: 1.05rem; color: var(--navy); font-weight: 700;
+    }
+    .ideas-count {
+      font-size: .82rem; color: var(--secondary);
+      background: var(--bg); padding: 3px 10px; border-radius: 20px;
+    }
+  </style>
+</head>
+<body>
+<nav class="topnav">
+  <a href="/queue" class="topnav-logo" aria-label="Carolina Compliance Solutions">
+    <img src="{{ url_for('static', filename='ccs_logo_dark.svg') }}" alt="CCS">
+  </a>
+  <div class="topnav-links">
+    <a href="/pulse"       class="nav-link">Pulse</a>
+    <a href="/queue"       class="nav-link">Queue</a>
+    <a href="/gaps"        class="nav-link">Gaps</a>
+    <a href="/requests"    class="nav-link">Requests</a>
+    <a href="/audits"      class="nav-link">Audits</a>
+    <a href="/corrections" class="nav-link">Corrections</a>
+    <a href="/emails"      class="nav-link">Emails{% set _ec = email_draft_count() %}{% if _ec > 0 %}<span class="nav-badge">{{ _ec }}</span>{% endif %}</a>
+    <a href="/marketing"   class="nav-link nav-link--active">Marketing</a>
+    <a href="/logout"      class="btn btn-gold btn-sm">Sign out</a>
+  </div>
+</nav>
+
+<div class="page-wrapper">
+
+  <div class="marketing-hero">
+    <h1>Marketing</h1>
+    <p>Story ideas spotted from real work — approved by you before anything goes anywhere.
+       The ideas below were drafted from recent activity. Nothing is posted or sent until you say so.</p>
+  </div>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      {% for category, message in messages %}
+        <div class="flash flash-{{ category }}" style="margin-bottom:16px;">{{ message }}</div>
+      {% endfor %}
+    {% endif %}
+  {% endwith %}
+
+  {% if error %}
+    <div class="flash flash-warning" style="margin-bottom:16px;">{{ error }}</div>
+  {% endif %}
+
+  <div class="section-header">
+    <h2>Story Ideas</h2>
+    {% if ideas %}
+      <span class="ideas-count">{{ ideas|length }} idea{% if ideas|length != 1 %}s{% endif %}</span>
+    {% endif %}
+  </div>
+
+  {% if ideas %}
+    <div class="ideas-feed">
+      {% for idea in ideas %}
+        <div class="idea-card idea-card--{{ idea.status|lower }}">
+          <div class="idea-body">
+            <p class="idea-title">{{ idea.idea }}</p>
+            {% if idea.why_story %}
+              <p class="idea-why">{{ idea.why_story }}</p>
+            {% endif %}
+            <div class="idea-meta">
+              {% if idea.audience %}
+                <span class="tag tag-audience">{{ idea.audience }}</span>
+              {% endif %}
+              {% if idea.topic %}
+                <span class="tag tag-topic">{{ idea.topic }}</span>
+              {% endif %}
+              <span class="tag tag-{{ idea.status|lower }}">{{ idea.status }}</span>
+            </div>
+          </div>
+          <div class="idea-actions">
+            {% if idea.status == 'New' %}
+              <form method="POST" action="/marketing/idea/{{ idea.id }}/approve">
+                <button type="submit" class="btn-approve">Approve</button>
+              </form>
+              <form method="POST" action="/marketing/idea/{{ idea.id }}/dismiss">
+                <button type="submit" class="btn-dismiss">Dismiss</button>
+              </form>
+            {% else %}
+              <form method="POST" action="/marketing/idea/{{ idea.id }}/dismiss">
+                <button type="submit" class="btn-dismiss">Dismiss</button>
+              </form>
+            {% endif %}
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <div class="empty-state">
+      <div class="empty-icon">&#x1F4A1;</div>
+      <h3>No ideas yet</h3>
+      <p>Ideas appear here after the story spotter runs. You can also jot a stray thought below.</p>
+    </div>
+  {% endif %}
+
+  <div class="note-box">
+    <h3>Quick note</h3>
+    <form method="POST" action="/marketing/note">
+      <textarea name="note" placeholder="Jot a stray thought or story idea..."></textarea>
+      <br>
+      <button type="submit" class="note-submit">Save note</button>
+    </form>
+  </div>
+
+</div>
+</body>
+</html>

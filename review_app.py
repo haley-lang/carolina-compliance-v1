@@ -6894,6 +6894,93 @@ def audit_checklist(audit_id):
     })
 
 
+# ── Marketing ────────────────────────────────────────────────────────────────
+
+from marketing_constants import (
+    MARKETING_BASE_ID,
+    MARKETING_IDEAS_TABLE_ID, MI_IDEA, MI_WHY_STORY, MI_AUDIENCE, MI_TOPIC,
+    MI_STATUS, MI_SIGNAL_LINK, MI_STATUS_NEW, MI_STATUS_APPROVED, MI_STATUS_DISMISSED,
+    MARKETING_SIGNALS_TABLE_ID, MS_SUMMARY, MS_SOURCE, MS_CREATED_AT,
+)
+
+
+@app.route("/marketing")
+@login_required
+def marketing_page():
+    ideas = []
+    error = None
+    try:
+        api = _api()
+        tbl = api.table(MARKETING_BASE_ID, MARKETING_IDEAS_TABLE_ID)
+        records = tbl.all(
+            formula="OR({Status}='New',{Status}='Approved')",
+            sort=[{"field": MI_STATUS, "direction": "asc"}],
+        )
+        for rec in records:
+            f = rec.get("fields", {})
+            ideas.append({
+                "id": rec["id"],
+                "idea": f.get(MI_IDEA, ""),
+                "why_story": f.get(MI_WHY_STORY, ""),
+                "audience": f.get(MI_AUDIENCE, ""),
+                "topic": f.get(MI_TOPIC, ""),
+                "status": f.get(MI_STATUS, MI_STATUS_NEW),
+            })
+    except Exception as exc:
+        app.logger.warning("marketing_page ideas fetch failed: %s", exc)
+        error = "Could not load ideas — Airtable may be unavailable."
+
+    return render_template("marketing.html", ideas=ideas, error=error)
+
+
+@app.route("/marketing/idea/<record_id>/approve", methods=["POST"])
+@login_required
+def marketing_approve_idea(record_id):
+    try:
+        api = _api()
+        tbl = api.table(MARKETING_BASE_ID, MARKETING_IDEAS_TABLE_ID)
+        tbl.update(record_id, {MI_STATUS: MI_STATUS_APPROVED})
+    except Exception as exc:
+        app.logger.warning("marketing approve failed: %s", exc)
+        flash("Could not approve idea.", "warning")
+    return redirect(url_for("marketing_page"))
+
+
+@app.route("/marketing/idea/<record_id>/dismiss", methods=["POST"])
+@login_required
+def marketing_dismiss_idea(record_id):
+    try:
+        api = _api()
+        tbl = api.table(MARKETING_BASE_ID, MARKETING_IDEAS_TABLE_ID)
+        tbl.update(record_id, {MI_STATUS: MI_STATUS_DISMISSED})
+    except Exception as exc:
+        app.logger.warning("marketing dismiss failed: %s", exc)
+        flash("Could not dismiss idea.", "warning")
+    return redirect(url_for("marketing_page"))
+
+
+@app.route("/marketing/note", methods=["POST"])
+@login_required
+def marketing_add_note():
+    note = (request.form.get("note") or "").strip()
+    if note:
+        try:
+            api = _api()
+            tbl = api.table(MARKETING_BASE_ID, MARKETING_IDEAS_TABLE_ID)
+            tbl.create({
+                MI_IDEA: note,
+                MI_WHY_STORY: "Quick note from Haley",
+                MI_AUDIENCE: "GC",
+                MI_TOPIC: "Certificate mistakes",
+                MI_STATUS: MI_STATUS_NEW,
+            })
+            flash("Note saved.", "success")
+        except Exception as exc:
+            app.logger.warning("marketing note save failed: %s", exc)
+            flash("Could not save note.", "warning")
+    return redirect(url_for("marketing_page"))
+
+
 if __name__ == "__main__":
     app.run(debug=True, port=5050)
 
