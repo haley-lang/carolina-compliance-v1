@@ -140,6 +140,39 @@
   <p class="pulse-last-check">Last data pull: {{ last_check }}</p>
   {% endif %}
 
+  {# ── Needs you ─────────────────────────────────────────────────────── #}
+  {% set _wh = pulse_data.waiting_on_haley %}
+  {% set _au = pulse_data.audits %}
+  <div class="pulse-section pulse-section--full" style="margin-bottom:20px">
+    <div class="pulse-section-header">
+      <h2 class="pulse-section-title">Needs you</h2>
+    </div>
+    <div class="pulse-section-body" style="padding:12px 18px">
+      <div class="pulse-action-items">
+        <a href="/queue" class="pulse-action-item" style="text-decoration:none">
+          <span class="pulse-action-count {% if _wh.queue_count > 0 %}pulse-action-count--warn{% else %}pulse-action-count--zero{% endif %}">{{ _wh.queue_count or 0 }}</span>
+          <span class="pulse-action-label">Certs to review</span>
+        </a>
+        <a href="/follow-ups" class="pulse-action-item" style="text-decoration:none">
+          <span class="pulse-action-count {% if _wh.unsent_drafts > 0 %}pulse-action-count--warn{% else %}pulse-action-count--zero{% endif %}">{{ _wh.unsent_drafts or 0 }}</span>
+          <span class="pulse-action-label">Emails to send</span>
+        </a>
+        <a href="/follow-ups?stage=sent" class="pulse-action-item" style="text-decoration:none">
+          <span class="pulse-action-count {% if (_wh.replies_waiting | default(0)) > 0 %}pulse-action-count--warn{% else %}pulse-action-count--zero{% endif %}">{{ _wh.replies_waiting | default(0) }}</span>
+          <span class="pulse-action-label">Replies waiting</span>
+        </a>
+        <a href="/audits" class="pulse-action-item" style="text-decoration:none">
+          <span class="pulse-action-count {% if _au.nearest_due_days is not none and _au.nearest_due_days <= 14 %}pulse-action-count--warn{% else %}pulse-action-count--zero{% endif %}">{{ _au.nearest_due_days if _au.nearest_due_days is not none else '—' }}</span>
+          <span class="pulse-action-label">Days until audit due</span>
+        </a>
+        <a href="/marketing" class="pulse-action-item" style="text-decoration:none">
+          <span class="pulse-action-count {% if (_wh.marketing_new | default(0)) > 0 %}pulse-action-count--warn{% else %}pulse-action-count--zero{% endif %}">{{ _wh.marketing_new | default(0) }}</span>
+          <span class="pulse-action-label">Marketing ideas to approve</span>
+        </a>
+      </div>
+    </div>
+  </div>
+
   <div class="pulse-grid">
 
     {# ══════════════════════════════════════════════════════════════════

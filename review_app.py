@@ -5128,6 +5128,19 @@ def pulse():
             waiting_on_haley["no_contact"] = len(no_contact)
         except Exception:
             pass
+        try:
+            em_replies = api.table(base_id, EMAIL_MESSAGES_TABLE_ID).all(
+                formula="{Status}='Sent by Haley'", fields=["Status"])
+            waiting_on_haley["replies_waiting"] = len(em_replies)
+        except Exception:
+            waiting_on_haley["replies_waiting"] = 0
+        try:
+            from marketing_constants import MARKETING_BASE_ID, MARKETING_IDEAS_TABLE_ID, MI_STATUS, MI_STATUS_NEW
+            mkt_tbl = _api().table(MARKETING_BASE_ID, MARKETING_IDEAS_TABLE_ID)
+            mkt_new = mkt_tbl.all(formula=f"{{{MI_STATUS}}}='{MI_STATUS_NEW}'", fields=[MI_STATUS])
+            waiting_on_haley["marketing_new"] = len(mkt_new)
+        except Exception:
+            waiting_on_haley["marketing_new"] = 0
     except Exception as exc:
         app.logger.warning("pulse waiting_on_haley error: %s", exc)
 
