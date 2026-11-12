@@ -51,7 +51,7 @@
     <a href="/" class="nav-link">Home</a>
     <a href="/queue" class="nav-link">Review</a>
     <a href="/follow-ups" class="nav-link">Follow-ups{% set _ec = email_draft_count() %}{% if _ec > 0 %}<span class="nav-badge">{{ _ec }}</span>{% endif %}</a>
-    <a href="/audits" class="nav-link">Audits</a>
+    <a href="/audits" class="nav-link nav-link--active">Audits</a>
     <a href="/marketing" class="nav-link">Marketing</a>
     <a href="/logout" class="btn btn-gold btn-sm">Sign out</a>
   </div>
