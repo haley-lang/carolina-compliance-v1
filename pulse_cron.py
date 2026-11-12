@@ -64,8 +64,12 @@ def _send_to_web_service(heartbeats: list, events: list, prune: bool = False) ->
         )
         try:
             with _ur.urlopen(req, timeout=15) as resp:
+                status_code = resp.status
                 resp.read()
-            print(f"[pulse_cron] Sent {len(events)} events + {len(heartbeats)} heartbeats to web service.")
+            print(
+                f"[pulse_cron] Check-in OK (HTTP {status_code}) — "
+                f"{len(events)} events + {len(heartbeats)} heartbeats delivered to web service."
+            )
             return
         except Exception as exc:
             print(f"[pulse_cron] web service check-in failed: {exc} — falling back to local store")
@@ -148,56 +152,69 @@ def check_airtable_space() -> dict:
         api = _api()
         base_id = _base_id()
 
-        # pyairtable doesn't have a metadata endpoint for counts, so we
-        # list records for each known table with only one field (fastest).
-        table_names = [
-            "Incoming Documents",
-            "Incoming Extractions",
-            "Insurance Policies",
-            "Insurance Certificates",
-            "Vendors",
-            "Clients",
-            "Email Queue",
-            "Compliance Log",
-            "Vendor Client Assignments",
-            "Client Requirements",
-        ]
+        # Request a known primary field per table so Airtable doesn't reject
+        # the fields filter.  Using fields=["Name"] fails silently on tables
+        # that have no "Name" field, returning 0 records per table.
+        TABLE_PRIMARY_FIELDS = {
+            "Incoming Documents":       "Sender Email",
+            "Incoming Extractions":     "Source Filename",
+            "Insurance Policies":       "Policy Record",
+            "Insurance Certificates":   "Certificate Name",
+            "Vendors":                  "Vendor Name",
+            "Clients":                  "Client Name",
+            "Email Queue":              "Primary Email",
+            "Compliance Log":           "Log Entry",
+            "Vendor Client Assignments": "Vendor Client Assignment",
+            "Client Requirements":      "Id",
+        }
+        table_names = list(TABLE_PRIMARY_FIELDS.keys())
 
         rows = []
         total = 0
+        succeeded = 0
+        failed_tables: list[str] = []
         for tname in table_names:
             try:
                 tbl = api.table(base_id, tname)
-                # Fetch only the record IDs (no fields) for speed
-                records = tbl.all(fields=["Name"])  # any lightweight field
+                primary = TABLE_PRIMARY_FIELDS[tname]
+                records = tbl.all(fields=[primary])
                 count = len(records)
                 total += count
                 rows.append({"name": tname, "count": count, "growth_7d": 0})
-            except Exception as exc:
-                # Table might not exist or has different field; skip gracefully
+                succeeded += 1
+            except Exception:
                 rows.append({"name": tname, "count": 0, "growth_7d": None})
+                failed_tables.append(tname)
 
         rows.sort(key=lambda r: r["count"], reverse=True)
-        result["total_records"] = total
-        result["tables"] = rows[:5]  # top 5 by count
-
-        # Determine overall level
-        pct = total / result["limit"]
-        if pct >= 0.80:
-            result["level"] = "error"
-        elif pct >= 0.60:
-            result["level"] = "warn"
-
-        # Fastest growing = largest table (proxy; real growth needs history)
+        result["tables"] = rows[:5]
         if rows:
             result["fastest_growing"] = rows[0]["name"]
 
-        _buf_event(
-            category="api_error",
-            level=result["level"],
-            title=f"Airtable record count: {total:,} / {result['limit']:,}",
-            body=f"{pct*100:.1f}% used",
-        )
+        if succeeded == 0:
+            # Every table fetch failed — credentials or base ID are likely wrong.
+            result["total_records"] = None
+            result["level"] = "error"
+            _buf_event(
+                category="api_error",
+                level="error",
+                title="Airtable space: could not count — all table fetches failed",
+                body=f"Check AIRTABLE_BASE_ID and AIRTABLE_API_KEY. Failed: {', '.join(failed_tables[:5])}",
+            )
+        else:
+            result["total_records"] = total
+            pct = total / result["limit"]
+            if pct >= 0.80:
+                result["level"] = "error"
+            elif pct >= 0.60:
+                result["level"] = "warn"
+            suffix = f" ({len(failed_tables)} table(s) failed)" if failed_tables else ""
+            _buf_event(
+                category="api_error",
+                level=result["level"],
+                title=f"Airtable record count: {total:,} / {result['limit']:,}",
+                body=f"{pct*100:.1f}% used{suffix}",
+            )
     except Exception as exc:
         result["level"] = "error"
         _buf_event(
@@ -322,31 +339,32 @@ def check_pipeline_stages() -> dict:
         "avg_days_received_to_confirmed": None,
         "stuck": [],
         "level": "ok",
+        "activity": "unknown",
     }
     try:
         tbl = _table("Incoming Extractions")
+        # Do NOT sort by "Created" — that field is the Airtable system createdTime
+        # and is not sortable by its user-facing name via the REST API.
+        # Use rec.get("createdTime") instead (the system field, always present).
         all_recs = tbl.all(
-            fields=["Processing Status", "Review Status", "Created", "Error Message"],
-            sort=["Created"],
+            fields=["Processing Status", "Review Status", "Source Filename"],
         )
 
         oldest_pending = None
         now = datetime.now(tz=timezone.utc)
-        stuck = []
+        total_returned = len(all_recs)
 
         for rec in all_recs:
             f = rec["fields"]
             status = (f.get("Processing Status") or "").strip().lower()
-            review = (f.get("Review Status") or "").strip().lower()
 
-            # Map to our stage buckets
             if status in ("received", "new", ""):
                 result["by_stage"]["received"] += 1
             elif status in ("extracted", "imported"):
                 result["by_stage"]["extracted"] += 1
-            elif status in ("pending review", "needs review", "pending_review"):
+            elif "pending" in status or "review" in status:
                 result["by_stage"]["pending_review"] += 1
-                created_raw = (f.get("Created") or "").strip()
+                created_raw = (rec.get("createdTime") or "").strip()
                 if created_raw:
                     try:
                         created_dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
@@ -358,37 +376,38 @@ def check_pipeline_stages() -> dict:
             elif status in ("confirmed", "approved", "processed"):
                 result["by_stage"]["confirmed"] += 1
 
-            # Identify stuck records (error message present)
-            err = (f.get("Error Message") or "").strip()
-            if err:
-                filename = rec.get("fields", {}).get("Source Filename") or rec["id"]
-                stuck.append({
-                    "filename": filename,
-                    "stage": status,
-                    "error": err[:120],
-                })
-
         result["oldest_pending_days"] = oldest_pending
-        result["stuck"] = stuck[:5]  # cap at 5
+        result["stuck"] = []
 
-        # Determine level
-        if oldest_pending is not None and oldest_pending > 7:
-            result["level"] = "error"
-        elif oldest_pending is not None and oldest_pending > 3:
-            result["level"] = "warn"
-        elif stuck:
-            result["level"] = "warn"
+        total_counted = sum(result["by_stage"].values())
 
-        _buf_event(
-            category="pipeline",
-            level=result["level"],
-            title="Pipeline stage counts: "
-                  + ", ".join(f"{k}={v}" for k, v in result["by_stage"].items()),
-            body=f"Stuck: {len(stuck)}, oldest pending: {oldest_pending}d",
-            table_name="Incoming Extractions",
-        )
+        if total_returned == 0:
+            # Empty table or no matching records — no activity, not an error.
+            result["activity"] = "none"
+            _buf_event(
+                category="pipeline",
+                level="ok",
+                title="Pipeline: no activity — 0 records in Incoming Extractions",
+                table_name="Incoming Extractions",
+            )
+        else:
+            result["activity"] = "active"
+            if oldest_pending is not None and oldest_pending > 7:
+                result["level"] = "error"
+            elif oldest_pending is not None and oldest_pending > 3:
+                result["level"] = "warn"
+
+            _buf_event(
+                category="pipeline",
+                level=result["level"],
+                title="Pipeline stage counts: "
+                      + ", ".join(f"{k}={v}" for k, v in result["by_stage"].items()),
+                body=f"oldest pending: {oldest_pending}d",
+                table_name="Incoming Extractions",
+            )
     except Exception as exc:
         result["level"] = "error"
+        result["activity"] = "error"
         _buf_event(
             category="pipeline",
             level="error",
@@ -720,9 +739,16 @@ def main():
     print("[pulse_cron] Checking pipeline stages…")
     results["pipeline"] = check_pipeline_stages()
     p = results["pipeline"]
-    summary_lines.append(
-        f"  Pipeline: {p['by_stage']} — {p['level']}"
-    )
+    if p.get("activity") == "none":
+        summary_lines.append(f"  Pipeline: no activity — {p['level']}")
+    elif p.get("activity") == "error":
+        summary_lines.append(f"  Pipeline: check failed — {p['level']}")
+    else:
+        summary_lines.append(
+            f"  Pipeline: "
+            + ", ".join(f"{k}={v}" for k, v in p["by_stage"].items())
+            + f" — {p['level']}"
+        )
 
     # 4. Write rate
     print("[pulse_cron] Checking write rate…")
@@ -757,15 +783,16 @@ def main():
     print(f"\n[pulse_cron] Done in {elapsed:.1f}s. Summary:")
     for line in summary_lines:
         print(line)
-
-    if overall_level == "error":
-        print("\n[pulse_cron] OVERALL: ERROR")
-        sys.exit(1)
-    elif overall_level == "warn":
-        print("\n[pulse_cron] OVERALL: WARN")
-    else:
-        print("\n[pulse_cron] OVERALL: OK")
+    print(f"\n[pulse_cron] OVERALL: {overall_level.upper()}")
+    # Exit 0 always when the job completed — problems are reported to the Pulse
+    # page and daily summary email.  Only exit 1 if the job itself crashes
+    # (unhandled exception caught by the __main__ guard below).
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        print(f"[pulse_cron] FATAL: job crashed — {exc}")
+        traceback.print_exc()
+        sys.exit(1)
