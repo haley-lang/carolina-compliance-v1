@@ -127,6 +127,61 @@
       font-size: .82rem; color: var(--secondary);
       background: var(--bg); padding: 3px 10px; border-radius: 20px;
     }
+    .btn-generate {
+      background: var(--navy); color: var(--gold);
+      border: none; border-radius: 6px;
+      padding: 6px 14px; font-size: .82rem; font-weight: 600;
+      cursor: pointer; white-space: nowrap;
+    }
+    .btn-generate:hover { opacity: .88; }
+    .content-drafts {
+      grid-column: 1 / -1;
+      border-top: 1px solid var(--border);
+      margin-top: 8px; padding-top: 14px;
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    .content-drafts-heading {
+      font-size: .78rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .06em; color: var(--secondary); margin: 0 0 8px;
+    }
+    .draft-item {
+      border: 1px solid var(--border); border-radius: 8px;
+      padding: 12px 16px; background: var(--bg);
+    }
+    .draft-header {
+      display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;
+    }
+    .tag-platform {
+      background: var(--navy); color: var(--white);
+      padding: 2px 10px; border-radius: 20px;
+      font-size: .72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
+    }
+    .tag-guard-pass { background: #dcfce7; color: #15803d; padding: 2px 8px; border-radius: 20px; font-size: .72rem; font-weight: 700; }
+    .tag-guard-fail { background: #fee2e2; color: #b91c1c; padding: 2px 8px; border-radius: 20px; font-size: .72rem; font-weight: 700; }
+    .tag-billy      { background: #fef9c3; color: #854d0e; padding: 2px 8px; border-radius: 20px; font-size: .72rem; font-weight: 700; }
+    .draft-text {
+      font-size: .86rem; color: var(--navy); line-height: 1.5;
+      margin: 0 0 8px; white-space: pre-line;
+    }
+    .draft-hooks-toggle {
+      background: none; border: none; padding: 0;
+      font-size: .78rem; color: var(--blue); cursor: pointer; font-weight: 600;
+      text-decoration: underline; text-underline-offset: 2px;
+    }
+    .draft-hooks {
+      margin-top: 8px; padding: 10px 12px;
+      background: var(--white); border: 1px solid var(--border); border-radius: 6px;
+      font-size: .82rem; color: var(--secondary); line-height: 1.6;
+    }
+    .draft-hooks .hook-label {
+      font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
+      color: var(--secondary); margin-bottom: 4px;
+    }
+    .draft-hooks .hook-line { color: var(--navy); font-size: .84rem; margin-bottom: 4px; }
+    .draft-link {
+      display: inline-block; margin-top: 8px;
+      font-size: .78rem; color: var(--blue); word-break: break-all;
+    }
   </style>
 </head>
 <body>
@@ -135,15 +190,12 @@
     <img src="{{ url_for('static', filename='ccs_logo_dark.svg') }}" alt="CCS">
   </a>
   <div class="topnav-links">
-    <a href="/pulse"       class="nav-link">Pulse</a>
-    <a href="/queue"       class="nav-link">Queue</a>
-    <a href="/gaps"        class="nav-link">Gaps</a>
-    <a href="/requests"    class="nav-link">Requests</a>
-    <a href="/audits"      class="nav-link">Audits</a>
-    <a href="/corrections" class="nav-link">Corrections</a>
-    <a href="/emails"      class="nav-link">Emails{% set _ec = email_draft_count() %}{% if _ec > 0 %}<span class="nav-badge">{{ _ec }}</span>{% endif %}</a>
-    <a href="/marketing"   class="nav-link nav-link--active">Marketing</a>
-    <a href="/logout"      class="btn btn-gold btn-sm">Sign out</a>
+    <a href="/" class="nav-link">Home</a>
+    <a href="/queue" class="nav-link">Review</a>
+    <a href="/follow-ups" class="nav-link">Follow-ups{% set _ec = email_draft_count() %}{% if _ec > 0 %}<span class="nav-badge">{{ _ec }}</span>{% endif %}</a>
+    <a href="/audits" class="nav-link">Audits</a>
+    <a href="/marketing" class="nav-link nav-link--active">Marketing</a>
+    <a href="/logout" class="btn btn-gold btn-sm">Sign out</a>
   </div>
 </nav>
 
@@ -202,11 +254,56 @@
                 <button type="submit" class="btn-dismiss">Dismiss</button>
               </form>
             {% else %}
+              {% if idea.status == 'Approved' and not idea.content %}
+                <form method="POST" action="/marketing/idea/{{ idea.id }}/generate">
+                  <button type="submit" class="btn-generate">Generate content set</button>
+                </form>
+              {% endif %}
               <form method="POST" action="/marketing/idea/{{ idea.id }}/dismiss">
                 <button type="submit" class="btn-dismiss">Dismiss</button>
               </form>
             {% endif %}
           </div>
+
+          {% if idea.content %}
+            <div class="content-drafts">
+              <p class="content-drafts-heading">Content Drafts ({{ idea.content|length }})</p>
+              {% for draft in idea.content %}
+                <div class="draft-item">
+                  <div class="draft-header">
+                    <span class="tag-platform">{{ draft.platform }}</span>
+                    {% if draft.guard_result and draft.guard_result.startswith('PASS') %}
+                      <span class="tag-guard-pass">Guard: Pass</span>
+                    {% else %}
+                      <span class="tag-guard-fail">Guard: Fail</span>
+                    {% endif %}
+                    {% if draft.needs_billy %}
+                      <span class="tag-billy">Needs Billy's OK</span>
+                    {% endif %}
+                  </div>
+                  <p class="draft-text">{{ draft.draft_text }}</p>
+                  {% if draft.hooks %}
+                    <button type="button" class="draft-hooks-toggle"
+                            onclick="this.nextElementSibling.style.display = this.nextElementSibling.style.display === 'none' ? 'block' : 'none'">
+                      Show hooks
+                    </button>
+                    <div class="draft-hooks" style="display:none;">
+                      <div class="hook-label">Hook options</div>
+                      {% for hook in draft.hooks.split('\n---\n') %}
+                        {% if hook.strip() %}
+                          <div class="hook-line">{{ loop.index }}. {{ hook.strip() }}</div>
+                        {% endif %}
+                      {% endfor %}
+                    </div>
+                  {% endif %}
+                  {% if draft.tracked_link %}
+                    <a href="{{ draft.tracked_link }}" class="draft-link" target="_blank" rel="noopener">{{ draft.tracked_link }}</a>
+                  {% endif %}
+                </div>
+              {% endfor %}
+            </div>
+          {% endif %}
+
         </div>
       {% endfor %}
     </div>

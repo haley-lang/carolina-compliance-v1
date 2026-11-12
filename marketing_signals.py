@@ -4,14 +4,11 @@ Reads existing Airtable activity and surfaces anonymized events
 that could become content stories.
 
 Sources:
-  - Corrections (field changes + Haley's notes)
-  - Gaps (repeated gap types across certificates)
-  - Audits (completed audit work)
-  - Caught expirations (policies about to lapse that were caught)
-  - Milestone moments (first time vendor has every cert on file)
-
-Each signal is returned as a dict ready to write to Marketing Signals.
-Caller (marketing_story_spotter.py) writes them and calls Claude.
+  - Corrections (field changes + Haley's notes) — Corrections table
+  - Gaps (repeated coverage-type gaps across requests) — Gap Requests table
+  - Audits (recently created audit workspaces) — Audits table
+  - Caught expirations (Expiration Status = 'Expiring Soon') — Insurance Policies
+  - Milestone moments (Compliance Status flipped to 'Matches Requirements') — Vendors
 """
 from __future__ import annotations
 import os
@@ -29,22 +26,24 @@ from anonymizer import anonymize
 
 log = logging.getLogger(__name__)
 
-# IDs from review_app.py
-CORRECTIONS_TABLE_ID  = "tblh6NTQikjzl8FFu"
-GAP_REQUESTS_TABLE_ID = "tbleY5UzcLYZFZFKF"
-AUDITS_TABLE_ID       = "tblbaTMKuM6yWeVjL"
-VENDORS_TABLE_ID      = "tblsOphSd5DKSZEro"
-INSURANCE_POLICIES_TABLE_ID = "tblpPcmm5ANE0bMNB"
+BASE_ID = MARKETING_BASE_ID  # all tables live in the same base
 
-LOOKBACK_DAYS = 14  # how far back to scan for signals
+# Table IDs — real IDs from review_app.py
+CORRECTIONS_TABLE_ID        = "tblh6NTQikjzl8FFu"
+GAP_REQUESTS_TABLE_ID       = "tbleY5UzcLYZFZFKF"
+AUDITS_TABLE_ID             = "tblbaTMKuM6yWeVjL"
+INSURANCE_POLICIES_TABLE_ID = "tblpPcmm5ANE0bMNB"
+VENDORS_TABLE_ID            = "tblsOphSd5DKSZEro"
+
+LOOKBACK_DAYS = 14
 
 
 def _api() -> pyairtable.Api:
     return pyairtable.Api(os.environ["AIRTABLE_API_KEY"])
 
 
-def _tbl(api: pyairtable.Api, table_id: str):
-    return api.table(MARKETING_BASE_ID, table_id)
+def _tbl(table_id: str):
+    return _api().table(BASE_ID, table_id)
 
 
 def _since_ts() -> str:
@@ -54,92 +53,98 @@ def _since_ts() -> str:
 
 # ── Signal gatherers ──────────────────────────────────────────────────────────
 
-def gather_correction_signals(api: pyairtable.Api) -> list[dict]:
+def gather_correction_signals() -> list[dict]:
     """
-    Scan recent Corrections rows.
+    Recent Corrections rows with a reviewer note.
     Every correction where Haley left a note is a potential story
     (shows the kind of mistake the system catches and why it matters).
     """
     signals = []
-    tbl = _api().table(MARKETING_BASE_ID, CORRECTIONS_TABLE_ID)
-    formula = f"IS_AFTER({{Created At}}, '{_since_ts()}')"
+    formula = f"AND(IS_AFTER({{Corrected At}}, '{_since_ts()}'), {{Why (Haley's note)}}!='')"
     try:
-        records = tbl.all(formula=formula, fields=["Why (Haley's note)", "Field", "Old Value", "New Value", "Created At"])
+        records = _tbl(CORRECTIONS_TABLE_ID).all(
+            formula=formula,
+            fields=["Why (Haley's note)", "Field", "Old Value", "New Value", "Corrected At"],
+        )
     except Exception as exc:
         log.warning("correction signals fetch failed: %s", exc)
         return signals
 
     for rec in records:
         f = rec.get("fields", {})
-        note = (f.get("Why (Haley's note)") or "").strip()
+        note  = (f.get("Why (Haley's note)") or "").strip()
         field = (f.get("Field") or "").strip()
         if not note and not field:
             continue
-        raw = f"Field: {field}. Note: {note}"
-        summary = anonymize(raw)
+        raw = f"Field corrected: {field}. Reviewer note: {note}"
         signals.append({
             MS_SOURCE: "correction",
-            MS_SUMMARY: summary,
+            MS_SUMMARY: anonymize(raw),
             MS_RAW_REF_ID: rec["id"],
-            MS_CREATED_AT: f.get("Created At") or datetime.now(timezone.utc).isoformat(),
+            MS_CREATED_AT: f.get("Corrected At") or datetime.now(timezone.utc).isoformat(),
         })
     return signals
 
 
-def gather_gap_signals(api: pyairtable.Api) -> list[dict]:
+def gather_gap_signals() -> list[dict]:
     """
-    Scan Gap Requests for repeated gap types.
-    When the same gap (e.g. missing WC) shows up 3+ times in a window,
-    that pattern is a teachable moment for a GC audience.
+    Count gap requests by Coverage Type over the lookback window.
+    When the same coverage type shows up 3+ times it's a teachable pattern.
     """
     signals = []
-    tbl = _api().table(MARKETING_BASE_ID, GAP_REQUESTS_TABLE_ID)
     formula = f"IS_AFTER({{Created At}}, '{_since_ts()}')"
     try:
-        records = tbl.all(formula=formula, fields=["Gap Type", "Policy Type", "Client", "Created At"])
+        records = _tbl(GAP_REQUESTS_TABLE_ID).all(
+            formula=formula,
+            fields=["Coverage Type", "Created At"],
+        )
     except Exception as exc:
         log.warning("gap signals fetch failed: %s", exc)
         return signals
 
     gap_counts: Counter = Counter()
     for rec in records:
-        f = rec.get("fields", {})
-        gap_type = (f.get("Gap Type") or f.get("Policy Type") or "").strip()
-        if gap_type:
-            gap_counts[gap_type] += 1
+        cov = (rec.get("fields", {}).get("Coverage Type") or "").strip()
+        if cov:
+            gap_counts[cov] += 1
 
-    for gap_type, count in gap_counts.items():
+    for cov_type, count in gap_counts.items():
         if count >= 3:
             summary = anonymize(
-                f"Gap type '{gap_type}' appeared {count} times across recent certificates."
+                f"Coverage gap type '{cov_type}' appeared {count} times "
+                f"across recent certificate requests in the last {LOOKBACK_DAYS} days."
             )
             signals.append({
                 MS_SOURCE: "gap",
                 MS_SUMMARY: summary,
-                MS_RAW_REF_ID: f"gap:{gap_type}",
+                MS_RAW_REF_ID: f"gap:{cov_type}",
                 MS_CREATED_AT: datetime.now(timezone.utc).isoformat(),
             })
     return signals
 
 
-def gather_audit_signals(api: pyairtable.Api) -> list[dict]:
+def gather_audit_signals() -> list[dict]:
     """
-    Scan completed audits.
-    A completed audit is a milestone: the GC had everything ready.
+    Recent audit workspace creations. Each audit created = a GC was preparing.
     """
     signals = []
-    tbl = _api().table(MARKETING_BASE_ID, AUDITS_TABLE_ID)
-    formula = f"AND(IS_AFTER({{Created At}}, '{_since_ts()}'), {{Status}}='Complete')"
+    formula = f"IS_AFTER({{Created At}}, '{_since_ts()}')"
     try:
-        records = tbl.all(formula=formula, fields=["Client", "Status", "Notes", "Created At"])
+        records = _tbl(AUDITS_TABLE_ID).all(
+            formula=formula,
+            fields=["Audit Name", "Audit Type", "Created At"],
+        )
     except Exception as exc:
         log.warning("audit signals fetch failed: %s", exc)
         return signals
 
     for rec in records:
         f = rec.get("fields", {})
-        notes = anonymize((f.get("Notes") or "").strip())
-        summary = f"Audit completed successfully. {notes}".strip()
+        audit_type = (f.get("Audit Type") or "").strip()
+        summary = anonymize(
+            f"Audit workspace started for {audit_type} coverage audit. "
+            "Certificates pulled and reviewed for the audit window."
+        )
         signals.append({
             MS_SOURCE: "audit",
             MS_SUMMARY: summary,
@@ -149,22 +154,22 @@ def gather_audit_signals(api: pyairtable.Api) -> list[dict]:
     return signals
 
 
-def gather_expiration_signals(api: pyairtable.Api) -> list[dict]:
+def gather_expiration_signals() -> list[dict]:
     """
-    Scan recently caught expirations (policies with Expiration Status set
-    to a warning threshold in the last LOOKBACK_DAYS window).
-    Shows the system's proactive value.
+    Policies recently flagged as Expiring Soon — the system caught it proactively.
     """
     signals = []
-    tbl = _api().table(MARKETING_BASE_ID, INSURANCE_POLICIES_TABLE_ID)
     formula = (
         f"AND("
         f"IS_AFTER(LAST_MODIFIED_TIME(), '{_since_ts()}'),"
-        f"OR({{Expiration Status}}='30 Days', {{Expiration Status}}='7 Days')"
+        f"{{Expiration Status}}='Expiring Soon'"
         f")"
     )
     try:
-        records = tbl.all(formula=formula, fields=["Policy Type", "Expiration Date", "Expiration Status"])
+        records = _tbl(INSURANCE_POLICIES_TABLE_ID).all(
+            formula=formula,
+            fields=["Policy Type", "Expiration Date", "Expiration Status"],
+        )
     except Exception as exc:
         log.warning("expiration signals fetch failed: %s", exc)
         return signals
@@ -172,11 +177,10 @@ def gather_expiration_signals(api: pyairtable.Api) -> list[dict]:
     for rec in records:
         f = rec.get("fields", {})
         pol_type = (f.get("Policy Type") or "policy").strip()
-        exp_status = (f.get("Expiration Status") or "").strip()
         exp_date = (f.get("Expiration Date") or "").strip()
         summary = anonymize(
-            f"Caught expiring {pol_type} ({exp_status} notice, expires {exp_date}). "
-            "Vendor notified with time to renew."
+            f"Caught expiring {pol_type} certificate (expires {exp_date}). "
+            "Vendor notified with enough lead time to renew."
         )
         signals.append({
             MS_SOURCE: "milestone",
@@ -187,27 +191,31 @@ def gather_expiration_signals(api: pyairtable.Api) -> list[dict]:
     return signals
 
 
-def gather_milestone_signals(api: pyairtable.Api) -> list[dict]:
+def gather_milestone_signals() -> list[dict]:
     """
-    Scan Vendors for 'first time fully on file' moments:
-    vendors whose compliance status recently flipped to fully on file.
+    Vendors recently reaching 'Matches Requirements' — fully on file milestone.
     """
     signals = []
-    tbl = _api().table(MARKETING_BASE_ID, VENDORS_TABLE_ID)
     formula = (
         f"AND("
         f"IS_AFTER(LAST_MODIFIED_TIME(), '{_since_ts()}'),"
-        f"{{Compliance Status}}='On File'"
+        f"{{Compliance Status}}='Matches Requirements'"
         f")"
     )
     try:
-        records = tbl.all(formula=formula, fields=["Compliance Status", "Vendor Name"])
+        records = _tbl(VENDORS_TABLE_ID).all(
+            formula=formula,
+            fields=["Compliance Status", "Vendor Name"],
+        )
     except Exception as exc:
         log.warning("milestone signals fetch failed: %s", exc)
         return signals
 
     for rec in records:
-        summary = anonymize("A contractor got every required certificate on file. First time fully on file.")
+        summary = anonymize(
+            "A contractor got every required certificate on file and meets requirements. "
+            "First time the system shows them fully on file."
+        )
         signals.append({
             MS_SOURCE: "milestone",
             MS_SUMMARY: summary,
@@ -217,13 +225,12 @@ def gather_milestone_signals(api: pyairtable.Api) -> list[dict]:
     return signals
 
 
-# ── Dedup against already-stored signals ─────────────────────────────────────
+# ── Dedup ─────────────────────────────────────────────────────────────────────
 
-def _existing_ref_ids(api: pyairtable.Api) -> set[str]:
-    """Return all Raw Reference IDs already in Marketing Signals table."""
-    tbl = _api().table(MARKETING_BASE_ID, MARKETING_SIGNALS_TABLE_ID)
+def _existing_ref_ids() -> set[str]:
+    """Return all Raw Reference IDs already in Marketing Signals."""
     try:
-        records = tbl.all(fields=[MS_RAW_REF_ID])
+        records = _tbl(MARKETING_SIGNALS_TABLE_ID).all(fields=[MS_RAW_REF_ID])
         return {r["fields"].get(MS_RAW_REF_ID, "") for r in records if r.get("fields")}
     except Exception as exc:
         log.warning("Could not fetch existing signal IDs: %s", exc)
@@ -234,11 +241,9 @@ def _existing_ref_ids(api: pyairtable.Api) -> set[str]:
 
 def collect_new_signals() -> list[dict]:
     """
-    Gather all signals from all sources, dedup against existing records,
-    and return only the new ones (ready to write to Marketing Signals).
+    Gather all signals, dedup against existing records, return only new ones.
     """
-    api = _api()
-    new_signals: list[dict] = []
+    all_signals: list[dict] = []
     for gatherer in (
         gather_correction_signals,
         gather_gap_signals,
@@ -247,28 +252,29 @@ def collect_new_signals() -> list[dict]:
         gather_milestone_signals,
     ):
         try:
-            new_signals.extend(gatherer(api))
+            all_signals.extend(gatherer())
         except Exception as exc:
-            log.warning("gatherer %s failed: %s", gatherer.__name__, exc)
+            log.warning("gatherer %s raised: %s", gatherer.__name__, exc)
 
-    existing = _existing_ref_ids(api)
-    fresh = [s for s in new_signals if s.get(MS_RAW_REF_ID) not in existing]
-    log.info("Collected %d new signals (%d total, %d already stored)",
-             len(fresh), len(new_signals), len(existing))
+    existing = _existing_ref_ids()
+    fresh = [s for s in all_signals if s.get(MS_RAW_REF_ID) not in existing]
+    log.info(
+        "Signals: %d new of %d gathered (%d already stored)",
+        len(fresh), len(all_signals), len(all_signals) - len(fresh),
+    )
     return fresh
 
 
 def write_signals(signals: list[dict]) -> list[str]:
-    """Write a list of signal dicts to the Marketing Signals table. Returns created record IDs."""
+    """Write signal dicts to Marketing Signals. Returns created record IDs."""
     if not signals:
         return []
-    api = _api()
-    tbl = api.table(MARKETING_BASE_ID, MARKETING_SIGNALS_TABLE_ID)
-    created_ids = []
+    tbl = _tbl(MARKETING_SIGNALS_TABLE_ID)
+    ids = []
     for sig in signals:
         try:
             rec = tbl.create(sig)
-            created_ids.append(rec["id"])
+            ids.append(rec["id"])
         except Exception as exc:
-            log.warning("Failed to write signal: %s", exc)
-    return created_ids
+            log.warning("Failed to write signal %s: %s", sig.get(MS_RAW_REF_ID), exc)
+    return ids
