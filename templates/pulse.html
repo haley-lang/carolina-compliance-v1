@@ -583,8 +583,8 @@
         <span class="pulse-section-status pulse-section-status--{{ audit_level }}">
           <span class="status-dot status-dot--{% if audit_level == 'ok' %}green{% elif audit_level == 'warn' %}amber{% else %}red{% endif %}"></span>
           {% if sec.in_progress == 0 %}No active audits
-          {% elif sec.nearest_due_days is not none and sec.nearest_due_days <= 7 %}Due in {{ sec.nearest_due_days }}d
-          {% else %}{{ sec.in_progress }} in progress{% endif %}
+          {% elif sec.nearest_due_days is not none and sec.nearest_due_days <= 7 %}Due in {{ sec.nearest_due_days }}d — action needed
+          {% else %}{{ sec.in_progress }} active{% endif %}
         </span>
       </div>
       <div class="pulse-section-body">

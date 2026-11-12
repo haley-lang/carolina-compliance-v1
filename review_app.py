@@ -5212,7 +5212,7 @@ def pulse():
             })
         audits_section = {
             "active_audits": active_audits,
-            "in_progress": len([a for a in active_audits if a["status"] in ("draft", "gathering_certs")]),
+            "in_progress": len(active_audits),
             "nearest_due_days": min(
                 (a["days_until_due"] for a in active_audits if a["days_until_due"] is not None),
                 default=None
