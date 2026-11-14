@@ -206,6 +206,55 @@ def _parse_email_metadata(msg) -> dict:
     return {"cc": cc, "message_id": message_id, "body_snippet": body_snippet}
 
 
+# Maps content subtype → file extension for inline COI images that arrive with
+# a Content-ID but no explicit filename (doubly-forwarded Gmail messages).
+_CID_EXT_MAP: dict[str, str] = {
+    "jpeg": "jpg", "jpg": "jpg", "png": "png", "gif": "gif",
+    "tiff": "tif", "bmp": "bmp", "webp": "webp", "pdf": "pdf",
+}
+
+
+def _iter_coi_parts(msg):
+    """Yield (filename, part) for every MIME part that should be treated as a COI attachment.
+
+    Three cases are accepted:
+    1. ``Content-Disposition: attachment`` — standard attachment (filename may be None).
+    2. ``Content-Disposition: inline`` with an explicit filename — Gmail-forwarded images
+       where the original sender embedded the image in-body.
+    3. image/* or application/pdf with a ``Content-ID`` but no filename — these appear in
+       doubly-forwarded emails (e.g. Sub → Contractor → CCS) where the MIME filename is
+       dropped during forwarding. A filename is synthesised from the Content-ID stem and
+       content subtype so the extractor can process the file.
+
+    ``msg.walk()`` already recurses into ``message/rfc822`` wrappers, so nested images
+    inside forwarded-message containers are visited without special-casing here.
+    """
+    for part in msg.walk():
+        content_disposition = part.get_content_disposition() or ""
+        filename = part.get_filename()
+
+        is_explicit_attachment = "attachment" in content_disposition
+        is_inline_file = "inline" in content_disposition and bool(filename)
+
+        if not is_explicit_attachment and not is_inline_file:
+            # Case 3: image/PDF with Content-ID but no filename
+            content_id = part.get("Content-ID", "")
+            if not content_id:
+                continue
+            if part.get_content_maintype() not in ("image", "application"):
+                continue
+            ext = _CID_EXT_MAP.get(part.get_content_subtype())
+            if not ext:
+                continue
+            cid_stem = re.sub(
+                r"[^A-Za-z0-9_\-]", "_",
+                content_id.strip("<>").split("@")[0],
+            )[:40]
+            filename = f"{cid_stem or 'coi'}.{ext}"
+
+        yield filename, part
+
+
 def fetch_unread_emails(server: IMAPClient) -> list[dict]:
     """
     Fetch unread emails from INBOX that have PDF or image attachments.
@@ -267,20 +316,7 @@ def fetch_unread_emails(server: IMAPClient) -> list[dict]:
             staging_status = "Pending Review"
             save_error = None
 
-            for part in msg.walk():
-                content_disposition = part.get_content_disposition() or ""
-                filename = part.get_filename()
-
-                # Accept explicit attachments and inline parts that carry a
-                # filename. Gmail delivers forwarded image attachments as
-                # Content-Disposition: inline when the original sender embedded
-                # them in the email body; without this, every forwarded image
-                # COI is silently dropped as no_attachment.
-                is_explicit_attachment = "attachment" in content_disposition
-                is_inline_file = "inline" in content_disposition and bool(filename)
-                if not is_explicit_attachment and not is_inline_file:
-                    continue
-
+            for filename, part in _iter_coi_parts(msg):
                 found_attachment = True
                 print("[email_monitor] Attachment found: True")
 

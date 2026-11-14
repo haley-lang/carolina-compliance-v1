@@ -3581,6 +3581,7 @@ def gaps_draft_email(vendor_id):
         "ok": True,
         "draft": email_body,
         "subject": subject_em,
+        "to_email": to_email,
         "request_id": gap_id,
         "em_id": em_rec.get("id") or "",
     })

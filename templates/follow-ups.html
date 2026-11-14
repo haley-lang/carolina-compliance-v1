@@ -368,10 +368,36 @@
       <!-- Draft email reveal area -->
       <div class="draft-area" id="draft-{{ v.vendor_id }}" style="padding:0 12px 12px">
         <div class="draft-area-inner">
-          <div class="draft-subject-line" id="draft-subject-{{ v.vendor_id }}" style="display:none; font-size:0.82rem; font-weight:700; color:var(--secondary); margin-bottom:4px; text-transform:uppercase; letter-spacing:0.03em;">Subject: <span class="draft-subject-text"></span></div>
+          <div class="draft-to-row" id="draft-to-row-{{ v.vendor_id }}" style="display:none; font-size:0.82rem; margin-bottom:4px;">
+            <span style="font-weight:700; color:var(--secondary); text-transform:uppercase; letter-spacing:0.03em;">To:</span>
+            <span id="draft-to-{{ v.vendor_id }}" style="margin-left:4px;"></span>
+            <button class="btn btn-sm btn-secondary" onclick="copyDraftTo('{{ v.vendor_id }}')" style="margin-left:8px; padding:1px 8px; font-size:0.75rem;">Copy</button>
+          </div>
+          <div class="draft-subject-line" id="draft-subject-{{ v.vendor_id }}" style="display:none; font-size:0.82rem; font-weight:700; color:var(--secondary); margin-bottom:4px; text-transform:uppercase; letter-spacing:0.03em;">Subject: <span class="draft-subject-text"></span><button class="btn btn-sm btn-secondary" onclick="copyDraftSubject('{{ v.vendor_id }}')" style="margin-left:8px; padding:1px 8px; font-size:0.75rem; font-weight:400; text-transform:none; letter-spacing:0;">Copy</button></div>
           <textarea readonly placeholder="Draft will appear here..."></textarea>
+          <div class="draft-edit-overlay" id="draft-edit-{{ v.vendor_id }}" style="display:none; margin-top:8px; border:1px solid var(--border); border-radius:8px; padding:12px; background:#fafafa;">
+            <div style="margin-bottom:8px;">
+              <label style="font-size:0.8rem; font-weight:700; display:block; margin-bottom:2px;">To</label>
+              <input type="email" id="draft-edit-to-{{ v.vendor_id }}" class="field-input" style="width:100%;">
+            </div>
+            <div style="margin-bottom:8px;">
+              <label style="font-size:0.8rem; font-weight:700; display:block; margin-bottom:2px;">Subject</label>
+              <input type="text" id="draft-edit-subj-{{ v.vendor_id }}" class="field-input" style="width:100%;">
+            </div>
+            <div style="margin-bottom:8px;">
+              <label style="font-size:0.8rem; font-weight:700; display:block; margin-bottom:2px;">Body</label>
+              <textarea id="draft-edit-body-{{ v.vendor_id }}" class="field-input" rows="10" style="width:100%;"></textarea>
+            </div>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <button class="btn btn-sm btn-primary btn-draft-save" data-vendor-id="{{ v.vendor_id }}">Save</button>
+              <button class="btn btn-sm btn-secondary" onclick="toggleDraftEdit('{{ v.vendor_id }}')">Cancel</button>
+              <span id="draft-save-msg-{{ v.vendor_id }}" style="font-size:0.8rem; color:var(--secondary);"></span>
+            </div>
+          </div>
           <div class="draft-actions" id="draft-actions-{{ v.vendor_id }}" style="display:none; gap:8px; margin-top:8px; flex-wrap:wrap;">
             <button class="btn btn-sm btn-secondary btn-copy-body" onclick="copyDraftBody('{{ v.vendor_id }}')">Copy body</button>
+            <a class="btn btn-sm btn-secondary" id="draft-mailto-{{ v.vendor_id }}" href="#" target="_blank" rel="noopener" style="display:none;">Open in email app ↗</a>
+            <button class="btn btn-sm btn-secondary" onclick="toggleDraftEdit('{{ v.vendor_id }}')">Edit</button>
             <button class="btn btn-sm btn-primary btn-mark-sent-em" data-vendor-id="{{ v.vendor_id }}">I sent this</button>
             <button class="btn btn-sm btn-secondary btn-snooze-em" data-vendor-id="{{ v.vendor_id }}">Snooze 7 days</button>
             <button class="btn btn-sm btn-secondary btn-dismiss-em" data-vendor-id="{{ v.vendor_id }}">Dismiss</button>
@@ -459,6 +485,17 @@
             if (subjectLine && data.subject) {
               subjectLine.querySelector('.draft-subject-text').textContent = data.subject;
               subjectLine.style.display = 'block';
+            }
+            var toRow = document.getElementById('draft-to-row-' + vendorId);
+            var toText = document.getElementById('draft-to-' + vendorId);
+            var mailtoLink = document.getElementById('draft-mailto-' + vendorId);
+            if (data.to_email) {
+              if (toText) toText.textContent = data.to_email;
+              if (toRow) toRow.style.display = '';
+              if (mailtoLink) {
+                mailtoLink.href = 'mailto:' + encodeURIComponent(data.to_email) + '?subject=' + encodeURIComponent(data.subject || '') + '&body=' + encodeURIComponent(data.draft || '');
+                mailtoLink.style.display = '';
+              }
             }
             var actions = document.getElementById('draft-actions-' + vendorId);
             if (actions) {
@@ -597,8 +634,88 @@ function copyDraftBody(vendorId) {
   });
 }
 
+function copyDraftTo(vendorId) {
+  var el = document.getElementById('draft-to-' + vendorId);
+  if (el) navigator.clipboard.writeText(el.textContent || '');
+}
+
+function copyDraftSubject(vendorId) {
+  var el = document.querySelector('#draft-subject-' + vendorId + ' .draft-subject-text');
+  if (el) navigator.clipboard.writeText(el.textContent || '');
+}
+
+function toggleDraftEdit(vendorId) {
+  var overlay = document.getElementById('draft-edit-' + vendorId);
+  if (!overlay) return;
+  var showing = overlay.style.display !== 'none';
+  overlay.style.display = showing ? 'none' : 'block';
+  if (!showing) {
+    var toEl   = document.getElementById('draft-to-' + vendorId);
+    var subjEl = document.querySelector('#draft-subject-' + vendorId + ' .draft-subject-text');
+    var draftArea = document.getElementById('draft-' + vendorId);
+    var ta = draftArea ? draftArea.querySelector('textarea') : null;
+    var editTo   = document.getElementById('draft-edit-to-'   + vendorId);
+    var editSubj = document.getElementById('draft-edit-subj-' + vendorId);
+    var editBody = document.getElementById('draft-edit-body-' + vendorId);
+    if (editTo   && toEl)   editTo.value   = toEl.textContent || '';
+    if (editSubj && subjEl) editSubj.value = subjEl.textContent || '';
+    if (editBody && ta)     editBody.value = ta.value || '';
+  }
+}
+
 document.addEventListener('click', function (e) {
   var csrf = '{{ csrf_token() }}';
+
+  // Save edited draft
+  var saveBtn = e.target.closest('.btn-draft-save');
+  if (saveBtn) {
+    var vendorId = saveBtn.getAttribute('data-vendor-id');
+    var actions  = document.getElementById('draft-actions-' + vendorId);
+    var emId     = actions ? (actions.querySelector('.btn-mark-sent-em').dataset.emId || '') : '';
+    if (!emId) { alert('No email record ID — draft cannot be saved yet.'); return; }
+    saveBtn.disabled = true;
+    var msg = document.getElementById('draft-save-msg-' + vendorId);
+    if (msg) msg.textContent = 'Saving…';
+    var fd = new FormData();
+    fd.append('csrf_token', csrf);
+    fd.append('to_email', document.getElementById('draft-edit-to-'   + vendorId).value);
+    fd.append('subject',  document.getElementById('draft-edit-subj-' + vendorId).value);
+    fd.append('body',     document.getElementById('draft-edit-body-' + vendorId).value);
+    fetch('/emails/' + emId + '/save', { method: 'POST', body: fd })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.ok) {
+          var newTo   = document.getElementById('draft-edit-to-'   + vendorId).value;
+          var newSubj = document.getElementById('draft-edit-subj-' + vendorId).value;
+          var newBody = document.getElementById('draft-edit-body-' + vendorId).value;
+          var toEl    = document.getElementById('draft-to-' + vendorId);
+          var subjEl  = document.querySelector('#draft-subject-' + vendorId + ' .draft-subject-text');
+          var draftArea = document.getElementById('draft-' + vendorId);
+          var ta = draftArea ? draftArea.querySelector('textarea') : null;
+          var mailtoLink = document.getElementById('draft-mailto-' + vendorId);
+          if (toEl)   toEl.textContent   = newTo;
+          if (subjEl) subjEl.textContent = newSubj;
+          if (ta)     ta.value           = newBody;
+          if (mailtoLink) {
+            mailtoLink.href = 'mailto:' + encodeURIComponent(newTo) + '?subject=' + encodeURIComponent(newSubj) + '&body=' + encodeURIComponent(newBody);
+          }
+          if (msg) msg.textContent = 'Saved.';
+          setTimeout(function () {
+            toggleDraftEdit(vendorId);
+            if (msg) msg.textContent = '';
+            saveBtn.disabled = false;
+          }, 800);
+        } else {
+          if (msg) msg.textContent = 'Error: ' + (d.error || 'unknown');
+          saveBtn.disabled = false;
+        }
+      })
+      .catch(function () {
+        if (msg) msg.textContent = 'Error saving.';
+        saveBtn.disabled = false;
+      });
+    return;
+  }
 
   // I sent this
   var sentBtn = e.target.closest('.btn-mark-sent-em');
