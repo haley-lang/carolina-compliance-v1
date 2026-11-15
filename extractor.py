@@ -1049,7 +1049,34 @@ def _process_single_file(file_path: Path) -> dict:
                 log.info("Triage extraction saved for %s", file_path.name)
                 return triage_data
 
-    data = extract_document(file_path, page_map=page_map)
+    if file_path.suffix.lower() != ".pdf":
+        # Images have no page-classification step, so there's no early-exit triage
+        # path like PDFs have.  Wrap the API call so a failed extraction always
+        # produces a JSON — without this the RECONCILE check exits 1 and the
+        # importer never creates an Incoming Extractions record.
+        try:
+            data = extract_document(file_path, page_map={})
+        except Exception as exc:
+            log.warning(
+                "Image extraction failed for %s: %s — saving triage record",
+                file_path.name, exc,
+            )
+            triage_data = {
+                "document_type": "unknown",
+                "named_insured": None,
+                "certificate_holder": None,
+                "certificate_date": None,
+                "contact_emails": [],
+                "description_of_operations": None,
+                "policies": [],
+                "confidence": 0.0,
+                "_triage_reason": f"Image extraction failed: {exc}",
+            }
+            save_extraction(triage_data, file_path)
+            return triage_data
+    else:
+        data = extract_document(file_path, page_map=page_map)
+
     data = normalize_policy_types(data)
     data = normalize_policy_dates(data)
     data = apply_simple_document_classification(data, file_path)

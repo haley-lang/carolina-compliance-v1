@@ -1,5 +1,8 @@
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+import json
+import os
+import tempfile
 
 from extractor import (
     apply_simple_document_classification,
@@ -8,6 +11,7 @@ from extractor import (
     _is_phantom_by_limits,
     _is_phantom_by_duplicate_number,
     _expand_bundle,
+    _process_single_file,
 )
 
 
@@ -283,3 +287,104 @@ def test_expand_bundle_non_pdf_skips_split():
         result = _expand_bundle(fake_img)
     mock_split.assert_not_called()
     assert result == [fake_img]
+
+
+# ── _process_single_file: image triage fallback ───────────────────────────────
+
+def _make_png(tmp_dir: str, name: str = "cert.png") -> Path:
+    p = Path(tmp_dir) / name
+    p.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)  # minimal PNG header
+    return p
+
+
+def test_png_happy_path_saves_extraction():
+    """When extract_document succeeds for a PNG, the result is saved normally."""
+    good_data = {
+        "document_type": "COI",
+        "named_insured": "Rocha LLC",
+        "certificate_holder": None,
+        "certificate_date": "2026-01-01",
+        "contact_emails": [],
+        "description_of_operations": None,
+        "policies": [{"policy_type": "GL", "policy_number": "GL-001",
+                       "carrier": "Acuity", "coverage_limits": "$1,000,000",
+                       "effective_date": "2026-01-01", "expiration_date": "2027-01-01"}],
+        "confidence": 0.9,
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        png = _make_png(tmp)
+        with (
+            patch("extractor.EXTRACT_DIR", Path(tmp)),
+            patch("extractor.extract_document", return_value=good_data),
+            patch("extractor.normalize_policy_types", side_effect=lambda d: d),
+            patch("extractor.normalize_policy_dates", side_effect=lambda d: d),
+            patch("extractor.apply_simple_document_classification", side_effect=lambda d, _f: d),
+            patch("extractor.drop_empty_policies", side_effect=lambda d: d),
+        ):
+            result = _process_single_file(png)
+
+        json_path = Path(tmp) / (png.stem + ".json")
+        assert json_path.exists(), "JSON must be written for a successful PNG extraction"
+        saved = json.loads(json_path.read_text())
+        assert saved["named_insured"] == "Rocha LLC"
+        assert result["confidence"] == 0.9
+
+
+def test_png_extraction_failure_saves_triage_json():
+    """When extract_document raises for a PNG, a triage JSON is saved with confidence=0.
+    This ensures the RECONCILE check passes and the importer creates a record.
+    Root cause of the Rocha / recqAwPFbvAluTifC missed intake."""
+    with tempfile.TemporaryDirectory() as tmp:
+        png = _make_png(tmp, "rocha_coi.png")
+        with (
+            patch("extractor.EXTRACT_DIR", Path(tmp)),
+            patch("extractor.extract_document",
+                  side_effect=RuntimeError("Claude API timeout")),
+        ):
+            result = _process_single_file(png)
+
+        json_path = Path(tmp) / "rocha_coi.json"
+        assert json_path.exists(), "Triage JSON must be written even when extraction fails"
+        saved = json.loads(json_path.read_text())
+        assert saved["confidence"] == 0.0
+        assert "_triage_reason" in saved
+        assert "Image extraction failed" in saved["_triage_reason"]
+        assert result["confidence"] == 0.0
+
+
+def test_jpg_extraction_failure_saves_triage_json():
+    """Same triage fallback applies to JPG files."""
+    with tempfile.TemporaryDirectory() as tmp:
+        jpg = Path(tmp) / "cert.jpg"
+        jpg.write_bytes(b"\xff\xd8\xff" + b"\x00" * 16)
+        with (
+            patch("extractor.EXTRACT_DIR", Path(tmp)),
+            patch("extractor.extract_document",
+                  side_effect=ValueError("No JSON in response")),
+        ):
+            result = _process_single_file(jpg)
+
+        json_path = Path(tmp) / "cert.json"
+        assert json_path.exists()
+        saved = json.loads(json_path.read_text())
+        assert saved["confidence"] == 0.0
+
+
+def test_pdf_extraction_failure_still_propagates():
+    """PDF extraction errors are NOT caught by the image triage path — they
+    propagate to the batch loop as before."""
+    with tempfile.TemporaryDirectory() as tmp:
+        pdf = Path(tmp) / "cert.pdf"
+        pdf.write_bytes(b"%PDF-1.4\n")
+        with (
+            patch("extractor.EXTRACT_DIR", Path(tmp)),
+            patch("extractor.pdf_bundle.pdf_has_text_layer", return_value=True),
+            patch("extractor.classify_pdf_pages", return_value={1: "acord_25"}),
+            patch("extractor.extract_document",
+                  side_effect=RuntimeError("API error")),
+        ):
+            try:
+                _process_single_file(pdf)
+                assert False, "Expected RuntimeError to propagate for PDFs"
+            except RuntimeError:
+                pass  # correct — PDF errors are not swallowed
