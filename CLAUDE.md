@@ -111,6 +111,57 @@ Claude API calls go through `call_claude_with_retry` in `extractor.py`, which re
 
 `Procfile` duplicates the web service definition for non-Railway hosts.
 
+## Audit module acceptance criteria
+
+The Audit Workspace (`review_app.py` routes under `/audits/`, `audit_store.py`, `audit_buckets.py`, templates `audit_workspace.html` / `audit.html`) must satisfy all five of these requirements. When modifying audit code, verify each still holds.
+
+### 1. Bucket system
+Every payee is assigned to exactly one of six buckets; the workspace shows dollars per bucket; a reconciliation line confirms the buckets sum to the payment file total; "needs decision" is shown prominently (red border) when count > 0.
+
+Buckets:
+- `sub_on_file` — `ccs_vendor` + status `full`
+- `sub_with_gap` — `ccs_vendor` + any other status
+- `sub_no_ccs_record` — `likely_sub`
+- `supplier` — `supplier` or `not_sub`
+- `owner_payroll` — `owner_payroll`
+- `needs_decision` — `unclear` (or any unrecognised group)
+
+Logic lives in `audit_buckets.py` — pure functions, no I/O. Tested in `tests/test_audit_buckets.py`.
+
+### 2. Payee library per client
+Classifications confirmed by the user are saved to `payee_library` (SQLite, `audit_store.py`). On the next audit for the same client, `_classify_all_payees` checks the library before falling back to fuzzy matching. A shared starter list (client_id=NULL) pre-seeds obvious non-subs (Home Depot → supplier, etc.).
+
+- `save_to_library()` is called in `audit_payees_update_one` on every confirmed update.
+- `get_library_suggestion()` checks client-specific entries first, then shared.
+- `seed_starter_list()` is called from `init_db()` and is idempotent.
+- Tested in `tests/test_audit_library.py`.
+
+### 3. Integrity checks
+Four pass/fail checks are computed in `audit_buckets.compute_integrity_checks()` and shown on the Coverage Analysis panel:
+1. File total matches (bucket sum ≈ file total, within $1)
+2. All payees classified (no payee_raw in payments lacks a classification)
+3. Payee counts match (unique payees in file == unique payees in classifications)
+4. Vendor totals consistent (no vendor's analysis total > file total for its aliases)
+
+Tested in `tests/test_audit_integrity.py`.
+
+### 4. Contacts pre-fill
+The Coverage Analysis response (`/audits/<id>/analysis`) includes a `contacts` key listing which subs needing certificates are missing Agent Email / Vendor Email in Airtable. The Section 5 (Request drafts) panel shows this list before the "Generate drafts" button.
+
+Contact lookup uses `_get_vendor_contact()` from vendor fields prefetched in the same batch call as policies — no extra Airtable round-trips.
+
+Tested in `tests/test_audit_contacts.py`.
+
+### 5. Per-client onboarding checklist
+The checklist (`/audits/<id>/checklist`) includes a "Client setup" step (step 1) that verifies the client's Certificate Holder field is set in Airtable. This is required before drafts are useful. The checklist now has 10 steps (up from 8), with the two new steps being "Client setup" (step 1) and "No payees need decision" (step 4).
+
+### No RTR hardcoding
+The Audit module must work for any client. Specific prohibitions:
+- `audit.html` must not auto-fill dates for any specific client.
+- `audits_new` POST must not fall back to `RTR_CLIENT_ID`.
+- `audit_workspace.html` must not receive `rtr_client_id` from the template context.
+- `RTR_CLIENT_ID` constant may remain defined in `review_app.py` for use by non-audit features, but must not be used in any audit route/template logic.
+
 ## Background constraints (from `SUPPORT_SCALING_REQUIREMENTS.md`)
 
 Product targets under 10 minutes of support time per client per month. This shapes design choices: self-serve only, no per-client custom logic, explicit statuses (no implicit inference), automation default-on. If you're about to add a manual-review step or client-specific branch, that's a product smell — push it back to explicit data in Airtable instead.

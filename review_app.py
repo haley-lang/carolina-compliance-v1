@@ -5790,8 +5790,12 @@ def pulse_test_email():
 
 import audit_store as _astore
 import audit_parser as _aparser
+import audit_buckets
 
-_AUDIT_UPLOADS_DIR = os.path.join(os.path.dirname(__file__), "audit_uploads")
+_AUDIT_UPLOADS_DIR = os.environ.get("AUDIT_UPLOADS_PATH") or (
+    os.path.join("/data", "audit_uploads") if os.path.isdir("/data")
+    else os.path.join(os.path.dirname(__file__), "audit_uploads")
+)
 os.makedirs(_AUDIT_UPLOADS_DIR, exist_ok=True)
 
 # Keywords that indicate a payee is likely NOT a subcontractor
@@ -5901,6 +5905,15 @@ def _classify_all_payees(audit_id: str, client_id: str, vendor_list: list[dict])
         vendor_id, vendor_name, match_type, payee_group = _fuzzy_match_vendors(
             payee_raw, vendor_list, client_id,
         )
+
+        # If fuzzy match gave no strong vendor match, check the payee library
+        # for a confirmed per-client or shared classification
+        if not vendor_id and payee_group in ("unclear", "not_sub", "likely_sub"):
+            lib = _astore.get_library_suggestion(client_id, payee_raw)
+            if lib and lib.get("confirmed"):
+                payee_group = lib["suggested_group"]
+                match_type  = "library"
+
         _astore.upsert_payee_classification(
             audit_id=audit_id,
             client_id=client_id,
@@ -5981,15 +5994,18 @@ def _compute_audit_analysis(audit: dict) -> dict:
         if classifications.get(pr, {}).get("payee_group") == "ccs_vendor"
         and classifications.get(pr, {}).get("vendor_id")
     ]
-    # vendor_id → list of policy records
+    # vendor_id → list of policy records; vendor_id → contact fields
     _vendor_policies_cache: dict[str, list] = {}
+    _vendor_contacts_cache: dict[str, dict] = {}
     if ccs_vendor_ids:
         try:
-            # 1 call: fetch all vendor records to get linked policy IDs
+            # 1 call: fetch vendor records (policies + contact fields)
             vend_formula = "OR(" + ", ".join(f"RECORD_ID()='{v}'" for v in ccs_vendor_ids) + ")"
             vend_records = api.table(base_id, VENDORS_TABLE_ID).all(
                 formula=vend_formula,
-                fields=["Insurance Policies"],
+                fields=["Insurance Policies", "Agent Email", "Vendor Email",
+                        "Agent Bounced", "Primary Contact",
+                        "Agent Name", "Agent Agency", "Agent Phone"],
             )
             all_policy_ids: list[str] = []
             vendor_to_policy_ids: dict[str, list[str]] = {}
@@ -5997,6 +6013,7 @@ def _compute_audit_analysis(audit: dict) -> dict:
                 pol_ids = vrec["fields"].get("Insurance Policies") or []
                 vendor_to_policy_ids[vrec["id"]] = pol_ids
                 all_policy_ids.extend(pol_ids)
+                _vendor_contacts_cache[vrec["id"]] = vrec["fields"]
             # 1 call: fetch all policy records
             if all_policy_ids:
                 pol_formula = "OR(" + ", ".join(f"RECORD_ID()='{p}'" for p in all_policy_ids) + ")"
@@ -6201,7 +6218,29 @@ def _compute_audit_analysis(audit: dict) -> dict:
         "paid_in_gaps_total": round(paid_in_gaps_total, 2),
     }
 
-    return {"subs": subs, "headline": headline}
+    # Contacts pre-fill: for subs that need certs, check who has contact info
+    needs_cert_subs = [s for s in subs if s["status"] != "full" and s.get("vendor_id")]
+    missing_contacts: list[dict] = []
+    with_contact_count = 0
+    for sub in needs_cert_subs:
+        vfields = _vendor_contacts_cache.get(sub["vendor_id"], {})
+        contact = _get_vendor_contact(vfields)
+        if contact["type"] == "none":
+            missing_contacts.append({
+                "payee_raw":   sub["payee_raw"],
+                "vendor_name": sub["vendor_name"],
+                "vendor_id":   sub["vendor_id"],
+            })
+        else:
+            with_contact_count += 1
+
+    contacts = {
+        "subs_needing_cert":  len(needs_cert_subs),
+        "with_contact":       with_contact_count,
+        "missing_contact":    missing_contacts,
+    }
+
+    return {"subs": subs, "headline": headline, "contacts": contacts}
 
 
 def _build_audit_cert_request_body(
@@ -6224,10 +6263,10 @@ def _build_audit_cert_request_body(
     lines = [
         f"Hello {greeting}{agency_str},",
         "",
-        f"I am writing on behalf of {client_name} to request certificates of insurance "
-        f"for a {coverage} audit covering the period {_fd(audit_start)} to {_fd(audit_end)}.",
+        f"I am reaching out to request certificates of insurance for a {coverage} audit "
+        f"covering the period {_fd(audit_start)} to {_fd(audit_end)}.",
         "",
-        "Please reply with updated certificates for the following subcontractors:",
+        "Please send updated certificates for the following subcontractors:",
         "",
     ]
     for sub in subs:
@@ -6236,23 +6275,25 @@ def _build_audit_cert_request_body(
         if gaps:
             for g in gaps:
                 lines.append(
-                    f"    Period not on file: {_fd(g['start'])} to {_fd(g['end'])} "
+                    f"    Not on file: {_fd(g['start'])} to {_fd(g['end'])} "
                     f"({g['days']} days)"
                 )
         else:
-            lines.append(f"    No certificate on file for the audit period")
+            lines.append(f"    Not on file for the audit period")
         lines.append("")
 
     lines += [
         "Please issue certificates with the following certificate holder:",
         f"  {cert_holder}",
         "",
-        "Certificates should be sent to coi-intake@carolinacompliancesolutions.com "
+        "Certificates can be sent to coi-intake@carolinacompliancesolutions.com "
         "and will be processed automatically.",
         "",
         "Thank you,",
-        "Carolina Compliance Solutions",
-        f"On behalf of {client_name}",
+        "Haley Bridges",
+        "Carolina Compliance Solutions, LLC",
+        "704-612-0190",
+        "carolinacompliancesolutions.com",
     ]
     return "\n".join(lines)
 
@@ -6309,7 +6350,7 @@ def audits_new():
                                client_filter="", rtr_client_id=RTR_CLIENT_ID, show_new_form=True)
 
     # POST
-    client_id    = (request.form.get("client_id") or RTR_CLIENT_ID).strip()
+    client_id    = (request.form.get("client_id") or "").strip()
     coverage     = (request.form.get("coverage") or "General Liability").strip()
     start_date   = (request.form.get("start_date") or "").strip()
     end_date     = (request.form.get("end_date") or "").strip()
@@ -6402,7 +6443,6 @@ def audit_workspace(audit_id):
         unconfirmed_count=unconfirmed_count,
         possible_count=possible_count,
         unclear_count=unclear_count,
-        rtr_client_id=RTR_CLIENT_ID,
     )
 
 
@@ -6566,7 +6606,8 @@ def audit_payees(audit_id):
 
     # Group counts for display
     groups = {
-        "ccs_vendor": 0, "likely_sub": 0, "unclear": 0, "not_sub": 0,
+        "ccs_vendor": 0, "likely_sub": 0, "unclear": 0,
+        "not_sub": 0, "supplier": 0, "owner_payroll": 0,
         "needs_confirm": 0,
     }
     for r in result:
@@ -6608,10 +6649,22 @@ def audit_payees_update_one(audit_id):
         **kwargs,
     )
 
-    # If this is a vendor match, save as a confirmed alias for future uploads
+    payee_group = kwargs.get("payee_group", "")
     vendor_id   = kwargs.get("vendor_id", "")
     vendor_name = kwargs.get("vendor_name", "")
-    if vendor_id and vendor_name and kwargs.get("payee_group") == "ccs_vendor":
+
+    # Save confirmed group to library so future audits for this client inherit it
+    if payee_group:
+        _astore.save_to_library(
+            client_id=audit["client_id"],
+            payee_raw=payee_raw,
+            suggested_group=payee_group,
+            source="manual",
+            confirmed=1,
+        )
+
+    # If this is a vendor match, save as a confirmed alias for future uploads
+    if vendor_id and vendor_name and payee_group == "ccs_vendor":
         _astore.upsert_alias(
             client_id=audit["client_id"],
             payee_raw=payee_raw,
@@ -6637,6 +6690,22 @@ def audit_analysis(audit_id):
     except Exception as exc:
         app.logger.error("audit_analysis error for %s: %s", audit_id, exc)
         return jsonify({"ok": False, "error": str(exc)}), 500
+
+    # Augment with bucket summary and integrity checks
+    all_cls     = _astore.get_payee_classifications(audit_id)
+    pay_summary = _astore.get_payee_summary(audit_id, audit["start_date"], audit["end_date"])
+    pay_by_payee = {p["payee_raw"]: p for p in pay_summary}
+    files       = _astore.get_audit_files(audit_id)
+    file_total  = sum(
+        f.get("total_amount") or 0 for f in files if f.get("parse_status") == "ok"
+    )
+
+    result["bucket_summary"]   = audit_buckets.compute_bucket_summary(
+        result["subs"], all_cls, pay_by_payee, file_total
+    )
+    result["integrity_checks"] = audit_buckets.compute_integrity_checks(
+        result["bucket_summary"], all_cls, pay_by_payee, result["subs"], file_total
+    )
 
     return jsonify({"ok": True, **result})
 
@@ -7197,28 +7266,47 @@ def audit_checklist(audit_id):
     if not audit:
         return jsonify({"ok": False, "error": "Not found"}), 404
 
-    files = _astore.get_audit_files(audit_id)
+    files   = _astore.get_audit_files(audit_id)
     cls_all = _astore.get_payee_classifications(audit_id)
-    packs = _astore.get_audit_packs(audit_id)
+    packs   = _astore.get_audit_packs(audit_id)
 
     has_file = any(f["parse_status"] == "ok" for f in files)
     unconfirmed = [
         c for c in cls_all
         if not c.get("confirmed") and c.get("payee_group") not in ("not_sub",)
     ]
-    unclear = [c for c in cls_all if c.get("payee_group") == "unclear"]
     no_trade = [
         c for c in cls_all
         if c.get("payee_group") in ("ccs_vendor", "likely_sub")
         and not c.get("trade")
     ]
+    needs_decision = [c for c in cls_all if c.get("payee_group") == "unclear"]
 
-    email_ids = _astore.get_audit_email_ids(audit_id)
+    email_ids    = _astore.get_audit_email_ids(audit_id)
     drafts_exist = bool(email_ids)
+
+    # Client setup: check cert_holder is set
+    cert_holder_ok = False
+    try:
+        base_id = clean_base_id(config.AIRTABLE_BASE_ID)
+        crec = _api().table(base_id, CLIENTS_TABLE_ID).get(audit["client_id"])
+        cert_holder = (crec["fields"].get("Certificate Holder") or "").strip()
+        cert_holder_ok = bool(cert_holder)
+    except Exception:
+        cert_holder_ok = False
 
     checks = [
         {
             "step": 1,
+            "title": "Client setup",
+            "done": cert_holder_ok,
+            "detail": (
+                "Certificate holder name set" if cert_holder_ok
+                else "Set Certificate Holder for this client in Airtable before generating drafts"
+            ),
+        },
+        {
+            "step": 2,
             "title": "Upload payments file",
             "done": has_file,
             "detail": (
@@ -7228,7 +7316,7 @@ def audit_checklist(audit_id):
             ),
         },
         {
-            "step": 2,
+            "step": 3,
             "title": "Confirm payees",
             "done": has_file and not unconfirmed,
             "detail": (
@@ -7238,7 +7326,17 @@ def audit_checklist(audit_id):
             "count": len(unconfirmed),
         },
         {
-            "step": 3,
+            "step": 4,
+            "title": "No payees need decision",
+            "done": has_file and not needs_decision,
+            "detail": (
+                f"{len(needs_decision)} payees still marked 'Unclear' — assign them a bucket"
+                if needs_decision else "No payees in 'needs decision' bucket"
+            ),
+            "count": len(needs_decision),
+        },
+        {
+            "step": 5,
             "title": "Confirm work types",
             "done": has_file and not no_trade,
             "detail": (
@@ -7248,37 +7346,37 @@ def audit_checklist(audit_id):
             "count": len(no_trade),
         },
         {
-            "step": 4,
+            "step": 6,
             "title": "Review queue",
-            "done": True,  # Always available
+            "done": True,
             "detail": "Check for certificates pending approval",
             "link": url_for("queue"),
         },
         {
-            "step": 5,
+            "step": 7,
             "title": "Request missing certificates",
             "done": drafts_exist,
             "detail": (
                 f"{len(email_ids)} drafts created"
-                if drafts_exist else "No drafts yet"
+                if drafts_exist else "No drafts yet — open Coverage Analysis to review contacts, then generate"
             ),
             "link": url_for("emails_page"),
         },
         {
-            "step": 6,
+            "step": 8,
             "title": "Follow up on requests",
             "done": False,
             "detail": "Check cadence — view Emails page for outstanding requests",
             "link": url_for("emails_page"),
         },
         {
-            "step": 7,
+            "step": 9,
             "title": "Handle the remainder",
             "done": False,
             "detail": "Mark payees as requested/no response, not a sub, or other",
         },
         {
-            "step": 8,
+            "step": 10,
             "title": "Build audit pack",
             "done": bool(packs),
             "detail": (
@@ -7310,6 +7408,8 @@ from marketing_constants import (
     MARKETING_SIGNALS_TABLE_ID, MS_SUMMARY, MS_SOURCE, MS_CREATED_AT,
     CONTENT_QUEUE_TABLE_ID, CQ_DRAFT_TEXT, CQ_PLATFORM, CQ_HOOKS, CQ_STATUS,
     CQ_NEEDS_BILLY, CQ_GUARD_RESULT, CQ_TRACKED_LINK, CQ_IDEA_LINK,
+    CQ_VOICE, CQ_CTA_TYPE, CQ_CLAIM_FLAGS, CQ_CHANNEL, CQ_CHANNEL_STATUS,
+    CHANNELS_NOT_SETUP, CHANNEL_STATUS_NOT_SETUP,
 )
 
 
@@ -7320,20 +7420,29 @@ def _load_content_queue(api) -> dict:
         tbl = api.table(MARKETING_BASE_ID, CONTENT_QUEUE_TABLE_ID)
         records = tbl.all(
             formula=f"{{{CQ_STATUS}}}='Draft'",
-            fields=[CQ_DRAFT_TEXT, CQ_PLATFORM, CQ_HOOKS, CQ_GUARD_RESULT,
-                    CQ_TRACKED_LINK, CQ_NEEDS_BILLY, CQ_IDEA_LINK],
+            fields=[
+                CQ_DRAFT_TEXT, CQ_PLATFORM, CQ_HOOKS, CQ_GUARD_RESULT,
+                CQ_TRACKED_LINK, CQ_NEEDS_BILLY, CQ_IDEA_LINK,
+                CQ_VOICE, CQ_CTA_TYPE, CQ_CLAIM_FLAGS, CQ_CHANNEL, CQ_CHANNEL_STATUS,
+            ],
         )
         for rec in records:
             f = rec.get("fields", {})
             for idea_id in (f.get(CQ_IDEA_LINK) or []):
+                channel = f.get(CQ_CHANNEL) or f.get(CQ_PLATFORM, "")
                 result.setdefault(idea_id, []).append({
-                    "id":           rec["id"],
-                    "platform":     f.get(CQ_PLATFORM, ""),
-                    "draft_text":   f.get(CQ_DRAFT_TEXT, ""),
-                    "hooks":        f.get(CQ_HOOKS, ""),
-                    "guard_result": f.get(CQ_GUARD_RESULT, "PASS"),
-                    "tracked_link": f.get(CQ_TRACKED_LINK, ""),
-                    "needs_billy":  f.get(CQ_NEEDS_BILLY, False),
+                    "id":             rec["id"],
+                    "platform":       channel,
+                    "channel":        channel,
+                    "voice":          f.get(CQ_VOICE, ""),
+                    "cta_type":       f.get(CQ_CTA_TYPE, ""),
+                    "draft_text":     f.get(CQ_DRAFT_TEXT, ""),
+                    "hooks":          f.get(CQ_HOOKS, ""),
+                    "guard_result":   f.get(CQ_GUARD_RESULT, "PASS"),
+                    "tracked_link":   f.get(CQ_TRACKED_LINK, ""),
+                    "needs_billy":    f.get(CQ_NEEDS_BILLY, False),
+                    "claim_flags":    f.get(CQ_CLAIM_FLAGS, ""),
+                    "channel_status": f.get(CQ_CHANNEL_STATUS, ""),
                 })
     except Exception as exc:
         app.logger.warning("content queue load failed: %s", exc)
@@ -7344,6 +7453,7 @@ def _load_content_queue(api) -> dict:
 @login_required
 def marketing_page():
     ideas = []
+    draft_count = 0
     error = None
     try:
         api = _api()
@@ -7353,6 +7463,7 @@ def marketing_page():
             sort=[{"field": MI_STATUS, "direction": "asc"}],
         )
         content_map = _load_content_queue(api)
+        draft_count = sum(len(v) for v in content_map.values())
         for rec in records:
             f = rec.get("fields", {})
             idea_id = rec["id"]
@@ -7369,7 +7480,7 @@ def marketing_page():
         app.logger.warning("marketing_page ideas fetch failed: %s", exc)
         error = "Could not load ideas — Airtable may be unavailable."
 
-    return render_template("marketing.html", ideas=ideas, error=error)
+    return render_template("marketing.html", ideas=ideas, error=error, draft_count=draft_count)
 
 
 @app.route("/marketing/idea/<record_id>/approve", methods=["POST"])
@@ -7459,6 +7570,39 @@ def internal_health_data():
     return jsonify({"heartbeats": heartbeats, "write_rates": write_rates, "recent_events": recent_events})
 
 
+@app.route("/marketing/kb")
+@login_required
+def marketing_kb():
+    """Return the site knowledge base page list as JSON."""
+    from flask import jsonify
+    try:
+        from site_knowledge import get_page_list
+        pages = get_page_list(_api())
+    except Exception as exc:
+        app.logger.warning("marketing_kb load failed: %s", exc)
+        pages = []
+    return jsonify({"pages": pages})
+
+
+@app.route("/marketing/kb/refresh", methods=["POST"])
+@login_required
+def marketing_kb_refresh():
+    """Trigger a synchronous KB refresh and return summary as JSON."""
+    from flask import jsonify
+    try:
+        from site_knowledge import refresh_all
+        summary = refresh_all(_api())
+        flash(
+            f"Knowledge base refreshed — {summary['updated']} pages updated, "
+            f"{summary['errors']} errors.",
+            "success" if summary["errors"] == 0 else "warning",
+        )
+    except Exception as exc:
+        app.logger.warning("marketing_kb_refresh failed: %s", exc)
+        flash("Knowledge base refresh failed — check logs.", "warning")
+    return redirect(url_for("marketing_page"))
+
+
 @app.route("/marketing/idea/<record_id>/generate", methods=["POST"])
 @login_required
 def marketing_generate_content(record_id):
@@ -7474,6 +7618,8 @@ def marketing_generate_content(record_id):
             flash("Only approved ideas can generate a content set.", "warning")
             return redirect(url_for("marketing_page"))
         needs_billy = request.form.get("needs_billy") == "1"
+        channel_param = (request.form.get("channel") or "").strip()
+        channel = None if channel_param in ("", "all") else channel_param
     except Exception as exc:
         app.logger.warning("marketing generate fetch failed: %s", exc)
         flash("Could not load idea.", "warning")
@@ -7481,7 +7627,7 @@ def marketing_generate_content(record_id):
 
     try:
         from marketing_content_generator import generate_content_set
-        result = generate_content_set(record_id, idea_fields, needs_billy=needs_billy)
+        result = generate_content_set(record_id, idea_fields, needs_billy=needs_billy, channel=channel)
         created = result.get("created", 0)
         blocked = result.get("blocked", 0)
         if created:

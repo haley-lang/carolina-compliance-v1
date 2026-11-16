@@ -6,6 +6,7 @@ Airtable gets only one lightweight record per audit.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import time
 import uuid
@@ -127,6 +128,20 @@ CREATE TABLE IF NOT EXISTS audit_emails (
     FOREIGN KEY (audit_id) REFERENCES audits(id)
 );
 
+CREATE TABLE IF NOT EXISTS payee_library (
+    id TEXT PRIMARY KEY,
+    client_id TEXT,
+    payee_normalized TEXT NOT NULL,
+    suggested_group TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'manual',
+    confirmed INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_payee_library_key
+    ON payee_library(COALESCE(client_id,''), payee_normalized);
+CREATE INDEX IF NOT EXISTS idx_payee_library_client ON payee_library(client_id);
+
 CREATE INDEX IF NOT EXISTS idx_payments_audit ON payments(audit_id);
 CREATE INDEX IF NOT EXISTS idx_payments_payee ON payments(audit_id, payee_raw);
 CREATE INDEX IF NOT EXISTS idx_payee_class_audit ON payee_classifications(audit_id);
@@ -134,6 +149,27 @@ CREATE INDEX IF NOT EXISTS idx_payee_class_client ON payee_classifications(clien
 CREATE INDEX IF NOT EXISTS idx_payee_aliases_client ON payee_aliases(client_id, payee_raw);
 CREATE INDEX IF NOT EXISTS idx_audit_emails_audit ON audit_emails(audit_id);
 """
+
+# Shared starter list of obvious non-subs (client_id=NULL = shared across all clients)
+_STARTER_NON_SUBS: list[tuple[str, str]] = [
+    ("home depot",           "supplier"),
+    ("lowes",                "supplier"),
+    ("menards",              "supplier"),
+    ("84 lumber",            "supplier"),
+    ("floor decor",          "supplier"),
+    ("sherwin williams",     "supplier"),
+    ("fastenal",             "supplier"),
+    ("grainger",             "supplier"),
+    ("ferguson enterprises", "supplier"),
+    ("builders firstsource", "supplier"),
+    ("ford motor credit",    "owner_payroll"),
+    ("ford credit",          "owner_payroll"),
+    ("gm financial",         "owner_payroll"),
+    ("ally financial",       "owner_payroll"),
+    ("firstenergy",          "not_sub"),
+    ("dominion energy",      "not_sub"),
+    ("duke energy",          "not_sub"),
+]
 
 
 @contextmanager
@@ -499,5 +535,71 @@ def get_audit_email_ids(audit_id: str) -> list[str]:
     return [r[0] for r in rows]
 
 
+# ── Payee library ─────────────────────────────────────────────────────────────
+
+def _norm_lib(name: str) -> str:
+    """Normalise a payee name for library key matching."""
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", "", (name or "").lower())).strip()
+
+
+def get_library_suggestion(client_id: str, payee_raw: str) -> dict | None:
+    """Return a confirmed library entry for this payee, checking client-specific first.
+
+    Returns dict with keys: suggested_group, source, confirmed — or None if no match.
+    """
+    norm = _norm_lib(payee_raw)
+    if not norm:
+        return None
+    with _conn() as conn:
+        # Client-specific entry takes priority over shared
+        for cid in [client_id, None]:
+            row = conn.execute(
+                "SELECT * FROM payee_library WHERE COALESCE(client_id,'') = ? AND payee_normalized = ?",
+                (cid or "", norm),
+            ).fetchone()
+            if row:
+                return dict(row)
+    return None
+
+
+def save_to_library(
+    client_id: str | None,
+    payee_raw: str,
+    suggested_group: str,
+    source: str = "manual",
+    confirmed: int = 1,
+) -> None:
+    """Upsert a payee classification into the library for reuse across audits."""
+    norm = _norm_lib(payee_raw)
+    if not norm:
+        return
+    now = time.time()
+    with _conn() as conn:
+        existing = conn.execute(
+            "SELECT id FROM payee_library WHERE COALESCE(client_id,'') = ? AND payee_normalized = ?",
+            (client_id or "", norm),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE payee_library SET suggested_group=?, source=?, confirmed=? "
+                "WHERE COALESCE(client_id,'') = ? AND payee_normalized = ?",
+                (suggested_group, source, confirmed, client_id or "", norm),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO payee_library (id, client_id, payee_normalized, suggested_group, "
+                "source, confirmed, created_at) VALUES (?,?,?,?,?,?,?)",
+                (str(uuid.uuid4()), client_id or None, norm,
+                 suggested_group, source, confirmed, now),
+            )
+
+
+def seed_starter_list() -> None:
+    """Insert the shared starter list if entries don't already exist."""
+    for normalized, group in _STARTER_NON_SUBS:
+        save_to_library(None, normalized, group, source="starter", confirmed=1)
+
+
 # ── Auto-init ─────────────────────────────────────────────────────────────────
 init_db()
+seed_starter_list()

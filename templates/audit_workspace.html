@@ -87,14 +87,45 @@
     .match-likely   { background:#fff3cd; color:#664d03; }
     .match-possible { background:#f8d7da; color:#58151c; }
     .group-badge { display:inline-block; padding:2px 7px; border-radius:10px; font-size:0.74rem; font-weight:600; }
-    .group-ccs_vendor  { background:#cfe2ff; color:#084298; }
-    .group-likely_sub  { background:#fff3cd; color:#664d03; }
-    .group-unclear     { background:#e2e3e5; color:#383d41; }
-    .group-not_sub     { background:#f1f3f5; color:#6c757d; }
+    .group-ccs_vendor   { background:#cfe2ff; color:#084298; }
+    .group-likely_sub   { background:#fff3cd; color:#664d03; }
+    .group-unclear      { background:#e2e3e5; color:#383d41; }
+    .group-not_sub      { background:#f1f3f5; color:#6c757d; }
+    .group-supplier     { background:#e8d5f5; color:#5a2d82; }
+    .group-owner_payroll { background:#d8f5e3; color:#1a5c38; }
     .payee-filter-tabs { display:flex; gap:0; margin-top:12px; border-bottom:2px solid var(--border); }
     .payee-filter-tab  { padding:8px 14px; font-size:0.84rem; font-weight:600; cursor:pointer;
                          color:var(--secondary); border-bottom:2px solid transparent; margin-bottom:-2px; }
     .payee-filter-tab.active { color:var(--blue); border-bottom-color:var(--blue); }
+
+    /* ── Bucket summary ── */
+    .bucket-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin:14px 0; }
+    @media (max-width:640px) { .bucket-grid { grid-template-columns:repeat(2,1fr); } }
+    .bucket-box { background:#fff; border:1.5px solid var(--border); border-radius:9px;
+                  padding:12px 14px; }
+    .bucket-box.bucket-needs-decision { border-color:#dc3545; background:#fff5f5; }
+    .bucket-box.bucket-needs-decision .bb-count { color:#dc3545; }
+    .bb-count  { font-family:var(--font-serif); font-size:1.4rem; color:var(--navy); display:block; }
+    .bb-label  { font-size:0.72rem; font-weight:700; color:var(--secondary);
+                 text-transform:uppercase; letter-spacing:0.03em; }
+    .bb-dollars { font-size:0.82rem; color:var(--secondary); margin-top:2px; }
+    .bucket-recon { font-size:0.84rem; padding:8px 12px; border-radius:6px; margin-top:4px; }
+    .bucket-recon.ok   { background:#d1e7dd; color:#0a3622; }
+    .bucket-recon.fail { background:#f8d7da; color:#58151c; }
+
+    /* ── Integrity checks ── */
+    .integrity-list { margin:12px 0; }
+    .integrity-row  { display:flex; align-items:flex-start; gap:10px; padding:7px 0;
+                      border-bottom:1px solid var(--border); font-size:0.86rem; }
+    .integrity-row:last-child { border-bottom:none; }
+    .ic-icon { font-size:1rem; flex-shrink:0; margin-top:1px; }
+    .ic-check { font-weight:600; color:var(--navy); }
+    .ic-detail { color:var(--secondary); font-size:0.8rem; }
+
+    /* ── Contacts note ── */
+    .contacts-note { background:var(--offwhite); border:1.5px solid var(--border); border-radius:8px;
+                     padding:12px 16px; margin-bottom:14px; font-size:0.86rem; }
+    .contacts-note.has-missing { border-color:#ffc107; background:#fff9e6; }
 
     /* ── Analysis table ── */
     .analysis-table { width:100%; border-collapse:collapse; font-size:0.86rem; margin-top:12px; }
@@ -286,6 +317,8 @@
             <div class="payee-filter-tab" data-group="ccs_vendor" onclick="filterPayees('ccs_vendor', this)">CCS subs</div>
             <div class="payee-filter-tab" data-group="likely_sub" onclick="filterPayees('likely_sub', this)">Likely subs</div>
             <div class="payee-filter-tab" data-group="unclear" onclick="filterPayees('unclear', this)">Unclear</div>
+            <div class="payee-filter-tab" data-group="supplier" onclick="filterPayees('supplier', this)">Supplier</div>
+            <div class="payee-filter-tab" data-group="owner_payroll" onclick="filterPayees('owner_payroll', this)">Owner/payroll</div>
             <div class="payee-filter-tab" data-group="not_sub" onclick="filterPayees('not_sub', this)">Not a sub</div>
           </div>
           <div id="confirm-all-btn" style="display:none">
@@ -324,6 +357,20 @@
       <div id="analysis-loading" style="color:var(--secondary); font-size:0.88rem; padding:12px 0">Loading analysis…</div>
       <div id="analysis-content" style="display:none">
         <div class="headline-strip" id="headline-strip"></div>
+
+        <!-- Bucket summary -->
+        <div id="bucket-summary-wrap" style="margin-bottom:16px">
+          <h4 style="font-size:0.82rem; font-weight:700; color:var(--secondary); text-transform:uppercase; letter-spacing:0.04em; margin:0 0 8px">Payment buckets</h4>
+          <div class="bucket-grid" id="bucket-grid"></div>
+          <div class="bucket-recon" id="bucket-recon"></div>
+        </div>
+
+        <!-- Integrity checks -->
+        <div id="integrity-wrap" style="margin-bottom:16px">
+          <h4 style="font-size:0.82rem; font-weight:700; color:var(--secondary); text-transform:uppercase; letter-spacing:0.04em; margin:0 0 4px">Integrity checks</h4>
+          <div class="integrity-list" id="integrity-list"></div>
+        </div>
+
         <p style="font-size:0.8rem; color:var(--secondary); margin-bottom:10px">
           "On file" means a certificate with an effective-to-expiration term was received.
           Gaps are calendar days within the audit period with no term on file.
@@ -383,6 +430,7 @@
         Vendors with no agent get direct-to-vendor drafts. Payees with no contact go into a client contact request.
         Nothing sends automatically; use the Emails page to review, edit, and mark sent.
       </p>
+      <div id="contacts-note" style="display:none" class="contacts-note"></div>
       <div style="display:flex; gap:10px; margin-top:14px; flex-wrap:wrap;">
         <button class="btn btn-primary" id="btn-create-drafts" onclick="createDrafts()">Generate drafts</button>
         <a class="btn btn-secondary" href="/emails">View Emails page ↗</a>
@@ -622,6 +670,8 @@ function renderPayees(payees, groups) {
   var countHtml = 'CCS subs: <strong>' + (gc.ccs_vendor||0) + '</strong> &nbsp;|&nbsp; ' +
     'Likely subs: <strong>' + (gc.likely_sub||0) + '</strong> &nbsp;|&nbsp; ' +
     'Unclear: <strong>' + (gc.unclear||0) + '</strong> &nbsp;|&nbsp; ' +
+    'Supplier: <strong>' + (gc.supplier||0) + '</strong> &nbsp;|&nbsp; ' +
+    'Owner/payroll: <strong>' + (gc.owner_payroll||0) + '</strong> &nbsp;|&nbsp; ' +
     'Not a sub: <strong>' + (gc.not_sub||0) + '</strong>';
   if (gc.needs_confirm > 0) countHtml += ' &nbsp;|&nbsp; <span style="color:#8a5a00"><strong>' + gc.needs_confirm + '</strong> need confirming</span>';
   document.getElementById('payee-group-counts').innerHTML = countHtml;
@@ -647,7 +697,11 @@ function renderPayees(payees, groups) {
     if (p.match_type === 'possible') matchHtml = '<span class="match-badge match-possible">possible</span> ';
     var vendorText = p.vendor_name ? matchHtml + esc(p.vendor_name) : '<span style="color:var(--secondary)">—</span>';
 
-    var groupLabel = {ccs_vendor:'CCS sub',likely_sub:'Likely sub',unclear:'Unclear',not_sub:'Not a sub'}[p.payee_group] || p.payee_group;
+    var groupLabels = {
+      ccs_vendor:'CCS sub', likely_sub:'Likely sub', unclear:'Unclear',
+      supplier:'Supplier', owner_payroll:'Owner/payroll', not_sub:'Not a sub'
+    };
+    var groupLabel = groupLabels[p.payee_group] || p.payee_group;
     var groupCls   = 'group-' + p.payee_group;
     var amt = '$' + parseFloat(p.total_amount||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
 
@@ -663,6 +717,8 @@ function renderPayees(payees, groups) {
           '<option value="ccs_vendor">CCS sub</option>' +
           '<option value="likely_sub">Likely sub</option>' +
           '<option value="unclear">Unclear</option>' +
+          '<option value="supplier">Supplier</option>' +
+          '<option value="owner_payroll">Owner / payroll</option>' +
           '<option value="not_sub">Not a sub</option>' +
         '</select>' +
       '</td>' +
@@ -717,6 +773,9 @@ function loadAnalysis() {
       if (!d.ok) return;
       analysisData = d;
       renderAnalysis(d.subs, d.headline);
+      renderBuckets(d.bucket_summary);
+      renderIntegrityChecks(d.integrity_checks);
+      renderContactsNote(d.contacts);
       document.getElementById('analysis-content').style.display = 'block';
 
       var totalSubs = (d.headline || {}).subs_count || 0;
@@ -726,6 +785,70 @@ function loadAnalysis() {
     });
 }
 window.loadAnalysis = loadAnalysis;
+
+function renderBuckets(bs) {
+  if (!bs) return;
+  var fmt = function(n){ return '$' + parseFloat(n||0).toLocaleString('en-US',{minimumFractionDigits:0,maximumFractionDigits:0}); };
+  var buckets = bs.buckets || {};
+  var order   = ['sub_on_file','sub_with_gap','sub_no_ccs_record','supplier','owner_payroll','needs_decision'];
+  var html = '';
+  order.forEach(function(k){
+    var b = buckets[k] || {};
+    var needsDec = k === 'needs_decision';
+    html += '<div class="bucket-box' + (needsDec ? ' bucket-needs-decision' : '') + '">' +
+      '<span class="bb-count">' + (b.count||0) + '</span>' +
+      '<span class="bb-label">' + esc(b.label||k) + '</span>' +
+      '<div class="bb-dollars">' + fmt(b.dollars||0) + '</div>' +
+      '</div>';
+  });
+  document.getElementById('bucket-grid').innerHTML = html;
+
+  var recon = document.getElementById('bucket-recon');
+  if (bs.reconciled) {
+    recon.className = 'bucket-recon ok';
+    recon.textContent = 'Buckets sum to ' + fmt(bs.total_dollars) + ' — matches file total ' + fmt(bs.file_total);
+  } else {
+    recon.className = 'bucket-recon fail';
+    recon.textContent = 'Buckets sum to ' + fmt(bs.total_dollars) + ' but file total is ' + fmt(bs.file_total) + ' — difference ' + fmt(Math.abs(bs.total_dollars - bs.file_total));
+  }
+
+  if ((bs.needs_decision_count || 0) > 0) {
+    recon.textContent += ' · ' + bs.needs_decision_count + ' payee(s) need a decision';
+  }
+}
+
+function renderIntegrityChecks(checks) {
+  if (!checks || !checks.length) return;
+  var html = '';
+  checks.forEach(function(c){
+    var icon   = c.pass ? '✓' : '✗';
+    var color  = c.pass ? '#198754' : '#dc3545';
+    html += '<div class="integrity-row">' +
+      '<span class="ic-icon" style="color:' + color + '">' + icon + '</span>' +
+      '<div>' +
+        '<div class="ic-check">' + esc(c.check) + '</div>' +
+        '<div class="ic-detail">' + esc(c.detail || '') + '</div>' +
+      '</div>' +
+      '</div>';
+  });
+  document.getElementById('integrity-list').innerHTML = html;
+}
+
+function renderContactsNote(contacts) {
+  var el = document.getElementById('contacts-note');
+  if (!el || !contacts) return;
+  var missing = contacts.missing_contact || [];
+  if (missing.length === 0) {
+    el.className = 'contacts-note';
+    el.innerHTML = '<strong>Contacts ready:</strong> all ' + (contacts.with_contact||0) + ' subcontractor(s) needing a certificate have a contact on file.';
+  } else {
+    el.className = 'contacts-note has-missing';
+    var names = missing.map(function(m){ return esc(m.vendor_name || m.payee_raw); }).join(', ');
+    el.innerHTML = '<strong>' + missing.length + ' subcontractor(s) missing contact info:</strong> ' + names +
+      ' — add Agent Email or Vendor Email in Airtable before generating drafts.';
+  }
+  el.style.display = 'block';
+}
 
 function renderAnalysis(subs, headline) {
   if (!subs) return;
