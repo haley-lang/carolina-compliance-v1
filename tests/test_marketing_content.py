@@ -65,150 +65,32 @@ _IDEA_FIELDS = {
 }
 
 
-# ── generate_content_set unit tests ──────────────────────────────────────────
+# ── generate_content_set smoke test (new interface) ───────────────────────────
+# Full coverage lives in test_marketing_voices.py; this file just verifies the
+# route layer wires through correctly.
 
 class TestGenerateContentSet:
     def test_returns_summary_dict(self):
+        from unittest.mock import MagicMock, patch
         from marketing_content_generator import generate_content_set
-        with patch("marketing_content_generator._call_claude", return_value=_SAMPLE_CONTENT), \
-             patch("marketing_content_generator._write_content_queue_record", return_value="recNEW"):
+        created = []
+        mock_tbl = MagicMock()
+        mock_tbl.create.side_effect = lambda f: (created.append(f), {"id": "recX"})[1]
+        mock_api = MagicMock()
+        mock_api.table.return_value = mock_tbl
+        with patch("marketing_content_generator._build_text_content", return_value={}), \
+             patch("marketing_content_generator._build_tiktok_content", return_value={}), \
+             patch("marketing_content_generator.check_claims", return_value=[]), \
+             patch("pyairtable.Api", return_value=mock_api), \
+             patch("site_knowledge.get_all_pages", return_value=[]):
             result = generate_content_set("recIDEA1", _IDEA_FIELDS)
         assert "created" in result
         assert "blocked" in result
         assert "platform_results" in result
 
-    def test_creates_five_records_for_clean_content(self):
-        from marketing_content_generator import generate_content_set
-        with patch("marketing_content_generator._call_claude", return_value=_SAMPLE_CONTENT), \
-             patch("marketing_content_generator._write_content_queue_record", return_value="recNEW"), \
-             patch("marketing_content_generator._guard_text", return_value=(True, "PASS")):
-            result = generate_content_set("recIDEA1", _IDEA_FIELDS)
-        assert result["created"] == 5
-        assert result["blocked"] == 0
 
-    def test_blocked_content_increments_blocked_count(self):
-        from marketing_content_generator import generate_content_set
-        with patch("marketing_content_generator._call_claude", return_value=_SAMPLE_CONTENT), \
-             patch("marketing_content_generator._guard_text", return_value=(False, "FAIL: banned-word:certified")):
-            result = generate_content_set("recIDEA1", _IDEA_FIELDS)
-        assert result["created"] == 0
-        assert result["blocked"] == 5
-
-    def test_returns_empty_when_claude_fails(self):
-        from marketing_content_generator import generate_content_set
-        with patch("marketing_content_generator._call_claude", return_value=None):
-            result = generate_content_set("recIDEA1", _IDEA_FIELDS)
-        assert result["created"] == 0
-        assert result["blocked"] == 0
-
-    def test_platform_results_has_correct_platforms(self):
-        from marketing_content_generator import generate_content_set
-        with patch("marketing_content_generator._call_claude", return_value=_SAMPLE_CONTENT), \
-             patch("marketing_content_generator._write_content_queue_record", return_value="recNEW"), \
-             patch("marketing_content_generator._guard_text", return_value=(True, "PASS")):
-            result = generate_content_set("recIDEA1", _IDEA_FIELDS)
-        platforms = {r["platform"] for r in result["platform_results"]}
-        assert platforms == {"TikTok", "Facebook", "LinkedIn", "Email", "Website FAQ"}
-
-    def test_tiktok_uses_bullets_not_body(self):
-        """TikTok draft text should come from bullets (•-prefixed lines), not a body key."""
-        from marketing_content_generator import generate_content_set
-        captured = []
-
-        def fake_write(idea_id, platform, draft_text, hooks, guard_result, needs_billy):
-            captured.append((platform, draft_text))
-            return "recX"
-
-        with patch("marketing_content_generator._call_claude", return_value=_SAMPLE_CONTENT), \
-             patch("marketing_content_generator._write_content_queue_record", side_effect=fake_write), \
-             patch("marketing_content_generator._guard_text", return_value=(True, "PASS")):
-            generate_content_set("recIDEA1", _IDEA_FIELDS)
-
-        tiktok_drafts = [d for p, d in captured if p == "TikTok"]
-        assert tiktok_drafts, "No TikTok record captured"
-        assert "• Bullet one" in tiktok_drafts[0]
-
-    def test_faq_uses_answer_not_body(self):
-        from marketing_content_generator import generate_content_set
-        captured = []
-
-        def fake_write(idea_id, platform, draft_text, hooks, guard_result, needs_billy):
-            captured.append((platform, draft_text))
-            return "recX"
-
-        with patch("marketing_content_generator._call_claude", return_value=_SAMPLE_CONTENT), \
-             patch("marketing_content_generator._write_content_queue_record", side_effect=fake_write), \
-             patch("marketing_content_generator._guard_text", return_value=(True, "PASS")):
-            generate_content_set("recIDEA1", _IDEA_FIELDS)
-
-        faq_drafts = [d for p, d in captured if p == "Website FAQ"]
-        assert faq_drafts, "No FAQ record captured"
-        assert "certificates on file" in faq_drafts[0]
-
-    def test_needs_billy_passed_through(self):
-        from marketing_content_generator import generate_content_set
-        captured_flags = []
-
-        def fake_write(idea_id, platform, draft_text, hooks, guard_result, needs_billy):
-            captured_flags.append(needs_billy)
-            return "recX"
-
-        with patch("marketing_content_generator._call_claude", return_value=_SAMPLE_CONTENT), \
-             patch("marketing_content_generator._write_content_queue_record", side_effect=fake_write), \
-             patch("marketing_content_generator._guard_text", return_value=(True, "PASS")):
-            generate_content_set("recIDEA1", _IDEA_FIELDS, needs_billy=True)
-
-        assert all(f is True for f in captured_flags)
-
-    def test_write_failure_does_not_crash(self):
-        from marketing_content_generator import generate_content_set
-        with patch("marketing_content_generator._call_claude", return_value=_SAMPLE_CONTENT), \
-             patch("marketing_content_generator._write_content_queue_record", return_value=None), \
-             patch("marketing_content_generator._guard_text", return_value=(True, "PASS")):
-            result = generate_content_set("recIDEA1", _IDEA_FIELDS)
-        assert result["created"] == 0
-
-
-# ── _call_claude unit tests ───────────────────────────────────────────────────
-
-class TestCallClaude:
-    def test_parses_valid_json(self):
-        import json
-        from marketing_content_generator import _call_claude
-        mock_resp = MagicMock()
-        mock_resp.content = [MagicMock(text=json.dumps(_SAMPLE_CONTENT))]
-        with patch("marketing_content_generator.anthropic.Anthropic") as mock_client_cls:
-            mock_client_cls.return_value.messages.create.return_value = mock_resp
-            result = _call_claude(_IDEA_FIELDS)
-        assert result is not None
-        assert "talking_points" in result
-
-    def test_handles_json_in_code_fence(self):
-        import json
-        from marketing_content_generator import _call_claude
-        fenced = "```json\n" + json.dumps(_SAMPLE_CONTENT) + "\n```"
-        mock_resp = MagicMock()
-        mock_resp.content = [MagicMock(text=fenced)]
-        with patch("marketing_content_generator.anthropic.Anthropic") as mock_client_cls:
-            mock_client_cls.return_value.messages.create.return_value = mock_resp
-            result = _call_claude(_IDEA_FIELDS)
-        assert result is not None
-
-    def test_returns_none_on_api_error(self):
-        from marketing_content_generator import _call_claude
-        with patch("marketing_content_generator.anthropic.Anthropic") as mock_client_cls:
-            mock_client_cls.return_value.messages.create.side_effect = Exception("API error")
-            result = _call_claude(_IDEA_FIELDS)
-        assert result is None
-
-    def test_returns_none_on_invalid_json(self):
-        from marketing_content_generator import _call_claude
-        mock_resp = MagicMock()
-        mock_resp.content = [MagicMock(text="not json at all")]
-        with patch("marketing_content_generator.anthropic.Anthropic") as mock_client_cls:
-            mock_client_cls.return_value.messages.create.return_value = mock_resp
-            result = _call_claude(_IDEA_FIELDS)
-        assert result is None
+# TestCallClaude removed — _call_claude signature changed in content generator rewrite.
+# New interface tests live in test_marketing_voices.py.
 
 
 # ── _guard_text unit tests ────────────────────────────────────────────────────
@@ -333,7 +215,7 @@ class TestMarketingPageWithContent:
 
             mock_api.return_value.table.side_effect = table_factory
             resp = authed_client.get("/marketing")
-        assert b"Generate content set" in resp.data
+        assert b"Generate 3 drafts" in resp.data
 
     def test_generate_button_hidden_when_drafts_exist(self, authed_client):
         with patch("review_app._api") as mock_api:
@@ -350,7 +232,7 @@ class TestMarketingPageWithContent:
 
             mock_api.return_value.table.side_effect = table_factory
             resp = authed_client.get("/marketing")
-        assert b"Generate content set" not in resp.data
+        assert b"Generate 3 drafts" not in resp.data
         assert b"Content Drafts" in resp.data
 
     def test_draft_platform_shown(self, authed_client):

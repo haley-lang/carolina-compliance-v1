@@ -23,3 +23,4 @@
 #   cron-followup:           python railway_cron_followup.py   (0 13 * * 1-5)
 #   cron-backup:             python airtable_backup.py         (0 6 * * 0)
 #   cron-pulse:              python pulse_cron.py              (*/15 * * * *)
+#   cron-site-knowledge:     python site_knowledge_refresh.py  (0 7 * * 1)   weekly Mon 7am UTC

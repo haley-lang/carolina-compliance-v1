@@ -16,6 +16,11 @@ PLATFORM_MEDIUM = {
     "LinkedIn": "social",
     "Email": "email",
     "Website FAQ": "web",
+    "linkedin_personal": "social",
+    "ccs_facebook": "social",
+    "ccs_tiktok": "social",
+    "local_facebook_group": "social",
+    "contractor_facebook_group": "social",
 }
 
 UTM_CAMPAIGN = "ccs-mktg"
@@ -40,17 +45,19 @@ def build_utm_link(
     idea_text: str,
     platform: str,
     page: str = "home",
+    cta_type: str | None = None,
 ) -> str:
     """
     Build a UTM URL for a given content piece.
 
     Args:
         idea_text: The idea or draft text (used to generate the content slug).
-        platform: One of TikTok, Facebook, LinkedIn, Email, Website FAQ.
+        platform: Channel name (linkedin_personal, ccs_facebook, etc.) or legacy value.
         page: 'home', 'demo', or 'audit' — which CCS page to link to.
+        cta_type: Optional CTA variant ('message_me' or 'sign_up') — stored as utm_term.
 
     Returns:
-        Full URL with utm_source, utm_medium, utm_campaign, utm_content params.
+        Full URL with UTM params.
     """
     base_map = {
         "home": UTM_BASE_WEBSITE,
@@ -64,11 +71,15 @@ def build_utm_link(
     uid = _unique_id(idea_text, platform)
     content_param = f"{slug}-{uid}"
 
-    params = urllib.parse.urlencode({
-        "utm_source": source,
-        "utm_medium": medium,
+    p: dict[str, str] = {
+        "utm_source":   source,
+        "utm_medium":   medium,
         "utm_campaign": UTM_CAMPAIGN,
-        "utm_content": content_param,
-    })
+        "utm_content":  content_param,
+    }
+    if cta_type:
+        p["utm_term"] = cta_type
+
+    params = urllib.parse.urlencode(p)
     sep = "&" if "?" in base_url else "?"
     return f"{base_url}{sep}{params}"
