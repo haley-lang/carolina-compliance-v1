@@ -148,6 +148,7 @@ CREATE INDEX IF NOT EXISTS idx_payee_class_audit ON payee_classifications(audit_
 CREATE INDEX IF NOT EXISTS idx_payee_class_client ON payee_classifications(client_id, payee_raw);
 CREATE INDEX IF NOT EXISTS idx_payee_aliases_client ON payee_aliases(client_id, payee_raw);
 CREATE INDEX IF NOT EXISTS idx_audit_emails_audit ON audit_emails(audit_id);
+
 """
 
 # Shared starter list of obvious non-subs (client_id=NULL = shared across all clients)
@@ -599,6 +600,8 @@ def seed_starter_list() -> None:
     for normalized, group in _STARTER_NON_SUBS:
         save_to_library(None, normalized, group, source="starter", confirmed=1)
 
+
+# ── Review tokens ─────────────────────────────────────────────────────────────
 
 # ── Auto-init ─────────────────────────────────────────────────────────────────
 init_db()

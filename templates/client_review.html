@@ -1,0 +1,673 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Payee Review — Carolina Compliance Solutions</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --navy:   #102042;
+      --gold:   #C8A951;
+      --offwhite: #F9F7F4;
+      --border: #E0DCDA;
+      --text:   #1A1A2E;
+      --muted:  #6B6E7B;
+      --font-sans: 'Plus Jakarta Sans', system-ui, sans-serif;
+      --font-serif: 'Instrument Serif', Georgia, serif;
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      font-family: var(--font-sans);
+      background: var(--offwhite);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    /* ── Header ── */
+    .cr-header {
+      background: var(--navy);
+      padding: 16px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .cr-logo { height: 32px; }
+    .cr-tagline {
+      font-family: var(--font-serif);
+      font-style: italic;
+      color: rgba(255,255,255,0.65);
+      font-size: 0.82rem;
+    }
+
+    /* ── Main container ── */
+    .cr-wrap {
+      max-width: 520px;
+      margin: 0 auto;
+      padding: 24px 16px 60px;
+    }
+
+    /* ── Progress bar ── */
+    .cr-progress-wrap {
+      margin-bottom: 20px;
+    }
+    .cr-progress-label {
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-bottom: 6px;
+      display: flex;
+      justify-content: space-between;
+    }
+    .cr-progress-track {
+      height: 6px;
+      background: var(--border);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .cr-progress-fill {
+      height: 100%;
+      background: var(--gold);
+      border-radius: 3px;
+      transition: width 0.4s ease;
+    }
+
+    /* ── Payee card ── */
+    .cr-card {
+      background: #fff;
+      border: 1.5px solid var(--border);
+      border-radius: 14px;
+      padding: 24px 20px 20px;
+      margin-bottom: 16px;
+    }
+    .cr-payee-name {
+      font-family: var(--font-serif);
+      font-size: 1.5rem;
+      color: var(--navy);
+      margin: 0 0 4px;
+      line-height: 1.2;
+    }
+    .cr-payee-meta {
+      font-size: 0.84rem;
+      color: var(--muted);
+      margin: 0 0 20px;
+    }
+    .cr-question {
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--navy);
+      margin: 0 0 12px;
+    }
+
+    /* ── Answer buttons ── */
+    .cr-answers {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .cr-answer-btn {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      background: #fff;
+      border: 2px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+      cursor: pointer;
+      text-align: left;
+      transition: border-color 0.1s, background 0.1s;
+      font-family: var(--font-sans);
+      width: 100%;
+    }
+    .cr-answer-btn:hover {
+      border-color: var(--navy);
+      background: var(--offwhite);
+    }
+    .cr-answer-btn.selected {
+      border-color: var(--navy);
+      background: #EBF0F8;
+    }
+    .cr-answer-btn.advancing {
+      border-color: var(--gold);
+      background: #FBF5E6;
+    }
+    .cr-answer-icon {
+      font-size: 1.3rem;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+    .cr-answer-label {
+      font-weight: 600;
+      font-size: 0.95rem;
+      color: var(--navy);
+    }
+    .cr-answer-hint {
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+
+    /* ── Something else text box ── */
+    .cr-custom-wrap {
+      margin-top: 10px;
+      display: none;
+    }
+    .cr-custom-wrap.visible { display: block; }
+    .cr-custom-input {
+      width: 100%;
+      border: 1.5px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-family: var(--font-sans);
+      font-size: 0.9rem;
+      color: var(--text);
+      resize: none;
+      outline: none;
+    }
+    .cr-custom-input:focus { border-color: var(--navy); }
+    .cr-custom-submit {
+      margin-top: 8px;
+      background: var(--navy);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 20px;
+      font-family: var(--font-sans);
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      width: 100%;
+    }
+    .cr-custom-submit:hover { background: #1a3060; }
+
+    /* ── Skip / Back row ── */
+    .cr-nav-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 10px;
+    }
+    .cr-nav-link {
+      background: none;
+      border: none;
+      color: var(--muted);
+      font-family: var(--font-sans);
+      font-size: 0.84rem;
+      cursor: pointer;
+      padding: 6px 2px;
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+    .cr-nav-link:hover { color: var(--navy); }
+    .cr-nav-link:disabled { opacity: 0.35; cursor: default; }
+
+    /* ── Transition screen (95% threshold) ── */
+    .cr-screen {
+      display: none;
+      text-align: center;
+      padding: 40px 10px 20px;
+    }
+    .cr-screen.active { display: block; }
+    .cr-screen-icon { font-size: 2.5rem; margin-bottom: 16px; }
+    .cr-screen-title {
+      font-family: var(--font-serif);
+      font-size: 1.6rem;
+      color: var(--navy);
+      margin: 0 0 12px;
+    }
+    .cr-screen-body {
+      font-size: 0.95rem;
+      color: var(--muted);
+      line-height: 1.6;
+      max-width: 380px;
+      margin: 0 auto 24px;
+    }
+    .cr-cta-btn {
+      background: var(--navy);
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      padding: 14px 32px;
+      font-family: var(--font-sans);
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .cr-cta-btn:hover { background: #1a3060; }
+
+    /* ── End screen counts ── */
+    .cr-count-list {
+      list-style: none;
+      padding: 0;
+      margin: 0 auto 20px;
+      max-width: 320px;
+      text-align: left;
+    }
+    .cr-count-list li {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.95rem;
+    }
+    .cr-count-list li:last-child { border-bottom: none; }
+    .cr-count-num {
+      font-weight: 700;
+      font-size: 1.1rem;
+      color: var(--navy);
+      min-width: 28px;
+      text-align: right;
+    }
+    .cr-count-label { color: var(--text); }
+    .cr-next-steps {
+      font-size: 0.88rem;
+      color: var(--muted);
+      line-height: 1.6;
+      max-width: 360px;
+      margin: 0 auto;
+      background: var(--offwhite);
+      border: 1.5px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 18px;
+      text-align: left;
+    }
+
+    /* ── Expired / error screen ── */
+    .cr-expired {
+      text-align: center;
+      padding: 60px 20px;
+    }
+    .cr-expired-icon { font-size: 2.5rem; margin-bottom: 16px; }
+    .cr-expired-title {
+      font-family: var(--font-serif);
+      font-size: 1.5rem;
+      color: var(--navy);
+      margin: 0 0 10px;
+    }
+    .cr-expired-body {
+      font-size: 0.9rem;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    /* ── Loading spinner ── */
+    .cr-loading {
+      text-align: center;
+      padding: 60px 20px;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    /* ── Error banner ── */
+    .cr-error-banner {
+      background: #f8d7da;
+      color: #842029;
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 0.85rem;
+      margin-bottom: 12px;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+
+<div class="cr-header">
+  <img src="/static/ccs_logo_light.svg" alt="Carolina Compliance Solutions" class="cr-logo">
+  <span class="cr-tagline">Insurance compliance, simplified.</span>
+</div>
+
+{% if expired %}
+<div class="cr-wrap">
+  <div class="cr-expired">
+    <div class="cr-expired-icon">🔒</div>
+    <h1 class="cr-expired-title">This link has expired</h1>
+    <p class="cr-expired-body">
+      Review links are valid for 14 days. Please contact Haley at Carolina Compliance Solutions
+      to get a new link.
+    </p>
+  </div>
+</div>
+{% else %}
+<div class="cr-wrap" id="cr-wrap">
+
+  <!-- Loading state -->
+  <div class="cr-loading" id="cr-loading">Loading your payees…</div>
+
+  <!-- Error banner -->
+  <div class="cr-error-banner" id="cr-error"></div>
+
+  <!-- Main review flow -->
+  <div id="cr-review" style="display:none">
+
+    <!-- Progress -->
+    <div class="cr-progress-wrap">
+      <div class="cr-progress-label">
+        <span id="cr-progress-text">1 of …</span>
+        <span id="cr-progress-pct"></span>
+      </div>
+      <div class="cr-progress-track">
+        <div class="cr-progress-fill" id="cr-progress-fill" style="width:0%"></div>
+      </div>
+    </div>
+
+    <!-- Payee card -->
+    <div class="cr-card" id="cr-payee-card">
+      <p class="cr-payee-name" id="cr-payee-name"></p>
+      <p class="cr-payee-meta" id="cr-payee-meta"></p>
+      <p class="cr-question">How would you describe this company?</p>
+      <div class="cr-answers">
+        <button class="cr-answer-btn" id="btn-sub" onclick="selectAnswer('Subcontractor')">
+          <span class="cr-answer-icon">🔨</span>
+          <div>
+            <div class="cr-answer-label">Subcontractor</div>
+            <div class="cr-answer-hint">Did work on your jobs</div>
+          </div>
+        </button>
+        <button class="cr-answer-btn" id="btn-supplier" onclick="selectAnswer('Supplier')">
+          <span class="cr-answer-icon">📦</span>
+          <div>
+            <div class="cr-answer-label">Supplier</div>
+            <div class="cr-answer-hint">Sold you materials</div>
+          </div>
+        </button>
+        <button class="cr-answer-btn" id="btn-owner" onclick="selectAnswer('Owner or payroll')">
+          <span class="cr-answer-icon">👤</span>
+          <div>
+            <div class="cr-answer-label">Owner or payroll</div>
+            <div class="cr-answer-hint">Company owner, employee, or payroll</div>
+          </div>
+        </button>
+        <button class="cr-answer-btn" id="btn-else" onclick="toggleCustom()">
+          <span class="cr-answer-icon">💬</span>
+          <div>
+            <div class="cr-answer-label">Something else</div>
+            <div class="cr-answer-hint">Type a quick note</div>
+          </div>
+        </button>
+      </div>
+
+      <!-- Custom answer box -->
+      <div class="cr-custom-wrap" id="cr-custom-wrap">
+        <textarea class="cr-custom-input" id="cr-custom-input"
+                  rows="2" placeholder="e.g. equipment rental, loan repayment…"
+                  maxlength="200"></textarea>
+        <button class="cr-custom-submit" onclick="submitCustom()">Save &amp; continue</button>
+      </div>
+
+      <div class="cr-nav-row">
+        <button class="cr-nav-link" id="btn-back" onclick="goBack()" disabled>← Back</button>
+        <button class="cr-nav-link" onclick="skipPayee()">Skip for now →</button>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Transition screen: 95% coverage reached -->
+  <div class="cr-screen" id="cr-transition">
+    <div class="cr-screen-icon">✅</div>
+    <h2 class="cr-screen-title">That covers the main ones</h2>
+    <p class="cr-screen-body" id="cr-transition-body"></p>
+    <button class="cr-cta-btn" onclick="showEnd()">See your summary →</button>
+  </div>
+
+  <!-- End screen -->
+  <div class="cr-screen" id="cr-end">
+    <div class="cr-screen-icon">🎉</div>
+    <h2 class="cr-screen-title">All done — thank you!</h2>
+    <p class="cr-screen-body">Here's what you told us:</p>
+    <ul class="cr-count-list" id="cr-end-counts"></ul>
+    <div class="cr-next-steps">
+      Haley will check which subcontractors have certificates of insurance on file and follow up on any gaps.
+    </div>
+  </div>
+
+</div>
+{% endif %}
+
+{% if not expired %}
+<script>
+(function() {
+
+var TOKEN      = {{ token | tojson }};
+var DATA_URL   = '/review/' + TOKEN + '/data';
+var ANSWER_URL = '/review/' + TOKEN + '/answer';
+
+var payees     = [];   // main payees (up to 95% threshold)
+var smallCount = 0;
+var answers    = {};   // {payee_raw: {answer, custom_answer}}
+var cursor     = 0;    // index into payees[] for the current payee
+var history    = [];   // stack of cursor positions for Back
+
+function fmt(n) {
+  return '$' + Number(n).toLocaleString('en-US', {minimumFractionDigits: 0, maximumFractionDigits: 0});
+}
+function fmtTxn(n) {
+  return n + ' payment' + (n !== 1 ? 's' : '');
+}
+
+function showError(msg) {
+  var el = document.getElementById('cr-error');
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+function hideError() {
+  document.getElementById('cr-error').style.display = 'none';
+}
+
+// ── Load data ────────────────────────────────────────────────────────────────
+fetch(DATA_URL)
+  .then(function(r) {
+    if (r.status === 410) return r.json().then(function(d) { throw new Error('expired'); });
+    return r.json();
+  })
+  .then(function(d) {
+    document.getElementById('cr-loading').style.display = 'none';
+    if (!d.ok) throw new Error(d.error || 'Failed to load');
+    payees     = d.payees || [];
+    smallCount = d.small_count || 0;
+    answers    = d.existing_answers || {};
+    renderCurrent();
+    document.getElementById('cr-review').style.display = 'block';
+  })
+  .catch(function(err) {
+    document.getElementById('cr-loading').style.display = 'none';
+    if (err.message === 'expired') {
+      // Redirect to expired state without full page reload
+      document.getElementById('cr-wrap').innerHTML =
+        '<div class="cr-expired">' +
+        '<div class="cr-expired-icon">🔒</div>' +
+        '<h1 class="cr-expired-title">This link has expired</h1>' +
+        '<p class="cr-expired-body">Please contact Haley at Carolina Compliance Solutions to get a new link.</p>' +
+        '</div>';
+    } else {
+      showError('Could not load payees. Please refresh the page.');
+    }
+  });
+
+// ── Render current payee ─────────────────────────────────────────────────────
+function renderCurrent() {
+  hideError();
+  if (cursor >= payees.length) {
+    showTransition();
+    return;
+  }
+  var p = payees[cursor];
+
+  document.getElementById('cr-payee-name').textContent = p.payee_raw;
+  document.getElementById('cr-payee-meta').textContent =
+    fmt(p.total_paid) + ' total · ' + fmtTxn(p.txn_count);
+
+  // Progress
+  var answered = Object.keys(answers).filter(function(k) {
+    return answers[k] && answers[k].answer;
+  }).length;
+  var total = payees.length;
+  var pct = total > 0 ? Math.round((cursor / total) * 100) : 0;
+  document.getElementById('cr-progress-text').textContent = (cursor + 1) + ' of ' + total;
+  document.getElementById('cr-progress-pct').textContent = pct + '%';
+  document.getElementById('cr-progress-fill').style.width = pct + '%';
+
+  // Reset buttons
+  ['btn-sub','btn-supplier','btn-owner','btn-else'].forEach(function(id) {
+    document.getElementById(id).classList.remove('selected', 'advancing');
+  });
+  document.getElementById('cr-custom-wrap').classList.remove('visible');
+  document.getElementById('cr-custom-input').value = '';
+
+  // Pre-select if already answered
+  var existing = answers[p.payee_raw];
+  if (existing && existing.answer) {
+    var btnId = answerToBtnId(existing.answer);
+    if (btnId) document.getElementById(btnId).classList.add('selected');
+    if (existing.answer === 'Something else') {
+      document.getElementById('cr-custom-wrap').classList.add('visible');
+      document.getElementById('cr-custom-input').value = existing.custom_answer || '';
+    }
+  }
+
+  // Back button
+  document.getElementById('btn-back').disabled = (history.length === 0);
+}
+
+function answerToBtnId(answer) {
+  var map = {
+    'Subcontractor': 'btn-sub',
+    'Supplier': 'btn-supplier',
+    'Owner or payroll': 'btn-owner',
+    'Something else': 'btn-else',
+  };
+  return map[answer] || null;
+}
+
+// ── Answer selection ──────────────────────────────────────────────────────────
+function selectAnswer(answer) {
+  var p = payees[cursor];
+  var btnId = answerToBtnId(answer);
+
+  // Animate
+  ['btn-sub','btn-supplier','btn-owner','btn-else'].forEach(function(id) {
+    document.getElementById(id).classList.remove('selected', 'advancing');
+  });
+  if (btnId) document.getElementById(btnId).classList.add('advancing');
+
+  // Save locally immediately
+  answers[p.payee_raw] = {answer: answer, custom_answer: ''};
+
+  // Post to server
+  postAnswer(p.payee_raw, answer, '');
+
+  // Auto-advance after 200ms
+  setTimeout(function() {
+    history.push(cursor);
+    cursor++;
+    renderCurrent();
+  }, 200);
+}
+
+function toggleCustom() {
+  var wrap = document.getElementById('cr-custom-wrap');
+  wrap.classList.toggle('visible');
+  if (wrap.classList.contains('visible')) {
+    document.getElementById('cr-custom-input').focus();
+  }
+  document.getElementById('btn-else').classList.add('selected');
+}
+
+function submitCustom() {
+  var p = payees[cursor];
+  var custom = document.getElementById('cr-custom-input').value.trim();
+  if (!custom) {
+    document.getElementById('cr-custom-input').focus();
+    return;
+  }
+  answers[p.payee_raw] = {answer: 'Something else', custom_answer: custom};
+  postAnswer(p.payee_raw, 'Something else', custom);
+  history.push(cursor);
+  cursor++;
+  renderCurrent();
+}
+
+function skipPayee() {
+  history.push(cursor);
+  cursor++;
+  renderCurrent();
+}
+
+function goBack() {
+  if (history.length === 0) return;
+  cursor = history.pop();
+  renderCurrent();
+}
+
+// ── POST answer to server ─────────────────────────────────────────────────────
+function postAnswer(payeeRaw, answer, customAnswer) {
+  fetch(ANSWER_URL, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({payee_raw: payeeRaw, answer: answer, custom_answer: customAnswer}),
+  }).catch(function(err) {
+    showError('Auto-save failed — please try again or refresh.');
+  });
+}
+
+// ── Transition screen ─────────────────────────────────────────────────────────
+function showTransition() {
+  document.getElementById('cr-review').style.display = 'none';
+  if (smallCount > 0) {
+    document.getElementById('cr-transition-body').textContent =
+      'The remaining ' + smallCount + ' small payment' +
+      (smallCount !== 1 ? 's' : '') + ' will go to Haley to review.';
+    document.getElementById('cr-transition').classList.add('active');
+  } else {
+    showEnd();
+  }
+}
+
+function showEnd() {
+  document.getElementById('cr-transition').classList.remove('active');
+  document.getElementById('cr-end').classList.add('active');
+
+  // Tally counts from answers
+  var counts = {
+    'Subcontractor': 0,
+    'Supplier': 0,
+    'Owner or payroll': 0,
+    'Something else': 0,
+  };
+  Object.values(answers).forEach(function(a) {
+    if (a && a.answer && counts.hasOwnProperty(a.answer)) {
+      counts[a.answer]++;
+    }
+  });
+
+  var icons = {
+    'Subcontractor': '🔨',
+    'Supplier': '📦',
+    'Owner or payroll': '👤',
+    'Something else': '💬',
+  };
+  var html = '';
+  Object.entries(counts).forEach(function(pair) {
+    var label = pair[0], count = pair[1];
+    if (count === 0) return;
+    html += '<li>' +
+      '<span class="cr-count-num">' + count + '</span>' +
+      '<span class="cr-answer-icon" style="font-size:1rem">' + icons[label] + '</span>' +
+      '<span class="cr-count-label">' + label + (count !== 1 ? 's' : '') + '</span>' +
+      '</li>';
+  });
+  if (!html) html = '<li><span class="cr-count-label" style="color:var(--muted)">No answers recorded yet.</span></li>';
+  document.getElementById('cr-end-counts').innerHTML = html;
+}
+
+})();
+</script>
+{% endif %}
+
+</body>
+</html>

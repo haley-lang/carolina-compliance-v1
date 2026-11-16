@@ -325,6 +325,31 @@
             <button class="btn btn-sm btn-primary" onclick="confirmAllLikely()">Confirm all likely matches</button>
           </div>
         </div>
+        <!-- Sorting sheet actions -->
+        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:6px 0 8px; font-size:0.85rem;">
+          <a href="/audits/{{ audit.id }}/payees/sorting-sheet"
+             class="btn btn-sm btn-secondary"
+             id="btn-export-sort"
+             {% if not files %}style="opacity:0.4; pointer-events:none"{% endif %}>
+            ↓ Export sorting sheet
+          </a>
+          <label class="btn btn-sm btn-secondary" style="cursor:pointer; margin:0; font-weight:400">
+            ↑ Import sorted sheet
+            <input type="file" id="sort-import-input" accept=".xlsx" style="display:none">
+          </label>
+          <span id="sort-import-status" style="display:none; color:var(--secondary); font-size:0.82rem"></span>
+          <button class="btn btn-sm btn-secondary" id="btn-copy-review-link" onclick="copyReviewLink()"
+                  {% if not files %}style="opacity:0.4; pointer-events:none"{% endif %}>
+            &#128279; Copy client link
+          </button>
+          <button class="btn btn-sm btn-secondary" id="btn-sync-reviews" onclick="syncClientReviews()"
+                  {% if not files %}style="opacity:0.4; pointer-events:none"{% endif %}>
+            &#8635; Sync client answers
+          </button>
+          <span id="review-link-status" style="display:none; color:var(--secondary); font-size:0.82rem"></span>
+        </div>
+        <div id="sort-import-result" style="display:none; margin:0 0 10px; padding:8px 14px; background:#d1e7dd; border-radius:6px; font-size:0.86rem; color:#0a3622;"></div>
+
         <div class="mb-8" style="font-size:0.82rem; color:var(--secondary)" id="payee-group-counts"></div>
         <div style="overflow-x:auto">
           <table class="payee-table" id="payees-tbl">
@@ -1170,6 +1195,116 @@ function apiPost(url, data) {
     headers: {'Content-Type':'application/json'},
     body: JSON.stringify({...data, csrf_token: CSRF_TOKEN}),
   }).then(function(r){ return r.json(); });
+}
+
+// ── Sorting sheet import ─────────────────────────────────────────────────────
+(function() {
+  var inp = document.getElementById('sort-import-input');
+  if (!inp) return;
+  inp.addEventListener('change', function() {
+    if (!this.files.length) return;
+    var fd = new FormData();
+    fd.append('csrf_token', CSRF_TOKEN);
+    fd.append('file', this.files[0]);
+
+    var statusEl = document.getElementById('sort-import-status');
+    var resultEl = document.getElementById('sort-import-result');
+    statusEl.textContent = 'Importing…';
+    statusEl.style.display = 'inline';
+    resultEl.style.display = 'none';
+
+    fetch('/audits/' + AUDIT_ID + '/payees/import-sorting-sheet', {method:'POST', body:fd})
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        statusEl.style.display = 'none';
+        resultEl.style.display = 'block';
+        if (d.ok) {
+          resultEl.style.background = '#d1e7dd';
+          resultEl.style.color = '#0a3622';
+          var msg = d.updated + ' payee' + (d.updated !== 1 ? 's' : '') + ' updated';
+          if (d.skipped) msg += ', ' + d.skipped + ' skipped (no answer)';
+          if (d.errors && d.errors.length) msg += '. Warnings: ' + d.errors.join('; ');
+          resultEl.textContent = msg;
+          // Reload payees and analysis so buckets reflect the new answers
+          payeesData   = null;
+          analysisData = null;
+          loadPayees();
+          if (document.getElementById('sec-analysis').classList.contains('open')) loadAnalysis();
+        } else {
+          resultEl.style.background = '#f8d7da';
+          resultEl.style.color = '#842029';
+          resultEl.textContent = 'Import error: ' + (d.error || 'Unknown error');
+        }
+        inp.value = '';
+      })
+      .catch(function() {
+        statusEl.style.display = 'none';
+        resultEl.style.display = 'block';
+        resultEl.style.background = '#f8d7da';
+        resultEl.style.color = '#842029';
+        resultEl.textContent = 'Upload failed — check the file and try again.';
+        inp.value = '';
+      });
+  });
+})();
+
+// ── Client review link ────────────────────────────────────────────────────────
+function copyReviewLink() {
+  var btn = document.getElementById('btn-copy-review-link');
+  var statusEl = document.getElementById('review-link-status');
+  btn.disabled = true;
+  statusEl.textContent = 'Generating…';
+  statusEl.style.display = 'inline';
+  apiPost('/audits/' + AUDIT_ID + '/review-link', {})
+    .then(function(d) {
+      if (d.ok) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(d.url).then(function() {
+            statusEl.textContent = 'Link copied!';
+            setTimeout(function() { statusEl.style.display = 'none'; }, 4000);
+          }).catch(function() {
+            statusEl.textContent = d.url;
+          });
+        } else {
+          statusEl.textContent = d.url;
+        }
+      } else {
+        statusEl.textContent = 'Error: ' + (d.error || 'Could not generate link');
+      }
+      btn.disabled = false;
+    })
+    .catch(function() {
+      statusEl.textContent = 'Request failed';
+      btn.disabled = false;
+    });
+}
+
+function syncClientReviews() {
+  var btn = document.getElementById('btn-sync-reviews');
+  var statusEl = document.getElementById('review-link-status');
+  btn.disabled = true;
+  statusEl.textContent = 'Syncing…';
+  statusEl.style.display = 'inline';
+  apiPost('/audits/' + AUDIT_ID + '/sync-client-reviews', {})
+    .then(function(d) {
+      btn.disabled = false;
+      if (d.ok) {
+        var msg = d.applied + ' answer' + (d.applied !== 1 ? 's' : '') + ' applied';
+        if (d.total > d.applied) msg += ' (' + d.total + ' total responses)';
+        statusEl.textContent = msg;
+        payeesData   = null;
+        analysisData = null;
+        loadPayees();
+        if (document.getElementById('sec-analysis').classList.contains('open')) loadAnalysis();
+        setTimeout(function() { statusEl.style.display = 'none'; }, 5000);
+      } else {
+        statusEl.textContent = 'Sync error: ' + (d.error || 'Unknown');
+      }
+    })
+    .catch(function() {
+      statusEl.textContent = 'Request failed';
+      btn.disabled = false;
+    });
 }
 
 document.addEventListener('DOMContentLoaded', function () {

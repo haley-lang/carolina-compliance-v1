@@ -65,6 +65,8 @@ VENDORS_TABLE_ID           = "tblsOphSd5DKSZEro"
 CLIENTS_TABLE_ID           = "tbltnBIWke20IEI3K"
 VCA_TABLE_ID               = "tblpYKywfs0YHiQ98"
 EMAIL_MESSAGES_TABLE_ID    = "tblE5WKGwLF6eHLwA"
+PAYEE_REVIEWS_TABLE_ID     = "tbluwNLyTNAh244ZT"   # client-facing payee review answers
+AUDIT_REVIEW_TOKENS_TABLE_ID = "tblcWHjGgXhKIOX35" # client review link tokens
 RTR_CLIENT_ID              = "recG2hxGoJKdgBr4M"
 
 _THREAD_KEY_ENABLED = os.environ.get("THREAD_KEY_ENABLED", "1").lower() not in ("0", "false", "no")
@@ -6676,6 +6678,308 @@ def audit_payees_update_one(audit_id):
     return jsonify({"ok": True})
 
 
+# ── Payee sorting sheet ───────────────────────────────────────────────────────
+
+@app.route("/audits/<audit_id>/payees/sorting-sheet")
+@login_required
+def audit_sorting_sheet(audit_id):
+    """Download an Excel sorting sheet — payees ranked by total paid."""
+    import io
+    from flask import send_file
+
+    audit = _astore.get_audit(audit_id)
+    if not audit:
+        abort(404)
+
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment
+        from openpyxl.worksheet.datavalidation import DataValidation
+    except ImportError:
+        abort(500)
+
+    pay_summary = _astore.get_payee_summary(
+        audit_id, audit["start_date"], audit["end_date"]
+    )
+    classifications = _astore.get_payee_classifications(audit_id)
+    cls_by_payee = {c["payee_raw"]: c for c in classifications}
+
+    grand_total = sum(float(p["total_amount"] or 0) for p in pay_summary)
+
+    rows = []
+    for p in pay_summary:
+        raw = p["payee_raw"]
+        cls = cls_by_payee.get(raw, {})
+        rows.append({
+            "payee_raw":   raw,
+            "total_paid":  float(p["total_amount"] or 0),
+            "payee_group": cls.get("payee_group", "unclear"),
+            "match_type":  cls.get("match_type", ""),
+            "vendor_name": cls.get("vendor_name", ""),
+            "trade":       cls.get("trade", ""),
+        })
+    rows.sort(key=lambda r: -r["total_paid"])
+
+    def _guess(row):
+        pg = row["payee_group"]
+        mt = row["match_type"]
+        vn = row["vendor_name"]
+        if pg == "ccs_vendor":
+            return "Sub"
+        if pg == "likely_sub":
+            return "Sub"
+        if pg == "unclear" and mt == "possible" and vn:
+            return f"Needs confirming ({vn}?)"
+        if pg == "supplier":
+            return "Supplier"
+        if pg == "not_sub":
+            return "Not a sub"
+        if pg == "owner_payroll":
+            return "Owner"
+        return ""
+
+    SMALL = 1000.0
+    main_rows  = [r for r in rows if r["total_paid"] >= SMALL]
+    small_rows = [r for r in rows if r["total_paid"] < SMALL]
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Payee Sort"
+
+    HDR_FILL   = PatternFill("solid", fgColor="102042")
+    HDR_FONT   = Font(bold=True, color="FFFFFF", size=10)
+    SEP_FILL   = PatternFill("solid", fgColor="DDD8CF")
+    GUESS_FILL = PatternFill("solid", fgColor="EEF2FA")
+    ANS_FILL   = PatternFill("solid", fgColor="FEFEF5")
+    ALT_FILL   = PatternFill("solid", fgColor="F7F6F3")
+    BOLD       = Font(bold=True)
+
+    ws.column_dimensions["A"].width = 38
+    ws.column_dimensions["B"].width = 14
+    ws.column_dimensions["C"].width = 10
+    ws.column_dimensions["D"].width = 11
+    ws.column_dimensions["E"].width = 30
+    ws.column_dimensions["F"].width = 18
+    ws.column_dimensions["G"].width = 18
+    ws.column_dimensions["H"].width = 30
+
+    headers = [
+        "Payee Name", "Total Paid", "% of Total", "Running %",
+        "System Guess", "Billy's Answer", "Trade", "Notes",
+    ]
+    ws.row_dimensions[1].height = 20
+    for ci, h in enumerate(headers, 1):
+        c = ws.cell(row=1, column=ci, value=h)
+        c.font = HDR_FONT
+        c.fill = HDR_FILL
+        c.alignment = Alignment(horizontal="center", vertical="center")
+
+    running_pct = 0.0
+    cur_row = 2
+
+    def _write_row(r):
+        nonlocal running_pct, cur_row
+        total = r["total_paid"]
+        pct   = (total / grand_total * 100) if grand_total > 0 else 0.0
+        running_pct += pct
+        alt   = (cur_row % 2 == 0)
+
+        ws.cell(row=cur_row, column=1).value = r["payee_raw"]
+        c2 = ws.cell(row=cur_row, column=2, value=total)
+        c2.number_format = '#,##0.00'
+        c3 = ws.cell(row=cur_row, column=3, value=round(pct / 100, 6))
+        c3.number_format = '0.0%'
+        c4 = ws.cell(row=cur_row, column=4, value=round(running_pct / 100, 6))
+        c4.number_format = '0.0%'
+        ws.cell(row=cur_row, column=5, value=_guess(r)).fill = GUESS_FILL
+        ws.cell(row=cur_row, column=6, value="").fill = ANS_FILL
+        ws.cell(row=cur_row, column=7, value=r.get("trade", ""))
+        ws.cell(row=cur_row, column=8, value="")
+
+        if alt:
+            for col in (1, 2, 3, 4):
+                cell = ws.cell(row=cur_row, column=col)
+                if not (cell.fill and cell.fill.patternType == "solid"):
+                    cell.fill = ALT_FILL
+
+        cur_row += 1
+
+    for r in main_rows:
+        _write_row(r)
+
+    if small_rows:
+        cur_row += 1  # blank gap row
+        sep = ws.cell(
+            row=cur_row, column=1,
+            value=f"Small payments (under $1,000)  —  {len(small_rows)} payees",
+        )
+        sep.font = Font(bold=True, size=10, italic=True, color="555555")
+        sep.fill = SEP_FILL
+        for col in range(2, 9):
+            ws.cell(row=cur_row, column=col).fill = SEP_FILL
+        ws.merge_cells(f"A{cur_row}:H{cur_row}")
+        cur_row += 1
+        for r in small_rows:
+            _write_row(r)
+
+    # Total row
+    cur_row += 1
+    ws.cell(row=cur_row, column=1, value="TOTAL").font = BOLD
+    tv = ws.cell(row=cur_row, column=2, value=grand_total)
+    tv.font = BOLD
+    tv.number_format = '#,##0.00'
+
+    # Data validation dropdown for Billy's Answer
+    last_data_row = 1 + len(main_rows) + len(small_rows)
+    dv = DataValidation(
+        type="list",
+        formula1='"Sub,Supplier,Owner,Not a sub"',
+        allow_blank=True,
+        showDropDown=False,
+        sqref=f"F2:F{last_data_row}",
+    )
+    ws.add_data_validation(dv)
+    ws.freeze_panes = "A2"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    slug = (audit.get("client_name") or "audit").replace(" ", "_").replace("/", "-")
+    return send_file(
+        buf,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name=f"{slug}_payee_sort.xlsx",
+    )
+
+
+@app.route("/audits/<audit_id>/payees/import-sorting-sheet", methods=["POST"])
+@login_required
+@csrf_protect
+def audit_import_sorting_sheet(audit_id):
+    """Import a filled-in payee sorting sheet and apply Billy's answers."""
+    from flask import jsonify
+
+    audit = _astore.get_audit(audit_id)
+    if not audit:
+        return jsonify({"ok": False, "error": "Not found"}), 404
+
+    if "file" not in request.files or not request.files["file"].filename:
+        return jsonify({"ok": False, "error": "No file uploaded"}), 400
+
+    try:
+        import openpyxl
+    except ImportError:
+        return jsonify({"ok": False, "error": "openpyxl not installed"}), 500
+
+    client_id = audit["client_id"]
+
+    cls_all    = _astore.get_payee_classifications(audit_id)
+    cls_by_raw = {c["payee_raw"]: c for c in cls_all}
+
+    # Maps Billy's Answer text → payee_group (pre-vendor-check)
+    _ANSWER_MAP = {
+        "sub":       None,          # resolved below based on vendor linkage
+        "supplier":  "supplier",
+        "owner":     "owner_payroll",
+        "not a sub": "not_sub",
+    }
+
+    file_obj = request.files["file"]
+    try:
+        wb = openpyxl.load_workbook(filename=file_obj, data_only=True)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Could not read file: {exc}"}), 400
+
+    ws = wb.active
+    updated = 0
+    skipped = 0
+    errors  = []
+
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        raw = str(row[0]).strip() if row[0] is not None else ""
+        if not raw or raw.lower().startswith("small payments") or raw.upper() == "TOTAL":
+            continue
+
+        billy_raw = str(row[5]).strip() if row[5] is not None else ""
+        if not billy_raw or billy_raw.lower() == "none":
+            skipped += 1
+            continue
+
+        billy_key = billy_raw.lower()
+        if billy_key not in _ANSWER_MAP:
+            errors.append(f"Unknown answer '{billy_raw}' for '{raw}'")
+            skipped += 1
+            continue
+
+        trade_raw = str(row[6]).strip() if row[6] is not None else ""
+        if trade_raw.lower() == "none":
+            trade_raw = ""
+
+        existing    = cls_by_raw.get(raw, {})
+        vendor_id   = existing.get("vendor_id", "") or ""
+        vendor_name = existing.get("vendor_name", "") or ""
+        match_type  = existing.get("match_type", "") or ""
+        old_trade   = existing.get("trade", "") or ""
+
+        if billy_key == "sub":
+            if vendor_id and vendor_name:
+                # Confirm the CCS match (covers both likely and possible cases)
+                new_group  = "ccs_vendor"
+                match_type = match_type or "manual"
+            else:
+                new_group   = "likely_sub"
+                vendor_id   = ""
+                vendor_name = ""
+                match_type  = ""
+        else:
+            new_group   = _ANSWER_MAP[billy_key]
+            vendor_id   = ""
+            vendor_name = ""
+            match_type  = ""
+
+        _astore.upsert_payee_classification(
+            audit_id=audit_id,
+            client_id=client_id,
+            payee_raw=raw,
+            vendor_id=vendor_id,
+            vendor_name=vendor_name,
+            match_type=match_type,
+            payee_group=new_group,
+            trade=trade_raw if trade_raw else old_trade,
+            is_supplier_only=existing.get("is_supplier_only", 0),
+            exclude_reason=existing.get("exclude_reason", ""),
+            confirmed=1,
+        )
+
+        _astore.save_to_library(
+            client_id=client_id,
+            payee_raw=raw,
+            suggested_group=new_group,
+            source="manual",
+            confirmed=1,
+        )
+
+        if new_group == "ccs_vendor" and vendor_id and vendor_name:
+            _astore.upsert_alias(
+                client_id=client_id,
+                payee_raw=raw,
+                vendor_id=vendor_id,
+                vendor_name=vendor_name,
+                confirmed=1,
+            )
+
+        updated += 1
+
+    return jsonify({
+        "ok":      True,
+        "updated": updated,
+        "skipped": skipped,
+        "errors":  errors[:5],
+    })
+
+
 @app.route("/audits/<audit_id>/analysis")
 @login_required
 def audit_analysis(audit_id):
@@ -7397,6 +7701,312 @@ def audit_checklist(audit_id):
         "total_count": total_count,
         "next_step":   next_step,
     })
+
+
+# ── Client payee review ────────────────────────────────────────────────────────
+
+# Maps client answer text → internal payee_group
+# "Subcontractor" → likely_sub (not ccs_vendor; staff confirms CCS link separately)
+_CLIENT_REVIEW_GROUP = {
+    "Subcontractor":    "likely_sub",
+    "Supplier":         "supplier",
+    "Owner or payroll": "owner_payroll",
+    "Something else":   "not_sub",
+}
+
+REVIEW_COVERAGE_THRESHOLD = 0.95   # walk payees until this % of dollars is covered
+
+
+def _payees_for_review(audit_id: str, start_date: str, end_date: str):
+    """Return (main_payees, small_count, grand_total) where main_payees covers REVIEW_COVERAGE_THRESHOLD of dollars."""
+    pay_summary = _astore.get_payee_summary(audit_id, start_date, end_date)
+    pay_summary.sort(key=lambda p: -float(p["total_amount"] or 0))
+    grand_total = sum(float(p["total_amount"] or 0) for p in pay_summary)
+    target = grand_total * REVIEW_COVERAGE_THRESHOLD
+    main, running = [], 0.0
+    for p in pay_summary:
+        if running >= target and running > 0:
+            break
+        main.append(p)
+        running += float(p["total_amount"] or 0)
+    return main, len(pay_summary) - len(main), grand_total
+
+
+def _at_esc(s: str) -> str:
+    """Escape a string for use inside an Airtable formula single-quoted string."""
+    return str(s).replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _create_review_token(audit_id: str, client_id: str, ttl_days: int = 14) -> str:
+    """Create a new review token in Airtable and return the token string."""
+    import secrets as _sec
+    token = _sec.token_urlsafe(32)
+    now = int(time.time())
+    _api().table(clean_base_id(config.AIRTABLE_BASE_ID), AUDIT_REVIEW_TOKENS_TABLE_ID).create({
+        "Token":      token,
+        "Audit ID":   audit_id,
+        "Client ID":  client_id,
+        "Created At": now,
+        "Expires At": now + ttl_days * 86400,
+    })
+    return token
+
+
+def _get_review_token(token: str) -> dict | None:
+    """Fetch a review token record from Airtable. Returns a normalised dict or None."""
+    try:
+        recs = _api().table(clean_base_id(config.AIRTABLE_BASE_ID), AUDIT_REVIEW_TOKENS_TABLE_ID).all(
+            formula=f"{{Token}}='{_at_esc(token)}'"
+        )
+    except Exception:
+        return None
+    if not recs:
+        return None
+    f = recs[0]["fields"]
+    return {
+        "token":      f.get("Token", ""),
+        "audit_id":   f.get("Audit ID", ""),
+        "client_id":  f.get("Client ID", ""),
+        "created_at": f.get("Created At", 0),
+        "expires_at": f.get("Expires At", 0),
+    }
+
+
+def _get_active_review_token_for_audit(audit_id: str) -> dict | None:
+    """Return the most recent non-expired token for an audit, or None."""
+    try:
+        recs = _api().table(clean_base_id(config.AIRTABLE_BASE_ID), AUDIT_REVIEW_TOKENS_TABLE_ID).all(
+            formula=f"{{Audit ID}}='{_at_esc(audit_id)}'"
+        )
+    except Exception:
+        return None
+    now = int(time.time())
+    active = [r for r in recs if r["fields"].get("Expires At", 0) > now]
+    if not active:
+        return None
+    active.sort(key=lambda r: r["fields"].get("Created At", 0), reverse=True)
+    f = active[0]["fields"]
+    return {
+        "token":      f.get("Token", ""),
+        "audit_id":   f.get("Audit ID", ""),
+        "client_id":  f.get("Client ID", ""),
+        "created_at": f.get("Created At", 0),
+        "expires_at": f.get("Expires At", 0),
+    }
+
+
+def _fetch_client_reviews_for_audit(client_id: str) -> dict:
+    """Fetch Payee Reviews from Airtable for a client. Returns {payee_raw: record_dict}."""
+    try:
+        base_id = clean_base_id(config.AIRTABLE_BASE_ID)
+        recs = _api().table(base_id, PAYEE_REVIEWS_TABLE_ID).all(
+            formula=f"{{Client ID}}='{_at_esc(client_id)}'"
+        )
+        return {
+            r["fields"].get("Payee Name", ""): r
+            for r in recs
+            if r["fields"].get("Payee Name")
+        }
+    except Exception as exc:
+        app.logger.warning("_fetch_client_reviews_for_audit(%s): %s", client_id, exc)
+        return {}
+
+
+def _upsert_payee_review(client_id: str, payee_raw: str, answer: str,
+                          custom_answer: str, audit_id: str, token: str) -> None:
+    """Create or update one Payee Review record in Airtable."""
+    from datetime import datetime, timezone
+    base_id = clean_base_id(config.AIRTABLE_BASE_ID)
+    tbl = _api().table(base_id, PAYEE_REVIEWS_TABLE_ID)
+    formula = (
+        f"AND({{Client ID}}='{_at_esc(client_id)}',"
+        f"{{Payee Name}}='{_at_esc(payee_raw)}')"
+    )
+    fields = {
+        "Payee Name":    payee_raw,
+        "Client ID":     client_id,
+        "Answer":        answer,
+        "Custom Answer": custom_answer or "",
+        "Audit ID":      audit_id,
+        "Token":         token,
+        "Reviewed At":   datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+    }
+    existing = tbl.first(formula=formula)
+    if existing:
+        tbl.update(existing["id"], fields)
+    else:
+        tbl.create(fields)
+
+
+@app.route("/audits/<audit_id>/review-link", methods=["POST"])
+@login_required
+@csrf_protect
+def audit_generate_review_link(audit_id):
+    """Return (or create) a client review link for this audit."""
+    from flask import jsonify
+    audit = _astore.get_audit(audit_id)
+    if not audit:
+        return jsonify({"ok": False, "error": "Not found"}), 404
+
+    existing = _get_active_review_token_for_audit(audit_id)
+    if not existing:
+        token_str = _create_review_token(audit_id, audit["client_id"])
+    else:
+        token_str = existing["token"]
+
+    url = request.url_root.rstrip("/") + url_for("client_review_page", token=token_str)
+    return jsonify({"ok": True, "url": url, "token": token_str})
+
+
+@app.route("/audits/<audit_id>/sync-client-reviews", methods=["POST"])
+@login_required
+@csrf_protect
+def audit_sync_client_reviews(audit_id):
+    """Pull Airtable Payee Reviews, apply to classifications, update payee library."""
+    from flask import jsonify
+    audit = _astore.get_audit(audit_id)
+    if not audit:
+        return jsonify({"ok": False, "error": "Not found"}), 404
+
+    client_id = audit["client_id"]
+    reviews = _fetch_client_reviews_for_audit(client_id)
+
+    applied = 0
+    for payee_raw, rec in reviews.items():
+        answer = rec["fields"].get("Answer", "")
+        custom = rec["fields"].get("Custom Answer", "")
+        new_group = _CLIENT_REVIEW_GROUP.get(answer)
+        if not new_group:
+            continue
+
+        existing = _astore.get_payee_classification(audit_id, payee_raw)
+        # Only apply if not already manually confirmed by staff
+        if existing and existing.get("confirmed") and existing.get("match_type") not in ("", "library", "client_review"):
+            continue
+
+        note = custom if answer == "Something else" and custom else ""
+        _astore.upsert_payee_classification(
+            audit_id=audit_id,
+            client_id=client_id,
+            payee_raw=payee_raw,
+            vendor_id=existing.get("vendor_id", "") if existing else "",
+            vendor_name=existing.get("vendor_name", "") if existing else "",
+            match_type="client_review",
+            payee_group=new_group,
+            trade=existing.get("trade", "") if existing else "",
+            exclude_reason=note,
+            confirmed=1,
+        )
+        _astore.save_to_library(
+            client_id=client_id,
+            payee_raw=payee_raw,
+            suggested_group=new_group,
+            source="client_review",
+            confirmed=1,
+        )
+        applied += 1
+
+    return jsonify({"ok": True, "applied": applied, "total": len(reviews)})
+
+
+@app.route("/review/<token>")
+def client_review_page(token):
+    """Public client review page — no login required."""
+    rec = _get_review_token(token)
+    if not rec:
+        abort(404)
+    if rec["expires_at"] < time.time():
+        return render_template("client_review.html", expired=True, token=token), 410
+
+    audit = _astore.get_audit(rec["audit_id"])
+    if not audit:
+        abort(404)
+
+    return render_template("client_review.html", expired=False, token=token,
+                           client_name=audit.get("client_name", ""))
+
+
+@app.route("/review/<token>/data")
+def client_review_data(token):
+    """Return the payee list and existing answers for a review session."""
+    from flask import jsonify
+
+    rec = _get_review_token(token)
+    if not rec or rec["expires_at"] < time.time():
+        return jsonify({"ok": False, "error": "Link expired or invalid"}), 410
+
+    audit = _astore.get_audit(rec["audit_id"])
+    if not audit:
+        return jsonify({"ok": False, "error": "Audit not found"}), 404
+
+    main_payees, small_count, grand_total = _payees_for_review(
+        rec["audit_id"], audit["start_date"], audit["end_date"]
+    )
+
+    existing = _fetch_client_reviews_for_audit(rec["client_id"])
+
+    payees_out = [
+        {
+            "payee_raw":  p["payee_raw"],
+            "total_paid": round(float(p["total_amount"] or 0), 2),
+            "txn_count":  p["txn_count"],
+        }
+        for p in main_payees
+    ]
+
+    answers_out = {
+        name: {
+            "answer":        r["fields"].get("Answer", ""),
+            "custom_answer": r["fields"].get("Custom Answer", ""),
+        }
+        for name, r in existing.items()
+    }
+
+    return jsonify({
+        "ok":              True,
+        "client_name":     audit.get("client_name", ""),
+        "audit_id":        rec["audit_id"],
+        "payees":          payees_out,
+        "small_count":     small_count,
+        "grand_total":     round(grand_total, 2),
+        "existing_answers": answers_out,
+        "expires_at":      int(rec["expires_at"]),
+    })
+
+
+@app.route("/review/<token>/answer", methods=["POST"])
+def client_review_answer(token):
+    """Save one payee answer from the client review page."""
+    from flask import jsonify
+
+    rec = _get_review_token(token)
+    if not rec or rec["expires_at"] < time.time():
+        return jsonify({"ok": False, "error": "Link expired or invalid"}), 410
+
+    data = request.get_json(force=True) or {}
+    payee_raw     = (data.get("payee_raw") or "").strip()
+    answer        = (data.get("answer") or "").strip()
+    custom_answer = (data.get("custom_answer") or "").strip()
+
+    if not payee_raw:
+        return jsonify({"ok": False, "error": "payee_raw required"}), 400
+    if answer not in _CLIENT_REVIEW_GROUP:
+        return jsonify({"ok": False, "error": f"Invalid answer: {answer!r}"}), 400
+
+    try:
+        _upsert_payee_review(
+            client_id=rec["client_id"],
+            payee_raw=payee_raw,
+            answer=answer,
+            custom_answer=custom_answer,
+            audit_id=rec["audit_id"],
+            token=token,
+        )
+    except Exception as exc:
+        app.logger.error("client_review_answer error: %s", exc)
+        return jsonify({"ok": False, "error": "Save failed"}), 500
+
+    return jsonify({"ok": True})
 
 
 # ── Marketing ────────────────────────────────────────────────────────────────
