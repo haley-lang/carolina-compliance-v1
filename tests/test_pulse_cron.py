@@ -143,7 +143,10 @@ def test_pipeline_exception_gives_error_not_no_activity(pc):
 
 def test_pipeline_counts_known_statuses(pc):
     """Records with known Processing Status values are counted in correct buckets."""
-    def _rec(status, created="2026-11-11T12:00:00.000Z"):  # 1 day old, well under thresholds
+    from datetime import datetime, timezone, timedelta
+    recent = (datetime.now(tz=timezone.utc) - timedelta(hours=12)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    def _rec(status, created=recent):  # 12 hours old, well under 3-day warn threshold
         return {
             "id": "recXXX",
             "createdTime": created,
