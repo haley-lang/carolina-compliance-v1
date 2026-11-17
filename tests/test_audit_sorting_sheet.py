@@ -276,7 +276,9 @@ class TestSortingSheetImport:
         cls = tmp_db.get_payee_classification(aid, "Bob's Drywall")
         assert cls["payee_group"] == "likely_sub"
 
-    def test_sub_with_possible_match_becomes_ccs_vendor(self, authed_client, tmp_db):
+    def test_sub_with_possible_match_stays_likely_sub(self, authed_client, tmp_db):
+        """Billy's Sub answer on a possible/likely match → likely_sub, not ccs_vendor.
+        Only an exact system match (Haley must confirm) promotes to ccs_vendor."""
         aid = _make_audit(tmp_db)
         _insert_payments(tmp_db, aid, [("Acme Roofing", 7000.0, "2025-01-01")])
         tmp_db.upsert_payee_classification(
@@ -294,6 +296,28 @@ class TestSortingSheetImport:
         )
         assert resp.get_json()["ok"] is True
         cls = tmp_db.get_payee_classification(aid, "Acme Roofing")
+        assert cls["payee_group"] == "likely_sub"
+        assert cls["vendor_id"] == "recV1"  # vendor suggestion retained
+
+    def test_sub_with_exact_match_becomes_ccs_vendor(self, authed_client, tmp_db):
+        """Billy's Sub answer on an exact system match → ccs_vendor."""
+        aid = _make_audit(tmp_db)
+        _insert_payments(tmp_db, aid, [("Acme Roofing LLC", 7000.0, "2025-01-01")])
+        tmp_db.upsert_payee_classification(
+            audit_id=aid, client_id="recCLIENT1", payee_raw="Acme Roofing LLC",
+            payee_group="ccs_vendor", match_type="exact",
+            vendor_id="recV1", vendor_name="Acme Roofing LLC",
+            confirmed=0,
+        )
+        xlsx = self._make_xlsx([("Acme Roofing LLC", "Sub", "")])
+        resp = authed_client.post(
+            f"/audits/{aid}/payees/import-sorting-sheet",
+            data={"csrf_token": "test_csrf_32chars_paddingpadding0",
+                  "file": (xlsx, "sort.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+            content_type="multipart/form-data",
+        )
+        assert resp.get_json()["ok"] is True
+        cls = tmp_db.get_payee_classification(aid, "Acme Roofing LLC")
         assert cls["payee_group"] == "ccs_vendor"
         assert cls["vendor_id"] == "recV1"
 

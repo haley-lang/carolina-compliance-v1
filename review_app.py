@@ -5863,6 +5863,7 @@ def _fuzzy_match_vendors(
 
     best_id    = ""
     best_name  = ""
+    best_vnorm = ""
     best_score = 0
 
     for v in vendor_list:
@@ -5874,11 +5875,16 @@ def _fuzzy_match_vendors(
             best_score = score
             best_id    = v["id"]
             best_name  = v["name"]
+            best_vnorm = vnorm
 
     if best_score >= 90:
         return best_id, best_name, "exact", "ccs_vendor"
     if best_score >= 70:
-        return best_id, best_name, "likely", "ccs_vendor"
+        # Secondary check: require a minimum direct string similarity to guard against
+        # token_set_ratio false positives where short generic tokens (e.g. "insulating inc")
+        # dominate the score for otherwise unrelated company names.
+        if _fuzz.ratio(pnorm, best_vnorm) >= 35:
+            return best_id, best_name, "likely", "likely_sub"
     if best_score >= 50:
         return best_id, best_name, "possible", "unclear"
 
@@ -6924,9 +6930,12 @@ def audit_import_sorting_sheet(audit_id):
         old_trade   = existing.get("trade", "") or ""
 
         if billy_key == "sub":
-            if vendor_id and vendor_name:
-                # Confirm the CCS match (covers both likely and possible cases)
+            if vendor_id and vendor_name and match_type == "exact":
+                # Only an exact system match becomes ccs_vendor; Haley still confirms likely/possible
                 new_group  = "ccs_vendor"
+            elif vendor_id and vendor_name:
+                # likely or possible suggestion — retain vendor hint, but wait for Haley to confirm
+                new_group  = "likely_sub"
                 match_type = match_type or "manual"
             else:
                 new_group   = "likely_sub"
