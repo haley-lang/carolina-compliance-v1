@@ -6684,6 +6684,75 @@ def audit_payees_update_one(audit_id):
     return jsonify({"ok": True})
 
 
+@app.route("/audits/<audit_id>/vendors")
+@login_required
+def audit_vendors(audit_id):
+    """Return the full vendor list for this audit's client (for the Set CCS match picker)."""
+    from flask import jsonify
+    audit = _astore.get_audit(audit_id)
+    if not audit:
+        return jsonify({"ok": False, "error": "Not found"}), 404
+    vendors = _get_vendor_list_for_client(audit["client_id"])
+    vendors.sort(key=lambda v: v["name"].lower())
+    return jsonify({"ok": True, "vendors": vendors})
+
+
+@app.route("/audits/<audit_id>/payees/clear-match", methods=["POST"])
+@login_required
+@csrf_protect
+def audit_payees_clear_match(audit_id):
+    """Delete the saved alias for a payee and re-run fuzzy matching without it."""
+    from flask import jsonify
+    audit = _astore.get_audit(audit_id)
+    if not audit:
+        return jsonify({"ok": False, "error": "Not found"}), 404
+    data = request.get_json(force=True) or {}
+    payee_raw = (data.get("payee_raw") or "").strip()
+    if not payee_raw:
+        return jsonify({"ok": False, "error": "payee_raw required"}), 400
+    client_id = audit["client_id"]
+    _astore.delete_alias(client_id, payee_raw)
+    vendor_list = _get_vendor_list_for_client(client_id)
+    vendor_id, vendor_name, match_type, payee_group = _fuzzy_match_vendors(
+        payee_raw, vendor_list, client_id,
+    )
+    _astore.upsert_payee_classification(
+        audit_id=audit_id, client_id=client_id, payee_raw=payee_raw,
+        vendor_id=vendor_id, vendor_name=vendor_name,
+        match_type=match_type, payee_group=payee_group, confirmed=0,
+    )
+    return jsonify({"ok": True, "payee_group": payee_group, "match_type": match_type,
+                    "vendor_id": vendor_id, "vendor_name": vendor_name})
+
+
+@app.route("/audits/<audit_id>/payees/set-match", methods=["POST"])
+@login_required
+@csrf_protect
+def audit_payees_set_match(audit_id):
+    """Save a confirmed alias and promote the payee to CCS sub (exact match)."""
+    from flask import jsonify
+    audit = _astore.get_audit(audit_id)
+    if not audit:
+        return jsonify({"ok": False, "error": "Not found"}), 404
+    data = request.get_json(force=True) or {}
+    payee_raw   = (data.get("payee_raw") or "").strip()
+    vendor_id   = (data.get("vendor_id") or "").strip()
+    vendor_name = (data.get("vendor_name") or "").strip()
+    if not payee_raw or not vendor_id or not vendor_name:
+        return jsonify({"ok": False, "error": "payee_raw, vendor_id, and vendor_name required"}), 400
+    client_id = audit["client_id"]
+    _astore.upsert_alias(client_id=client_id, payee_raw=payee_raw,
+                         vendor_id=vendor_id, vendor_name=vendor_name, confirmed=1)
+    _astore.upsert_payee_classification(
+        audit_id=audit_id, client_id=client_id, payee_raw=payee_raw,
+        vendor_id=vendor_id, vendor_name=vendor_name,
+        match_type="exact", payee_group="ccs_vendor", confirmed=1,
+    )
+    _astore.save_to_library(client_id=client_id, payee_raw=payee_raw,
+                            suggested_group="ccs_vendor", source="manual", confirmed=1)
+    return jsonify({"ok": True})
+
+
 # ── Payee sorting sheet ───────────────────────────────────────────────────────
 
 @app.route("/audits/<audit_id>/payees/sorting-sheet")

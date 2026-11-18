@@ -745,6 +745,8 @@ function renderPayees(payees, groups) {
           '<option value="supplier">Supplier</option>' +
           '<option value="owner_payroll">Owner / payroll</option>' +
           '<option value="not_sub">Not a sub</option>' +
+          '<option value="__clear_match__">Clear CCS match</option>' +
+          '<option value="__set_match__">Set CCS match…</option>' +
         '</select>' +
       '</td>' +
       '</tr>';
@@ -762,10 +764,72 @@ window.filterPayees = filterPayees;
 
 function updateGroup(payeeRaw, group) {
   if (!group) return;
+  if (group === '__clear_match__') {
+    clearMatch(payeeRaw);
+    return;
+  }
+  if (group === '__set_match__') {
+    openVendorPicker(payeeRaw);
+    return;
+  }
   apiPost('/audits/' + AUDIT_ID + '/payees/update-one', {payee_raw: payeeRaw, payee_group: group})
     .then(function(){ loadPayees(); loadChecklistBar(); });
 }
 window.updateGroup = updateGroup;
+
+function clearMatch(payeeRaw) {
+  apiPost('/audits/' + AUDIT_ID + '/payees/clear-match', {payee_raw: payeeRaw})
+    .then(function(){ loadPayees(); loadChecklistBar(); });
+}
+window.clearMatch = clearMatch;
+
+function openVendorPicker(payeeRaw) {
+  var modal = document.getElementById('vendor-picker-modal');
+  document.getElementById('vendor-picker-payee').textContent = payeeRaw;
+  document.getElementById('vendor-picker-payee').dataset.payeeRaw = payeeRaw;
+  document.getElementById('vendor-picker-search').value = '';
+  document.getElementById('vendor-picker-list').innerHTML = '<li style="color:var(--secondary)">Loading…</li>';
+  modal.style.display = 'flex';
+  fetch('/audits/' + AUDIT_ID + '/vendors')
+    .then(function(r){ return r.json(); })
+    .then(function(data) {
+      if (!data.ok) { alert('Could not load vendors: ' + (data.error||'unknown error')); return; }
+      window._vendorPickerList = data.vendors || [];
+      renderVendorPickerList('');
+    });
+}
+window.openVendorPicker = openVendorPicker;
+
+function renderVendorPickerList(filter) {
+  var vendors = window._vendorPickerList || [];
+  var fl = filter.toLowerCase();
+  var filtered = fl ? vendors.filter(function(v){ return v.name.toLowerCase().indexOf(fl) !== -1; }) : vendors;
+  var ul = document.getElementById('vendor-picker-list');
+  if (!filtered.length) {
+    ul.innerHTML = '<li style="color:var(--secondary);padding:8px">No matches</li>';
+    return;
+  }
+  ul.innerHTML = filtered.map(function(v) {
+    return '<li data-vendor-id="' + esc(v.id) + '" data-vendor-name="' + esc(v.name) + '" ' +
+      'onclick="selectVendorFromPicker(this)" ' +
+      'style="padding:7px 10px;cursor:pointer;border-bottom:1px solid var(--border)">' +
+      esc(v.name) + '</li>';
+  }).join('');
+}
+window.renderVendorPickerList = renderVendorPickerList;
+
+function selectVendorFromPicker(li) {
+  var payeeRaw = document.getElementById('vendor-picker-payee').dataset.payeeRaw;
+  var vendorId = li.dataset.vendorId;
+  var vendorName = li.dataset.vendorName;
+  document.getElementById('vendor-picker-modal').style.display = 'none';
+  apiPost('/audits/' + AUDIT_ID + '/payees/set-match', {
+    payee_raw: payeeRaw,
+    vendor_id: vendorId,
+    vendor_name: vendorName,
+  }).then(function(){ loadPayees(); loadChecklistBar(); });
+}
+window.selectVendorFromPicker = selectVendorFromPicker;
 
 function updateTrade(payeeRaw, trade) {
   apiPost('/audits/' + AUDIT_ID + '/payees/update-one', {payee_raw: payeeRaw, trade: trade});
@@ -1313,5 +1377,25 @@ document.addEventListener('DOMContentLoaded', function () {
 
 })();
 </script>
+
+<!-- Vendor picker modal -->
+<div id="vendor-picker-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:9999;align-items:center;justify-content:center">
+  <div style="background:#fff;border-radius:10px;width:min(480px,92vw);max-height:80vh;display:flex;flex-direction:column;box-shadow:0 8px 32px rgba(0,0,0,0.22);">
+    <div style="padding:16px 20px 10px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+      <div>
+        <div style="font-weight:600;font-size:1rem">Set CCS match</div>
+        <div style="font-size:0.8rem;color:var(--secondary);margin-top:2px">Payee: <strong id="vendor-picker-payee"></strong></div>
+      </div>
+      <button onclick="document.getElementById('vendor-picker-modal').style.display='none'" style="background:none;border:none;font-size:1.3rem;cursor:pointer;color:var(--secondary)">&times;</button>
+    </div>
+    <div style="padding:10px 16px">
+      <input id="vendor-picker-search" type="text" placeholder="Search vendors…"
+        oninput="renderVendorPickerList(this.value)"
+        style="width:100%;box-sizing:border-box;padding:7px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:0.9rem">
+    </div>
+    <ul id="vendor-picker-list" style="list-style:none;margin:0;padding:0;overflow-y:auto;flex:1"></ul>
+  </div>
+</div>
+
 </body>
 </html>

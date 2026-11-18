@@ -440,6 +440,14 @@ def get_alias(client_id: str, payee_raw: str) -> dict | None:
     return dict(row) if row else None
 
 
+def delete_alias(client_id: str, payee_raw: str) -> None:
+    with _conn() as conn:
+        conn.execute(
+            "DELETE FROM payee_aliases WHERE client_id = ? AND payee_raw = ?",
+            (client_id, payee_raw),
+        )
+
+
 def upsert_alias(client_id: str, payee_raw: str, vendor_id: str,
                  vendor_name: str, confirmed: int = 0) -> None:
     with _conn() as conn:
